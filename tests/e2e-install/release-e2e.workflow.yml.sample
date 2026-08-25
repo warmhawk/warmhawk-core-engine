@@ -1,0 +1,92 @@
+# Sample GitHub Actions workflow showing how tests/e2e-install/run.sh gets invoked from a real
+# release-gated pipeline. This is a `.sample` file, NOT under `.github/workflows/` — it is
+# reference material only, not a live workflow, and it is not registered/executed by anything in
+# this repo. Copy it into `.github/workflows/release-e2e.yml` (wire the real secrets referenced
+# below) when this test is actually promoted from "documented + implemented" to "wired into CI".
+#
+# Why release-gated, not merge-gated: this needs a real throwaway VM/CI runner with a real DNS A
+# record pointed at it (Let's Encrypt's HTTP-01 challenge has to actually resolve) — see
+# tests/e2e-install/README.md and the header comment in run.sh for the full reasoning.
+#
+# Self-contained: brings up and tears down the scratch stack with plain ssh/scp and generates
+# throwaway secrets directly on the runner — no external composite-action dependency (this repo
+# is public, so it must not depend on any private, internally-owned template repo).
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  install-flow-e2e:
+    runs-on: ubuntu-latest
+    env:
+      SCRATCH_DOMAIN: ${{ vars.E2E_SCRATCH_DOMAIN }}       # e.g. e2e.warmhawk-scratch.example.com — real DNS, points at SCRATCH_HOST
+      SCRATCH_HOST: ${{ vars.E2E_SCRATCH_HOST }}           # the same host that DNS record resolves to
+      STACK_ID: release-e2e-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "$E2E_SCRATCH_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$SCRATCH_HOST" >> ~/.ssh/known_hosts
+        env:
+          E2E_SCRATCH_SSH_KEY: ${{ secrets.E2E_SCRATCH_SSH_KEY }}
+
+      # Ships this checkout to the scratch host over SSH and generates throwaway secrets directly
+      # on the runner (never transferring real ones) for the stack's .env file. docker-compose.yml
+      # + docker-compose.e2e-install.yml come up together, so Mailpit and the real product
+      # services share one Compose project/network — see run.sh's own comments on why that matters.
+      # host-port-vars only covers Mailpit's two ports; everything else install.sh itself needs
+      # (nginx 80/443) is hardcoded on purpose, matching what a real customer gets.
+      - name: Ship checkout and bring up the throwaway stack
+        id: stack
+        run: |
+          REMOTE_DIR="/tmp/${STACK_ID}"
+          echo "remote-dir=${REMOTE_DIR}" >> "$GITHUB_OUTPUT"
+          ssh "$SCRATCH_HOST" "mkdir -p ${REMOTE_DIR}"
+          rsync -az --exclude node_modules --exclude .git ./ "$SCRATCH_HOST:${REMOTE_DIR}/"
+          ssh "$SCRATCH_HOST" "cat > ${REMOTE_DIR}/.env" <<EOF
+          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          REDIS_PASSWORD=$(openssl rand -hex 24)
+          JWT_SECRET=$(openssl rand -hex 32)
+          MAILBOX_CREDENTIAL_KEY=$(openssl rand -hex 32)
+          NEXTJS_CALLBACK_SECRET=$(openssl rand -hex 24)
+          N8N_ENCRYPTION_KEY=$(openssl rand -hex 24)
+          MAILPIT_SMTP_TEST_PORT=${{ vars.E2E_MAILPIT_SMTP_TEST_PORT }}
+          MAILPIT_HTTP_TEST_PORT=${{ vars.E2E_MAILPIT_HTTP_TEST_PORT }}
+          EOF
+          ssh "$SCRATCH_HOST" "cd ${REMOTE_DIR} && docker compose -f docker-compose.yml -f docker-compose.e2e-install.yml --project-name ${STACK_ID} up -d"
+
+      # run.sh is plain bash, not an Actions step itself — it drives the scratch host over SSH
+      # using the same real secret this job already has.
+      - name: Run install-flow e2e test
+        run: bash tests/e2e-install/run.sh
+        env:
+          E2E_DOMAIN: ${{ env.SCRATCH_DOMAIN }}
+          E2E_SSH_HOST: ${{ env.SCRATCH_HOST }}
+          E2E_SSH_KEY: ${{ secrets.E2E_SCRATCH_SSH_KEY }}
+          E2E_REMOTE_DIR: ${{ steps.stack.outputs.remote-dir }}
+          MAILPIT_HTTP_HOST: ${{ env.SCRATCH_HOST }}
+          MAILPIT_SMTP_HOST: ${{ env.SCRATCH_HOST }}
+
+      # Redundant with run.sh's own internal wait_for_http()-style polling (which runs THROUGH the
+      # SSH-driven session), but exercised here directly from the runner's own public-internet
+      # vantage point — an independent outer check that the exact same URL a real customer's
+      # browser would hit is actually reachable, not just reachable from wherever run.sh polled it.
+      - name: Confirm the public URL is reachable
+        run: |
+          for i in $(seq 1 30); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "https://${SCRATCH_DOMAIN}/health" || true)
+            [ "$status" = "200" ] && exit 0
+            sleep 1
+          done
+          echo "https://${SCRATCH_DOMAIN}/health never returned 200"
+          exit 1
+
+      - name: Tear down the scratch stack
+        if: always()
+        run: |
+          ssh "$SCRATCH_HOST" "cd ${{ steps.stack.outputs.remote-dir }} && docker compose --project-name ${STACK_ID} down -v; rm -rf ${{ steps.stack.outputs.remote-dir }}"

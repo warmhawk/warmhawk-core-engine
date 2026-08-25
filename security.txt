@@ -1,0 +1,17 @@
+Contact: mailto:security@warmhawk.com
+Expires: 2027-08-21T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://warmhawk.com/.well-known/security.txt
+Policy: https://warmhawk.com/security
+
+# WarmHawk — Responsible Disclosure (RFC 9116)
+#
+# We take security reports seriously and will acknowledge a good-faith report within the same
+# 1-business-day window as our Tier 1 support SLA (4 business hours for anything that looks
+# actively exploited). We will not pursue legal action against a good-faith researcher who:
+#   - reports a vulnerability privately to security@warmhawk.com before any public disclosure,
+#   - avoids privacy violations, data destruction, or service interruption while testing,
+#   - does not access or modify another customer's self-hosted instance or data.
+#
+# This file is duplicated at the root of the warmhawk-core-engine repository for anyone auditing
+# the open-core codebase directly, in addition to https://warmhawk.com/.well-known/security.txt.

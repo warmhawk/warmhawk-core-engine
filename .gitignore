@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+coverage/
+.DS_Store
+*.log
+npm-debug.log*
+.turbo/
+generated/
+prisma/generated/
+backups/
+.vscode/
+.idea/

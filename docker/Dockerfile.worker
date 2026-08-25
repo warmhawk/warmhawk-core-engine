@@ -1,0 +1,27 @@
+# WarmHawk BullMQ dispatch worker — same non-root, digest-pinned pattern as Dockerfile.api;
+# shares the same build stage shape since both apps live in one npm workspace.
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
+WORKDIR /repo
+COPY package.json package-lock.json* ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/tier-config/package.json packages/tier-config/package.json
+RUN npm install --workspaces --include-workspace-root
+COPY . .
+RUN npm run db:generate
+
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
+ENV NODE_ENV=production
+RUN apk add --no-cache openssl && addgroup -S app && adduser -S app -G app
+WORKDIR /repo
+
+COPY --from=build --chown=app:app /repo/node_modules ./node_modules
+COPY --from=build --chown=app:app /repo/package.json ./package.json
+COPY --from=build --chown=app:app /repo/packages ./packages
+COPY --from=build --chown=app:app /repo/apps/worker ./apps/worker
+COPY --from=build --chown=app:app /repo/constants.ts ./constants.ts
+
+USER app
+WORKDIR /repo/apps/worker
+CMD ["npx", "tsx", "src/index.ts"]

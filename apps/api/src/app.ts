@@ -1,0 +1,133 @@
+/**
+ * WarmHawk Core Engine — Fastify app assembly.
+ *
+ * JUDGMENT CALL (documented in this repo's build report): the porting brief assumed
+ * outreach-infra's `apps/api/src/app.ts` was Fastify. Reading the actual file showed it is
+ * Express (helmet/cors/morgan/express.json, Express Router mounts). This repo builds fresh on
+ * Fastify per the EXPLICIT instructions elsewhere in the brief (`@fastify/rate-limit` named
+ * specifically for every public-facing endpoint) — the ROUTE LOGIC is ported faithfully from the
+ * Express originals; only the framework wiring (plugin registration, handler signatures) is
+ * translated to Fastify's shape. `helmet()` -> `@fastify/helmet`, Express CORS -> `@fastify/cors`,
+ * `express.json()` -> Fastify's built-in JSON body parser, multer -> `@fastify/multipart`.
+ */
+import Fastify, { type FastifyInstance } from 'fastify';
+import helmet from '@fastify/helmet';
+import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
+import multipart from '@fastify/multipart';
+
+import { domainsRoutes } from './routes/domains';
+import { oauthCallbackRoutes } from './routes/oauthCallback';
+import { imapRoutes } from './routes/imap';
+import { leadsRoutes } from './routes/leads';
+import { webhookLeadsRoutes } from './routes/webhookLeads';
+import { aiProvidersRoutes } from './routes/aiProviders';
+import { internalAiRoutes } from './routes/internalAi';
+import { internalMailRoutes } from './routes/internalMail';
+import { internalMailboxesRoutes } from './routes/internalMailboxes';
+import { internalDomainsRoutes } from './routes/internalDomains';
+import { internalSeedPlacementRoutes } from './routes/internalSeedPlacement';
+import { internalRepliesRoutes } from './routes/internalReplies';
+import { repliesRoutes } from './routes/replies';
+import { publicDomainCheckRoutes } from './routes/publicDomainCheck';
+import { authRoutes } from './routes/auth';
+import { instanceSettingsRoutes } from './routes/instanceSettings';
+import { campaignsRoutes } from './routes/campaigns';
+import { mailboxesRoutes } from './routes/mailboxes';
+import { queueRoutes } from './routes/queue';
+import { seedAccountsRoutes } from './routes/seedAccounts';
+
+export async function createApp(): Promise<FastifyInstance> {
+  const app = Fastify({
+    logger: process.env.NODE_ENV === 'test' ? false : { level: process.env.LOG_LEVEL || 'info' },
+  });
+
+  // Security headers (Phase 1 hardening — ported: outreach-infra's `helmet()` on the Express app).
+  await app.register(helmet, { global: true });
+
+  // CORS — same origin-gating intent as outreach-infra's `cors({ origin: WEB_APP_URL })`; the
+  // dashboard (warmhawk-enterprise-operator) is the only expected browser-side caller.
+  await app.register(cors, {
+    origin: process.env.DASHBOARD_APP_URL || 'http://localhost:4610',
+  });
+
+  // Global rate limiting default — per-route overrides below apply the specific limits named in
+  // the Guardrails section (webhook ingest, CSV import, license activation, login, public
+  // domain-check). This global default is a conservative floor for every other route.
+  await app.register(rateLimit, {
+    global: true,
+    max: 100,
+    timeWindow: '1 minute',
+  });
+
+  // Multipart file upload — CSV import (`POST /leads/import`), memory storage, size-capped
+  // (see constants.ts MAX_CSV_FILE_BYTES), mirroring outreach-infra's multer memory-storage config.
+  await app.register(multipart, {
+    limits: {
+      fileSize: 10 * 1024 * 1024, // MAX_CSV_FILE_BYTES — kept in sync manually; see constants.ts
+      files: 1,
+    },
+  });
+
+  // Unversioned, infra-facing — Docker healthcheck / Uptime Kuma probe this directly and must not
+  // need to know an API version, same convention as every other health endpoint in this stack.
+  app.get('/health', async () => ({ status: 'ok' }));
+
+  // Public API surface, versioned per spec (`/v1/...`). Hard cutover, not a transitional
+  // dual-mount: nothing is live in production yet (no external consumer exists outside this same
+  // repo family — the operator dashboard, n8n workflows, and the e2e-install script are all
+  // updated in this same effort), so there's no bare-path deprecation window to preserve.
+  await app.register(
+    async (v1) => {
+      await v1.register(authRoutes, { prefix: '/auth' });
+      await v1.register(instanceSettingsRoutes, { prefix: '/instance-settings' });
+      await v1.register(domainsRoutes, { prefix: '/domains' });
+      await v1.register(oauthCallbackRoutes, { prefix: '/oauth' });
+      await v1.register(leadsRoutes, { prefix: '/leads' });
+      // Path-shape fix: spec names this `POST /v1/leads/webhook`, not `/webhooks/leads`. Mounted
+      // as its own plugin under `/leads/webhook` (distinct from `leadsRoutes`' `/leads` prefix
+      // above) — Fastify's router is a trie, not literal-prefix matching, so two plugins can share
+      // a path segment without colliding as long as no two routes resolve to the same full path.
+      await v1.register(webhookLeadsRoutes, { prefix: '/leads/webhook' });
+      await v1.register(campaignsRoutes, { prefix: '/campaigns' });
+      await v1.register(mailboxesRoutes, { prefix: '/mailboxes' });
+      await v1.register(queueRoutes, { prefix: '/queue' });
+      await v1.register(aiProvidersRoutes, { prefix: '/ai-providers' });
+      await v1.register(repliesRoutes, { prefix: '/replies' });
+      await v1.register(seedAccountsRoutes, { prefix: '/seed-accounts' });
+      // NOTE: this repo no longer registers a Stripe webhook / license-issuance route (V12 fix —
+      // that logic was built here by mistake during a parallel-agent build; Stripe/RSA license
+      // issuance now lives solely in warmhawk-site, the one piece of billing infra WarmHawk
+      // operates centrally; warmhawk-enterprise-operator is the sole license VERIFIER). Tier 0
+      // (this engine) carries no license gate at all, per the spec.
+      await v1.register(publicDomainCheckRoutes, { prefix: '/public' });
+    },
+    { prefix: '/v1' },
+  );
+
+  // Internal-only routes — guarded by requireCallbackSecret AND, per the Containerization Model,
+  // reachable only over the internal Docker network (nginx never proxies these paths; there is
+  // no nginx location block for `/internal/*` anywhere in this repo's nginx config).
+  await app.register(internalAiRoutes, { prefix: '/internal/ai' });
+  await app.register(internalMailRoutes, { prefix: '/internal/mail' });
+  await app.register(internalMailboxesRoutes, { prefix: '/internal/mailboxes' });
+  await app.register(internalDomainsRoutes, { prefix: '/internal/domains' });
+  await app.register(internalSeedPlacementRoutes, { prefix: '/internal/seed-placement' });
+  await app.register(internalRepliesRoutes, { prefix: '/internal/replies' });
+  // Fix: imapRoutes was previously mounted under the public /v1 group despite every route in it
+  // being n8n-machine-only (guarded by requireCallbackSecret, never a public-client concern).
+  // nginx never actually had a `/v1/imap/` location block (see nginx.conf.template's explicit
+  // per-path allowlist), so this wasn't externally reachable — but it relied on that omission
+  // alone rather than living under `/internal/*` like every other machine-only route, one
+  // future nginx edit away from becoming exposed. Moved for the same reason
+  // `internalRepliesRoutes` above was split out of the actually-externally-reachable `/v1/replies`.
+  await app.register(imapRoutes, { prefix: '/internal/imap' });
+
+  app.setErrorHandler((error, _request, reply) => {
+    app.log.error(error);
+    const statusCode = error.statusCode ?? 500;
+    reply.status(statusCode).send({ error: error.message || 'Internal server error' });
+  });
+
+  return app;
+}
