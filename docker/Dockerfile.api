@@ -4,6 +4,12 @@
 # upstream image is rebuilt).
 FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
 WORKDIR /repo
+# Must match the runtime stage's `apk add openssl` below — `prisma generate` fingerprints the
+# OpenSSL present at generate-time to pick which query-engine binary to fetch (e.g.
+# linux-musl-openssl-3.0.x). Skipping this here made it fetch the plain "linux-musl" engine
+# instead, which then failed to load at runtime once the runtime stage's openssl (3.x) was
+# actually present — found running this image for the first time locally.
+RUN apk add --no-cache openssl
 COPY package.json package-lock.json* ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/worker/package.json apps/worker/package.json

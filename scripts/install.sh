@@ -26,6 +26,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$REPO_ROOT/.env"
+NGINX_TEMPLATE="$REPO_ROOT/nginx/nginx.conf.template"
+
+# Bug fix (DooD end-to-end install run, 2026-08-25): mirrors
+# warmhawk-enterprise-operator/scripts/install.sh's enable_tls_template() — nginx.conf.template
+# ships with the `listen 443 ssl` block commented out (see that file's own header comment for why:
+# nginx validates every ssl_certificate path at config-load time, so a cert that doesn't exist yet
+# crashes the whole process, not just that server block). Only ever called after certbot has
+# actually issued a cert. envsubst only runs at container START (the official nginx image's
+# docker-entrypoint hook), never on `nginx -s reload` — so enabling TLS always means a `restart`,
+# not a `reload`.
+enable_tls_template() {
+  if ! grep -q "Enabled by scripts/install.sh" "$NGINX_TEMPLATE" 2>/dev/null; then
+    log "nginx.conf.template already TLS-enabled — nothing to flip."
+    return 0
+  fi
+  awk '
+    index($0, "Enabled by scripts/install.sh") > 0 { found=1; next }
+    found { line=$0; sub(/^# ?/, "", line); print line; next }
+  ' "$NGINX_TEMPLATE" > "$NGINX_TEMPLATE.new"
+  mv "$NGINX_TEMPLATE.new" "$NGINX_TEMPLATE"
+  log "nginx.conf.template updated to enable the TLS server block."
+}
 
 DOMAIN=""
 RETRY_TLS=false
@@ -65,8 +87,10 @@ if [ "$RETRY_TLS" = true ]; then
   docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm certbot \
     certbot certonly --webroot -w /var/www/certbot -d "$WARMHAWK_DOMAIN" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" \
     || fail "certbot retry failed. Confirm DNS for ${WARMHAWK_DOMAIN} now resolves to this server, then re-run: ./scripts/install.sh --retry-tls"
-  docker compose -f "$REPO_ROOT/docker-compose.yml" exec nginx nginx -s reload
-  log "TLS issuance succeeded and nginx reloaded."
+  enable_tls_template
+  log "Restarting nginx so it re-renders its template (envsubst only runs at container start, never on reload)..."
+  docker compose -f "$REPO_ROOT/docker-compose.yml" restart nginx
+  log "TLS issuance succeeded and nginx restarted with TLS enabled."
   exit 0
 fi
 
@@ -114,7 +138,14 @@ fi
 log "Preflight checks passed (Docker present, ports 80/443 free)."
 
 # --- Secret generation (idempotent — only fill in what's missing) ------------------------------
-gen_secret() { openssl rand -base64 "$1" | tr -d '\n'; }
+# Bug fix (DooD end-to-end install run, 2026-08-25): -base64 output can (and did, ~75% of the
+# time by the base64 alphabet's own math) contain '/', '+', or other characters that are illegal
+# unescaped in a URL's userinfo component per RFC 3986. Every secret generated here gets embedded
+# directly into a connection string (DATABASE_URL, REDIS_URL) without any URL-encoding step, so a
+# generated password containing '/' broke ioredis's strict WHATWG URL parser outright — confirmed
+# live: apps/worker crash-looped forever on a freshly generated REDIS_PASSWORD containing '/'.
+# -hex reads the same number of random bytes (identical entropy) and is unconditionally URL-safe.
+gen_secret() { openssl rand -hex "$1" | tr -d '\n'; }
 
 : "${POSTGRES_PASSWORD:=$(gen_secret 32)}"
 : "${REDIS_PASSWORD:=$(gen_secret 32)}"
@@ -163,15 +194,17 @@ fi
 TLS_READY=false
 if [ "$SKIP_CERTBOT" = true ]; then
   [ -z "$CERT_PATH" ] || [ -z "$KEY_PATH" ] && fail "--skip-certbot requires both --cert-path and --key-path"
-  log "Skipping certbot (BYO-cert escape hatch) — mount ${CERT_PATH}/${KEY_PATH} into the nginx container per docs/backup-and-restore.md's sibling TLS doc."
+  log "Skipping certbot (BYO-cert escape hatch) — mount ${CERT_PATH}/${KEY_PATH} into the nginx container's /etc/letsencrypt/live/${DOMAIN}/ path per docs/backup-and-restore.md's sibling TLS doc, then re-run with --retry-tls to enable the TLS server block."
   TLS_READY=true
 else
   log "Requesting a Let's Encrypt certificate for ${DOMAIN} via certbot (webroot HTTP-01)..."
   if docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm certbot \
       certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}"; then
-    docker compose -f "$REPO_ROOT/docker-compose.yml" exec nginx nginx -s reload
+    enable_tls_template
+    log "Restarting nginx so it re-renders its template with TLS enabled (envsubst only runs at container start)..."
+    docker compose -f "$REPO_ROOT/docker-compose.yml" restart nginx
     TLS_READY=true
-    log "TLS certificate issued and nginx reloaded."
+    log "TLS certificate issued and nginx restarted with TLS enabled."
   else
     # Certbot failure degrades, never crashes — nginx stays up HTTP-only.
     log "WARNING: certbot TLS issuance failed. nginx remains up in HTTP-only mode."

@@ -19,8 +19,15 @@
 // instance, not this engine's. See this repo's build report for the explicit judgment call.
 
 generator client {
-  provider = "prisma-client-js"
-  output   = "../generated/client"
+  provider      = "prisma-client-js"
+  output        = "../generated/client"
+  // "native" for local (non-container) dev; linux-musl-openssl-3.0.x for the Alpine-based
+  // Docker images (docker/Dockerfile.api, docker/Dockerfile.worker) — without this explicit
+  // pin, `prisma generate` running inside those images' build stage fetched the plain
+  // "linux-musl" engine (no OpenSSL suffix) regardless of whether openssl was installed at
+  // generate time, which then failed to load at runtime against Alpine's actual OpenSSL 3.x.
+  // Found running this image for the first time locally.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {

@@ -69,6 +69,24 @@ export async function createApp(): Promise<FastifyInstance> {
     },
   });
 
+  // Bug fix: this MUST be registered before any route (`app.get`/`.post`/etc. — including the
+  // `/health` route below and every plugin registered further down) is defined. Fastify snapshots
+  // the CURRENT error handler onto each route's own context at the moment that route is declared
+  // (`lib/route.js`: `context.errorHandler = ... : this[kErrorHandler]`) — it is not a live/lazy
+  // lookup at request time. This handler used to be registered at the very end of this function,
+  // AFTER every route in the app, which meant it silently never applied to a single one of them:
+  // every uncaught error fell through to Fastify's own default `{statusCode, error: 'Internal
+  // Server Error', message}` shape instead of this one's `{error: message}` shape. Invisible until
+  // now because every other route in this repo catches its own errors and replies manually
+  // (`.catch(() => null)` + `reply.code(404)...`); `routes/imap.ts` is the one file that lets a
+  // raw `Error` (e.g. `openImapClient`'s "Mailbox not found") bubble up uncaught, and its new
+  // integration test (`imap.integration.test.ts`) is what caught this.
+  app.setErrorHandler((error, _request, reply) => {
+    app.log.error(error);
+    const statusCode = error.statusCode ?? 500;
+    reply.status(statusCode).send({ error: error.message || 'Internal server error' });
+  });
+
   // Unversioned, infra-facing — Docker healthcheck / Uptime Kuma probe this directly and must not
   // need to know an API version, same convention as every other health endpoint in this stack.
   app.get('/health', async () => ({ status: 'ok' }));
@@ -122,12 +140,6 @@ export async function createApp(): Promise<FastifyInstance> {
   // future nginx edit away from becoming exposed. Moved for the same reason
   // `internalRepliesRoutes` above was split out of the actually-externally-reachable `/v1/replies`.
   await app.register(imapRoutes, { prefix: '/internal/imap' });
-
-  app.setErrorHandler((error, _request, reply) => {
-    app.log.error(error);
-    const statusCode = error.statusCode ?? 500;
-    reply.status(statusCode).send({ error: error.message || 'Internal server error' });
-  });
 
   return app;
 }

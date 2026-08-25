@@ -34,6 +34,20 @@
 networks:
   warmhawk_internal:
     internal: true
+  # Bug fix (DooD end-to-end install run, 2026-08-25): nginx previously had `warmhawk_internal`
+  # as its ONLY network. `internal: true` disables Docker's NAT/masquerade setup for that network
+  # entirely — a `ports:` publish on a container whose ONLY network is `internal: true` is
+  # silently accepted (visible in `docker inspect`'s HostConfig) but never actually wired up; the
+  # host genuinely cannot reach it. docker-compose.test.yml's own header comment already documents
+  # this exact failure mode for postgres/redis/uptime-kuma (confirmed by hand there back on
+  # 2026-08-21) and fixes it for THOSE services by flipping the network non-internal in the test
+  # overlay — but that overlay explicitly excludes nginx/certbot ("aren't needed for integration
+  # testing"), which is exactly why this instance of the same bug, on the one container this
+  # package's entire design depends on being host-reachable, went uncaught until a real end-to-end
+  # install: nginx started fine (no crash) and was completely unreachable from outside regardless.
+  # Fixed by mirroring warmhawk-enterprise-operator/docker-compose.yml's already-correct pattern —
+  # a second, non-internal network dedicated solely to nginx.
+  warmhawk_edge:
 
 volumes:
   postgres_data:
@@ -237,7 +251,7 @@ services:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot
     depends_on: [api]
-    networks: [warmhawk_internal]
+    networks: [warmhawk_internal, warmhawk_edge]
     deploy:
       resources:
         limits: { cpus: '0.5', memory: 128M }

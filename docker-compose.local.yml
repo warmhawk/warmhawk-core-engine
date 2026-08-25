@@ -1,0 +1,13 @@
+# Pure local-dev overlay for browsing the full stack (api/n8n UIs) — separate
+# from docker-compose.test.yml, which is CI's overlay and deliberately never
+# starts/publishes api or n8n (integration tests hit those in-process or not
+# at all). Used as: `docker compose -f docker-compose.yml -f
+# docker-compose.test.yml -f docker-compose.local.yml up -d`.
+services:
+  api:
+    ports:
+      - '${API_LOCAL_PORT:-4600}:4600'
+
+  n8n:
+    ports:
+      - '${N8N_LOCAL_PORT:-4603}:5678'

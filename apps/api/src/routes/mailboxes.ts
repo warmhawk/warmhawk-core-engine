@@ -30,7 +30,13 @@ function encryptionKey() {
 export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
-  app.get('/', async () => prisma.mailbox.findMany({ orderBy: { createdAt: 'desc' } }));
+  app.get('/', async () => {
+    const mailboxes = await prisma.mailbox.findMany({ orderBy: { createdAt: 'desc' } });
+    // Bug fix: unlike POST/PATCH below, this previously returned the full row, including
+    // `authPasswordEncrypted`/`oauthRefreshTokenEncrypted` — leaking encrypted credential
+    // material to any authenticated caller. Apply the same redaction POST/PATCH already use.
+    return mailboxes.map(({ authPasswordEncrypted: _omit, oauthRefreshTokenEncrypted: _omit2, ...safe }) => safe);
+  });
 
   app.post<{ Body: CreateMailboxBody }>('/', async (request, reply) => {
     const body = request.body;

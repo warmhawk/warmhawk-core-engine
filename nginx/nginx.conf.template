@@ -4,10 +4,23 @@
 # publishing a host port — every upstream here is reached over the internal-only
 # `warmhawk_internal` Docker network, never a host-bound port.
 #
-# TLS bootstrap: scripts/install.sh brings this up HTTP-only first (the `listen 443` block is a
-# no-op until a real cert exists), runs `certbot certonly --webroot` against the webroot path
-# below, then reloads nginx once the cert is issued. Renewal is a separate `certbot renew` loop
-# container (docker-compose.yml's `certbot` service) on its own sleep-based schedule.
+# Bug fix (DooD end-to-end install run, 2026-08-25): this template previously shipped BOTH the
+# HTTP and the `listen 443 ssl` server blocks always-on, with the header comment here claiming
+# "the `listen 443` block is a no-op until a real cert exists". That's false — nginx opens and
+# validates every `ssl_certificate`/`ssl_certificate_key` path for every server block at config
+# load time, for every start AND every `nginx -s reload`, regardless of whether that block ever
+# receives traffic. Since the cert doesn't exist until AFTER certbot's first successful run, and
+# certbot's HTTP-01 webroot challenge itself requires nginx to already be serving port 80, this
+# was an unconditional chicken-and-egg crash loop (`nginx: [emerg] cannot load certificate ...:
+# No such file or directory`) on EVERY fresh install, --skip-certbot or not — confirmed live.
+# Fixed by adopting warmhawk-enterprise-operator's already-correct pattern (see that repo's own
+# nginx/nginx.conf.template): ship HTTP-only below, with the TLS bootstrap: scripts/install.sh
+# brings this up HTTP-only first, runs `certbot certonly --webroot` against the webroot path
+# below, then enable_tls_template() (install.sh) swaps in the commented-out block below and
+# restarts nginx (envsubst only runs at container START, never on `-s reload`, since the TLS
+# server block references a cert that must exist before nginx will even parse its config —
+# see that function's own comment for why `restart`, not `reload`, is required here).
+# Renewal is a separate `certbot renew` loop container (docker-compose.yml's `certbot` service).
 
 server {
     listen 80;
@@ -19,28 +32,14 @@ server {
         root /var/www/certbot;
     }
 
-    # Everything else redirects to HTTPS once a certificate exists. Before that (fresh install,
-    # before the first certbot run), scripts/install.sh proxies API traffic here directly in
-    # HTTP-only mode so the instance is still reachable during the brief TLS-bootstrap window.
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
-server {
-    listen 443 ssl;
-    server_name ${WARMHAWK_DOMAIN};
-
-    ssl_certificate     /etc/letsencrypt/live/${WARMHAWK_DOMAIN}/fullchain.pem;
-    ssl_certificate_key  /etc/letsencrypt/live/${WARMHAWK_DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    # Public API surface only, all under /v1/ (API-surface correction pass — every route in
-    # apps/api/src/app.ts's `/v1` group gets a location block here; `/leads/` covers both
-    # `/v1/leads/...` and `/v1/leads/webhook` since it's one Fastify plugin tree under one prefix).
-    # `/internal/*` has NO location block here and is therefore unreachable from outside the
-    # internal Docker network, by omission, not by an access-control rule that could be
-    # misconfigured.
+    # Before a cert exists: serve the API directly over HTTP so the instance is still reachable
+    # during the TLS-bootstrap window (and so this server block never depends on a cert file that
+    # may not exist yet). Public API surface only, all under /v1/ (API-surface correction pass —
+    # every route in apps/api/src/app.ts's `/v1` group gets a location block here; `/leads/`
+    # covers both `/v1/leads/...` and `/v1/leads/webhook` since it's one Fastify plugin tree under
+    # one prefix). `/internal/*` has NO location block here and is therefore unreachable from
+    # outside the internal Docker network, by omission, not by an access-control rule that could
+    # be misconfigured.
     location /health {
         proxy_pass http://api:4600;
     }
@@ -102,3 +101,79 @@ server {
         proxy_set_header Connection "upgrade";
     }
 }
+
+# --- Enabled by scripts/install.sh's enable_tls_template() once a cert exists ---
+# server {
+#     listen 443 ssl;
+#     server_name ${WARMHAWK_DOMAIN};
+#
+#     ssl_certificate     /etc/letsencrypt/live/${WARMHAWK_DOMAIN}/fullchain.pem;
+#     ssl_certificate_key  /etc/letsencrypt/live/${WARMHAWK_DOMAIN}/privkey.pem;
+#     ssl_protocols TLSv1.2 TLSv1.3;
+#
+#     location /health {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/leads/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/campaigns/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/mailboxes/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/domains/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/queue/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/seed-accounts/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/ai-providers/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/replies/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/oauth/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/public/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/auth/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/instance-settings/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /status/ {
+#         proxy_pass http://uptime-kuma:3001/;
+#         proxy_set_header Host $host;
+#         proxy_set_header Upgrade $http_upgrade;
+#         proxy_set_header Connection "upgrade";
+#     }
+# }
+#
+# server {
+#     listen 80;
+#     server_name ${WARMHAWK_DOMAIN};
+#     location /.well-known/acme-challenge/ { root /var/www/certbot; }
+#     location / { return 301 https://$host$request_uri; }
+# }
