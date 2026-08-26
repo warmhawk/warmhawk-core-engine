@@ -1,5 +1,12 @@
 # Install-Flow E2E Test — release-gated, requires a real VM/CI runner
 
+This directory also holds four fast-tier scripts (`test-port-fallback.sh`,
+`test-idempotent-rerun.sh`, `test-restart-persistence.sh`, `test-upgrade-in-place.sh`) — pure
+local Docker logic, no scratch VM or real DNS needed, wired as Woodpecker's `install-flow-fast`
+workflow (every push/PR, not release-gated). See each script's own header comment for what it
+covers. Everything below this point is about `run.sh` specifically — the one test in this
+directory that genuinely can't run without real infrastructure.
+
 Per the Testing Strategy, this is the "actual customer path" test: run
 `install.sh --domain <test-domain>` against Let's Encrypt's **staging** endpoint, confirm nginx
 comes up TLS-terminated, and send one real test email through to a Mailpit/MailHog catcher.
@@ -13,26 +20,25 @@ local dev container can provide — `run.sh`'s own header comment restates this 
 verification possible outside that real environment is `bash -n run.sh` (syntax) and validating
 `docker-compose.e2e-install.yml` with `docker compose config`.
 
-## How this is meant to be wired (per the V12 CI/CD adoption note)
+## How this is wired (per docs/warmhawk-install-verification-plan.md in ks-woodpecker-config)
 
-Ship this checkout to a scratch VM/runner over plain SSH, generate throwaway secrets directly on
-the runner (never transferring real ones), bring the stack up with `install.sh`, and guarantee
-teardown with `if: always()` — see `release-e2e.workflow.yml.sample` next to this file for the
-full wiring. That "stand up a real stack on a scratch target, test it, always tear it down"
-mechanism is implemented directly with `ssh`/`rsync`/`docker compose`, not a bespoke
-Docker-in-Docker script or a private, internally-owned composite-action dependency (this repo is
-public, so it must not depend on internal infra other than what it needs to actually run).
+**Live as of 2026-08-26** — this used to be described here as a `.sample` GitHub Actions file,
+copy-paste-and-pin-the-shas away from actually running. It's wired now, natively, as Woodpecker's
+own `release-e2e` workflow (see `ks-woodpecker-config/src/templates/self-hosted-ci.ts`, configured
+for this repo in that project's `src/repo-map.ts`) — release-tag-gated only, three steps in one
+workflow: bring up a throwaway stack on a scratch host over SSH (checkout already on the runner,
+no separate ship-the-checkout step needed), run `run.sh` against it, always tear it down
+afterward, Woodpecker's own equivalent of `if: always()`. Still blocked on provisioning the
+`e2e_scratch_host`/`e2e_scratch_domain`/`e2e_scratch_ssh_key` Woodpecker secrets it reads — see
+that plan doc for the current status.
 
 ## How `run.sh` is invoked from a real workflow
 
-See `release-e2e.workflow.yml.sample` next to this file for the full, concrete wiring — a
-`.sample` file, not a live workflow (deliberately not under `.github/workflows/`, and not
-registered/executed by anything in this repo). Copy it there and pin the composite actions'
-`@sha` refs when this test is actually promoted from "implemented" to "wired into CI". Short
-version: `ephemeral-ssh-stack` ships the checkout and brings up `docker-compose.yml` +
-`docker-compose.e2e-install.yml` (the Mailpit fixture) together on the scratch host, then
-`bash tests/e2e-install/run.sh` (with `E2E_DOMAIN`/`E2E_SSH_HOST`/`E2E_SSH_KEY`/`E2E_REMOTE_DIR`
-set) does everything described above, then `ephemeral-ssh-teardown` runs with `if: always()`.
+`bash tests/e2e-install/run.sh` runs directly on Woodpecker's own runner (not shipped to the
+scratch host — it drives that host over SSH itself, via `E2E_SSH_HOST`/`E2E_SSH_KEY`/
+`E2E_REMOTE_DIR`), pointed at whatever stack the workflow's own first step already brought up with
+`docker-compose.yml` + `docker-compose.e2e-install.yml` (the Mailpit fixture). See
+`self-hosted-ci.ts`'s `release-e2e` workflow for the exact three steps.
 
 ## What `run.sh` actually does
 

@@ -244,9 +244,14 @@ services:
     <<: *restart-policy
     environment:
       WARMHAWK_DOMAIN: ${WARMHAWK_DOMAIN}
+    # Host ports are configurable (default 80/443) so scripts/install.sh can fall back to alt ports
+    # when the customer's box already has something else bound to 80/443 — see that script's port
+    # selection block and docs/troubleshooting.md's "Installing alongside an existing web server".
+    # Matches warmhawk-enterprise-operator/docker-compose.yml's existing NGINX_HTTP_HOST_PORT /
+    # NGINX_HTTPS_HOST_PORT convention exactly, so both packages behave identically here.
     ports:
-      - '80:80'
-      - '443:443'
+      - '${NGINX_HTTP_HOST_PORT:-80}:80'
+      - '${NGINX_HTTPS_HOST_PORT:-443}:443'
     volumes:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot

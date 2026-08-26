@@ -9,6 +9,33 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
 
 ## [Unreleased]
 
+### Fixed — `install.sh` hard-failed on any box where 80/443 were already taken
+
+- **A customer installing onto a non-empty VM (already running some other app, or
+  `warmhawk-enterprise-operator`'s own nginx) couldn't install at all.** `check_port_free 80/443`
+  used to `fail()` outright — the opposite of this package's own design goal ("zero assumptions
+  about what else is running on the host," see `docker-compose.yml`'s header). Fixed: `install.sh`
+  now falls back to alt ports (`8080`/`8443` by default, or `--http-port`/`--https-port`) instead of
+  failing, distinguishes "occupied by something else" from "occupied by our own already-running
+  stack" (so an idempotent re-run of a working install never wrongly trips the fallback), and prints
+  exactly what to forward from the existing web server. `docker-compose.yml`'s `nginx` service ports
+  are now `${NGINX_HTTP_HOST_PORT:-80}`/`${NGINX_HTTPS_HOST_PORT:-443}`, matching
+  `warmhawk-enterprise-operator`'s existing convention. See `docs/troubleshooting.md`'s "Installing
+  alongside an existing web server" for the forwarding config a customer needs to add on their end.
+  Added `tests/e2e-install/test-port-fallback.sh` as a regression guard — runs locally (no scratch
+  VM/DNS needed), pre-occupies 80/443, runs the real `install.sh`, and asserts the app is genuinely
+  reachable end to end through the alt port.
+
+### Added — three more fast-tier `tests/e2e-install/` regression scripts
+
+- `test-idempotent-rerun.sh`, `test-restart-persistence.sh`, `test-upgrade-in-place.sh` join
+  `test-port-fallback.sh` above, wired as Woodpecker's `install-flow-fast` workflow (every push/PR).
+  All four need nothing but local Docker — no scratch VM or real DNS — and all four were run live,
+  end to end, against a disposable clone (not just `bash -n`), confirming: a second `install.sh` run
+  reuses `.env`'s secrets byte-for-byte instead of regenerating them; a `docker compose down`/`up -d`
+  cycle never loses Postgres data; and `scripts/update.sh`'s pull/migrate/restart cycle is safe. See
+  `tests/e2e-install/README.md` for what each one covers.
+
 ### Added — auth bridge for warmhawk-enterprise-operator's dashboard
 
 - **`OPERATOR_SERVICE_TOKEN`**: warmhawk-enterprise-operator's dashboard had no credential to

@@ -9,9 +9,55 @@ first; `support@warmhawk.com` (Tier 1: 1-business-day / 4h-critical) if you're s
 
 | Symptom | Fix |
 |---|---|
-| "Port 80/443 already in use" | Stop whatever's bound to it (`sudo lsof -i :80`), re-run |
+| "port 80 and/or 443 is already in use" | No longer a hard failure — `install.sh` falls back to alt ports automatically. See "Installing alongside an existing web server" below. |
 | "DNS does not appear to resolve" | Point your domain's `A` record at this server's public IP, wait for propagation (`dig +short yourdomain.com`), re-run |
 | Script exits partway through | Safe to just re-run — `install.sh` is idempotent and reuses already-generated secrets/certs |
+
+## Installing alongside an existing web server
+
+Most installs land on an empty box and `install.sh` binds nginx straight to 80/443. If this server
+already runs something else on those ports — another app, a hand-rolled nginx/Apache/Caddy, or
+`warmhawk-enterprise-operator`'s own nginx — `install.sh` detects that and falls back automatically
+instead of failing:
+
+- [x] nginx publishes alt ports instead — `8080`/`8443` by default, or whatever you pass via
+      `--http-port`/`--https-port`.
+- [x] Everything else (secrets, database, TLS bootstrap) proceeds exactly as normal.
+- [x] The script prints a `WARNING` with the exact ports it picked — re-run any time with
+      `./scripts/install.sh --http-port <port> --https-port <port>` to pick specific ones instead
+      of the defaults.
+
+**What you still have to do by hand:** forward your domain from whatever already owns 80/443 to
+WarmHawk's alt ports. This can't be automated — `install.sh` has no way to know what's already
+running or how to reconfigure it. Add a block like this to your *existing* server's config,
+pointing at the alt HTTP port `install.sh` printed:
+
+```nginx
+server {
+    listen 80;
+    listen 443 ssl;
+    server_name api.yourcompany.com;   # your WarmHawk domain
+
+    # your existing TLS cert config here, if this block already terminates TLS for other sites
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;   # WarmHawk's alt HTTP port
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+> **⚠️ The `/.well-known/acme-challenge/` path matters most.** Certbot's own HTTP-01 challenge
+> reaches your domain on the real port 80, not WarmHawk's alt port — it only succeeds if whatever
+> owns port 80 is already forwarding to WarmHawk's alt HTTP port *before* `install.sh` gets to the
+> certbot step. Set the forward up first, then run (or re-run) `install.sh`; if certbot already
+> failed, fix the forward and retry with `./scripts/install.sh --retry-tls`.
+
+This is exactly the scenario `tests/e2e-install/test-port-fallback.sh` exercises locally (pre-occupy
+80/443, run `install.sh`, confirm the fallback works end to end) — see that script if you want to
+verify this behavior yourself before relying on it in production.
 
 ## certbot / TLS issuance failures
 

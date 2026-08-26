@@ -21,6 +21,10 @@
 #   ./scripts/install.sh --domain api.yourcompany.com
 #   ./scripts/install.sh --retry-tls          # retry only the TLS issuance step after a prior failure
 #   ./scripts/install.sh --skip-certbot --cert-path /path/to/fullchain.pem --key-path /path/to/privkey.pem
+#   ./scripts/install.sh --domain api.yourcompany.com --http-port 8080 --https-port 8443
+#     # install alongside an existing web server that already owns 80/443 — see the port-selection
+#     # block below and docs/troubleshooting.md's "Installing alongside an existing web server".
+#     # Omit --http-port/--https-port and this happens automatically when 80/443 are occupied.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +58,8 @@ RETRY_TLS=false
 SKIP_CERTBOT=false
 CERT_PATH=""
 KEY_PATH=""
+HTTP_PORT_FLAG=""
+HTTPS_PORT_FLAG=""
 
 log()  { echo "[install] $*"; }
 fail() {
@@ -70,6 +76,8 @@ while [ $# -gt 0 ]; do
     --skip-certbot) SKIP_CERTBOT=true; shift ;;
     --cert-path) CERT_PATH="$2"; shift 2 ;;
     --key-path) KEY_PATH="$2"; shift 2 ;;
+    --http-port) HTTP_PORT_FLAG="$2"; shift 2 ;;
+    --https-port) HTTPS_PORT_FLAG="$2"; shift 2 ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
@@ -103,17 +111,56 @@ log "Running preflight checks..."
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed. Install Docker first: https://docs.docker.com/engine/install/"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is not available. Install/upgrade Docker to a version that includes 'docker compose'."
 
+# Bug fix (port-fallback authoring pass): `ss`/`netstat -ltn` aren't guaranteed present — a minimal
+# base image commonly ships neither. Falls back to bash's own /dev/tcp builtin (a real TCP connect
+# attempt, no external command needed) rather than silently reporting every port "free" when neither
+# tool exists, which would have made the port-conflict fallback below never trigger.
 check_port_free() {
   local port="$1"
   if command -v ss >/dev/null 2>&1; then
     ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port" && return 1
-  elif command -v netstat >/dev/null 2>&1; then
+    return 0
+  elif command -v netstat >/dev/null 2>&1 && netstat -ltn >/dev/null 2>&1; then
     netstat -ltn 2>/dev/null | grep -q ":$port " && return 1
+    return 0
   fi
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && { exec 3<&-; exec 3>&-; return 1; }
   return 0
 }
-check_port_free 80  || fail "Port 80 is already in use. Stop whatever's using it (another web server?) and re-run."
-check_port_free 443 || fail "Port 443 is already in use. Stop whatever's using it and re-run."
+
+# --- Port selection: 80/443, or an alt-port co-exist mode ---------------------------------------
+# A real customer's box is not guaranteed to be empty — it may already run some other web server
+# on 80/443. This used to be a hard fail(); now it falls back to alt ports instead, so the install
+# actually completes either way. `nginx_already_running` distinguishes "occupied by something else"
+# from "occupied by our OWN already-running stack from a prior install" — without that check, every
+# idempotent re-run of an already-installed, working instance would wrongly trip the fallback path,
+# since our own nginx would itself be the thing holding the port.
+nginx_already_running() {
+  docker compose -f "$REPO_ROOT/docker-compose.yml" ps --status running nginx 2>/dev/null | grep -q nginx
+}
+
+if [ -n "$HTTP_PORT_FLAG" ] || [ -n "$HTTPS_PORT_FLAG" ]; then
+  NGINX_HTTP_HOST_PORT="${HTTP_PORT_FLAG:-${NGINX_HTTP_HOST_PORT:-80}}"
+  NGINX_HTTPS_HOST_PORT="${HTTPS_PORT_FLAG:-${NGINX_HTTPS_HOST_PORT:-443}}"
+  log "Using explicit port override: ${NGINX_HTTP_HOST_PORT}/${NGINX_HTTPS_HOST_PORT}."
+elif nginx_already_running; then
+  : "${NGINX_HTTP_HOST_PORT:=80}"
+  : "${NGINX_HTTPS_HOST_PORT:=443}"
+  log "nginx is already running from a prior install — reusing its ports (${NGINX_HTTP_HOST_PORT}/${NGINX_HTTPS_HOST_PORT})."
+elif check_port_free 80 && check_port_free 443; then
+  NGINX_HTTP_HOST_PORT=80
+  NGINX_HTTPS_HOST_PORT=443
+else
+  : "${NGINX_HTTP_HOST_PORT:=8080}"
+  : "${NGINX_HTTPS_HOST_PORT:=8443}"
+  PORT_FALLBACK=true
+  log "WARNING: port 80 and/or 443 is already in use by something else on this host."
+  log "  Continuing anyway — nginx will publish ${NGINX_HTTP_HOST_PORT}/${NGINX_HTTPS_HOST_PORT} instead of 80/443."
+  log "  You'll need to forward ${DOMAIN} from whatever already owns 80/443 to 127.0.0.1:${NGINX_HTTP_HOST_PORT}"
+  log "  (HTTP, including the /.well-known/acme-challenge/ path certbot needs below) and"
+  log "  127.0.0.1:${NGINX_HTTPS_HOST_PORT} (HTTPS) — see docs/troubleshooting.md's 'Installing"
+  log "  alongside an existing web server' section for a copy-paste config snippet."
+fi
 
 RESOLVED_IP=""
 if command -v dig >/dev/null 2>&1; then
@@ -135,7 +182,7 @@ if [ "$DNS_RESOLVES" = false ] && [ "$SKIP_CERTBOT" = false ]; then
   log "  re-run with --retry-tls once DNS is confirmed."
 fi
 
-log "Preflight checks passed (Docker present, ports 80/443 free)."
+log "Preflight checks passed (Docker present, ports ${NGINX_HTTP_HOST_PORT}/${NGINX_HTTPS_HOST_PORT} selected)."
 
 # --- Secret generation (idempotent — only fill in what's missing) ------------------------------
 # Bug fix (DooD end-to-end install run, 2026-08-25): -base64 output can (and did, ~75% of the
@@ -145,7 +192,14 @@ log "Preflight checks passed (Docker present, ports 80/443 free)."
 # generated password containing '/' broke ioredis's strict WHATWG URL parser outright — confirmed
 # live: apps/worker crash-looped forever on a freshly generated REDIS_PASSWORD containing '/'.
 # -hex reads the same number of random bytes (identical entropy) and is unconditionally URL-safe.
-gen_secret() { openssl rand -hex "$1" | tr -d '\n'; }
+# Bug fix (deeper-coverage authoring pass, 2026-08-26): some openssl builds (confirmed on a
+# Windows/MSYS dev box, not real Linux CI/customer targets) emit a trailing CRLF rather than a
+# bare LF — `tr -d '\n'` alone left a stray \r embedded at the end of the secret. Invisible in
+# every log (a CR never renders as a visible character) but a real value corruption: sourcing
+# this same .env back on a re-run strips that \r again on reload, so the "same" secret came back
+# one byte shorter than what was actually written — caught by test-idempotent-rerun.sh's
+# byte-for-byte .env comparison, not by anything that only checks the app still starts.
+gen_secret() { openssl rand -hex "$1" | tr -d '\r\n'; }
 
 : "${POSTGRES_PASSWORD:=$(gen_secret 32)}"
 : "${REDIS_PASSWORD:=$(gen_secret 32)}"
@@ -159,6 +213,8 @@ gen_secret() { openssl rand -hex "$1" | tr -d '\n'; }
 
 cat > "$ENV_FILE" <<EOF
 WARMHAWK_DOMAIN=$DOMAIN
+NGINX_HTTP_HOST_PORT=$NGINX_HTTP_HOST_PORT
+NGINX_HTTPS_HOST_PORT=$NGINX_HTTPS_HOST_PORT
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 REDIS_PASSWORD=$REDIS_PASSWORD
 JWT_SECRET=$JWT_SECRET
@@ -245,7 +301,12 @@ fi
 log "Bringing up the full stack..."
 docker compose -f "$REPO_ROOT/docker-compose.yml" up -d --build
 
-log "Done. TLS ready: ${TLS_READY}. Visit https://${DOMAIN}/ once TLS is confirmed."
+if [ "${PORT_FALLBACK:-false}" = true ]; then
+  log "Done. TLS ready: ${TLS_READY}. nginx is on alt ports ${NGINX_HTTP_HOST_PORT}/${NGINX_HTTPS_HOST_PORT} —"
+  log "  visit https://${DOMAIN}/ once your existing web server is forwarding to them (see the WARNING above)."
+else
+  log "Done. TLS ready: ${TLS_READY}. Visit https://${DOMAIN}/ once TLS is confirmed."
+fi
 log "Run './scripts/update.sh' any time to pull the latest release and migrate in place."
 log "Running warmhawk-enterprise-operator too? Copy this .env's OPERATOR_SERVICE_TOKEN value into"
 log "  that repo's own .env as CORE_ENGINE_SERVICE_TOKEN — the two packages never share a .env, so"
