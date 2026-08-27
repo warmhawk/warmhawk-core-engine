@@ -163,10 +163,18 @@ else
 fi
 
 RESOLVED_IP=""
+# Bug fix (install-flow-fast's first real DinD run, 2026-08-26): a non-resolving domain (this
+# script's own test suite uses .invalid domains, and any real customer running this before DNS
+# has propagated hits the exact same thing) makes dig/getent exit non-zero — under this script's
+# `set -euo pipefail`, an unguarded `VAR="$(cmd | ...)"` assignment treats that as a fatal error
+# and aborts silently right here, never reaching the "DNS not resolving yet, continuing anyway"
+# warning a few lines down that this whole block exists to reach. `|| true` on each assignment
+# means "couldn't resolve" is treated the same whether the lookup tool itself is missing or just
+# came back empty — both correctly leave RESOLVED_IP empty instead of crashing.
 if command -v dig >/dev/null 2>&1; then
-  RESOLVED_IP="$(dig +short "$DOMAIN" A | tail -n1)"
+  RESOLVED_IP="$(dig +short "$DOMAIN" A | tail -n1)" || true
 elif command -v getent >/dev/null 2>&1; then
-  RESOLVED_IP="$(getent hosts "$DOMAIN" | awk '{print $1}' | tail -n1)"
+  RESOLVED_IP="$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | tail -n1)" || true
 fi
 CURRENT_PUBLIC_IP="$(curl -fsS https://api.ipify.org 2>/dev/null || true)"
 
