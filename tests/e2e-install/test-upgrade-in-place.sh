@@ -34,6 +34,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEST_DOMAIN="warmhawk-upgrade-test.invalid"   # .invalid never resolves (RFC 2606) — no real DNS/network needed
 MARKER_NOTE="upgrade-in-place-canary-$$"
 export COMPOSE_PROJECT_NAME="warmhawk-e2e-upgrade"
+# See test-port-fallback.sh's identical override for why this exists.
+HEALTH_CHECK_HOST="${HEALTH_CHECK_HOST:-localhost}"
 
 log()  { echo "[test-upgrade-in-place] $*"; }
 fail() {
@@ -74,15 +76,15 @@ compose() { docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJE
 
 wait_for_health() {
   local label="$1"
-  log "Polling http://localhost/health for a real response ($label)..."
+  log "Polling http://${HEALTH_CHECK_HOST}/health for a real response ($label)..."
   for i in $(seq 1 30); do
-    BODY="$(curl -s "http://localhost/health" || true)"
+    BODY="$(curl -s "http://${HEALTH_CHECK_HOST}/health" || true)"
     case "$BODY" in
       *'"status"'*'"ok"'*) log "Confirmed healthy ($label): ${BODY}"; return 0 ;;
     esac
     sleep 2
   done
-  fail "http://localhost/health never returned {\"status\":\"ok\"} ($label). Last body: ${BODY}"
+  fail "http://${HEALTH_CHECK_HOST}/health never returned {\"status\":\"ok\"} ($label). Last body: ${BODY}"
 }
 
 # --- 1. Install -------------------------------------------------------------------------------

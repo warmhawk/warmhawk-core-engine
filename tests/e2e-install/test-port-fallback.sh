@@ -33,6 +33,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEST_DOMAIN="warmhawk-port-fallback-test.invalid"   # .invalid never resolves (RFC 2606) — no real DNS/network needed
 ALT_HTTP_PORT="${ALT_HTTP_PORT:-8080}"
 ALT_HTTPS_PORT="${ALT_HTTPS_PORT:-8443}"
+# Same override pattern as run.sh's MAILPIT_HTTP_HOST: defaults to localhost for a normal
+# laptop/CI-runner run, overridden in CI when Docker itself is a sibling service (e.g. a
+# docker:dind container) rather than the same network namespace this script runs in — the
+# published ports land on that sibling's own interface, not this container's "localhost".
+HEALTH_CHECK_HOST="${HEALTH_CHECK_HOST:-localhost}"
 PORT_HOG_NAME="warmhawk-e2e-port-hog"
 export COMPOSE_PROJECT_NAME="warmhawk-e2e-portfallback"
 
@@ -85,7 +90,7 @@ docker run -d --name "$PORT_HOG_NAME" -p 80:80 -p 443:443 nginx:1.27-alpine >/de
   || fail "Could not start the port-hog container — is something else already using 80/443 on this host? Free them first."
 
 for i in $(seq 1 15); do
-  status="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:80/ || echo 000)"
+  status="$(curl -s -o /dev/null -w '%{http_code}' "http://${HEALTH_CHECK_HOST}:80/" || echo 000)"
   [ "$status" -ge 200 ] && [ "$status" -lt 500 ] && break
   sleep 1
 done
@@ -110,17 +115,17 @@ docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" ps 
   || fail "nginx container is not running after install.sh completed."
 log "Confirmed: nginx container is running."
 
-log "Polling http://localhost:${ALT_HTTP_PORT}/health for a real response through the alt port..."
+log "Polling http://${HEALTH_CHECK_HOST}:${ALT_HTTP_PORT}/health for a real response through the alt port..."
 HEALTH_OK=false
 for i in $(seq 1 30); do
-  BODY="$(curl -s "http://localhost:${ALT_HTTP_PORT}/health" || true)"
+  BODY="$(curl -s "http://${HEALTH_CHECK_HOST}:${ALT_HTTP_PORT}/health" || true)"
   case "$BODY" in
     *'"status"'*'"ok"'*) HEALTH_OK=true; break ;;
   esac
   sleep 2
 done
-[ "$HEALTH_OK" = true ] || fail "http://localhost:${ALT_HTTP_PORT}/health never returned {\"status\":\"ok\"} — nginx is up but not actually proxying to a healthy api through the alt port. Last body: ${BODY}"
-log "Confirmed: GET http://localhost:${ALT_HTTP_PORT}/health -> ${BODY}"
+[ "$HEALTH_OK" = true ] || fail "http://${HEALTH_CHECK_HOST}:${ALT_HTTP_PORT}/health never returned {\"status\":\"ok\"} — nginx is up but not actually proxying to a healthy api through the alt port. Last body: ${BODY}"
+log "Confirmed: GET http://${HEALTH_CHECK_HOST}:${ALT_HTTP_PORT}/health -> ${BODY}"
 
 # Non-goal, stated explicitly rather than silently skipped: real TLS/certbot issuance through a
 # forwarding proxy still needs a real domain + real proxy config, and is NOT what this test covers.
