@@ -119,6 +119,14 @@ fi
 log "Running preflight checks..."
 
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed. Install Docker first: https://docs.docker.com/engine/install/"
+# Bug fix (install-flow-fast's first real DinD run, 2026-08-26): gen_secret below shells out to
+# openssl directly (not a containerized one) — without this check, a host missing it doesn't fail
+# here, it silently writes EMPTY secrets into .env (openssl rand producing no output is not itself
+# an error `set -e` catches, since it's nested inside a `:=` parameter expansion), which then
+# surfaces many minutes later as postgres refusing to start on an empty POSTGRES_PASSWORD, with
+# nothing pointing back at the real cause. Confirmed live: this exact CI step's own base image
+# doesn't ship openssl.
+command -v openssl >/dev/null 2>&1 || fail "openssl is not installed — it's required to generate this install's secrets. Install it first (e.g. 'apt install openssl' / 'apk add openssl')."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is not available. Install/upgrade Docker to a version that includes 'docker compose'."
 
 # Bug fix (port-fallback authoring pass): `ss`/`netstat -ltn` aren't guaranteed present — a minimal
