@@ -10,7 +10,7 @@
  * translated to Fastify's shape. `helmet()` -> `@fastify/helmet`, Express CORS -> `@fastify/cors`,
  * `express.json()` -> Fastify's built-in JSON body parser, multer -> `@fastify/multipart`.
  */
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyError } from 'fastify';
 import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
@@ -81,7 +81,7 @@ export async function createApp(): Promise<FastifyInstance> {
   // (`.catch(() => null)` + `reply.code(404)...`); `routes/imap.ts` is the one file that lets a
   // raw `Error` (e.g. `openImapClient`'s "Mailbox not found") bubble up uncaught, and its new
   // integration test (`imap.integration.test.ts`) is what caught this.
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error: FastifyError, _request, reply) => {
     app.log.error(error);
     const statusCode = error.statusCode ?? 500;
     reply.status(statusCode).send({ error: error.message || 'Internal server error' });
