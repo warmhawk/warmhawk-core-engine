@@ -26,11 +26,13 @@ verification possible outside that real environment is `bash -n run.sh` (syntax)
 copy-paste-and-pin-the-shas away from actually running. It's wired now, natively, as Woodpecker's
 own `release-e2e` workflow (see `ks-woodpecker-config/src/templates/self-hosted-ci.ts`, configured
 for this repo in that project's `src/repo-map.ts`) — release-tag-gated only, three steps in one
-workflow: bring up a throwaway stack on a scratch host over SSH (checkout already on the runner,
-no separate ship-the-checkout step needed), run `run.sh` against it, always tear it down
-afterward, Woodpecker's own equivalent of `if: always()`. Still blocked on provisioning the
-`e2e_scratch_host`/`e2e_scratch_domain`/`e2e_scratch_ssh_key` Woodpecker secrets it reads — see
-that plan doc for the current status.
+workflow: lock and fully wipe the shared scratch host (SaaS-Stage, a rotating single-tenant box —
+see `ks-platform-infra/servers/saas-stage.md` — also used by
+`warmhawk-enterprise-operator`'s own `release-e2e` pass, never at the same time), bring up a
+throwaway stack on it over SSH, run `run.sh` against it, then always tear the stack down and
+release the lock, Woodpecker's own equivalent of `if: always()`. Still blocked on provisioning the
+`e2e_core_scratch_host`/`e2e_core_scratch_domain`/`e2e_core_scratch_ssh_key` Woodpecker secrets it
+reads — see that plan doc for the current status.
 
 ## How `run.sh` is invoked from a real workflow
 
