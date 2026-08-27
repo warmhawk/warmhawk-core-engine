@@ -68,6 +68,16 @@ fail() {
   exit 1
 }
 
+# A container failing to become healthy during `docker compose up` previously aborted here with
+# zero visible cause (set -e catching compose's own non-zero exit) — a real customer hitting this
+# had nothing to go on but "it failed." Dumps every service's recent logs so the actual crash
+# reason (bad env var, port clash inside the container, migration error, etc.) is visible instead.
+dump_compose_logs_and_fail() {
+  log "docker compose up failed — dumping recent logs from every service for diagnosis:"
+  docker compose -f "$REPO_ROOT/docker-compose.yml" logs --no-color --tail=100 || true
+  fail "$1"
+}
+
 # --- Argument parsing -------------------------------------------------------------------------
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -240,7 +250,8 @@ log "Secrets generated/loaded and written to .env (never committed — see .giti
 
 # --- Bring up nginx HTTP-only + core services (no TLS yet) -------------------------------------
 log "Starting core services (HTTP-only, pre-TLS)..."
-docker compose -f "$REPO_ROOT/docker-compose.yml" up -d postgres redis migrate api worker n8n uptime-kuma nginx
+docker compose -f "$REPO_ROOT/docker-compose.yml" up -d postgres redis migrate api worker n8n uptime-kuma nginx \
+  || dump_compose_logs_and_fail "core services failed to start — see logs above."
 
 # --- Uptime Kuma auto-provisioning (admin account + monitors + optional alert webhook) ---------
 # Degrades, never aborts the install — this is bundled monitoring, not a guardrail the rest of the
@@ -277,7 +288,8 @@ else
   fi
 fi
 
-docker compose -f "$REPO_ROOT/docker-compose.yml" up -d certbot
+docker compose -f "$REPO_ROOT/docker-compose.yml" up -d certbot \
+  || dump_compose_logs_and_fail "certbot renewal sidecar failed to start — see logs above."
 
 # --- Nightly backup opt-in (prompts once) -------------------------------------------------------
 ENABLE_BACKUPS="yes"
@@ -307,7 +319,8 @@ else
 fi
 
 log "Bringing up the full stack..."
-docker compose -f "$REPO_ROOT/docker-compose.yml" up -d --build
+docker compose -f "$REPO_ROOT/docker-compose.yml" up -d --build \
+  || dump_compose_logs_and_fail "final full-stack startup failed — see logs above."
 
 if [ "${PORT_FALLBACK:-false}" = true ]; then
   log "Done. TLS ready: ${TLS_READY}. nginx is on alt ports ${NGINX_HTTP_HOST_PORT}/${NGINX_HTTPS_HOST_PORT} —"
