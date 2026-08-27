@@ -133,16 +133,29 @@ docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is not ava
 # base image commonly ships neither. Falls back to bash's own /dev/tcp builtin (a real TCP connect
 # attempt, no external command needed) rather than silently reporting every port "free" when neither
 # tool exists, which would have made the port-conflict fallback below never trigger.
+#
+# Bug fix (install-flow-fast's DinD run, 2026-08-26): ss/netstat only ever introspect THIS PROCESS's
+# own network namespace. Under DinD (this script's own docker/docker-compose commands talking to a
+# remote daemon via DOCKER_HOST, same as HEALTH_CHECK_HOST's rationale a few lines below), the actual
+# port bindings this check needs to see live in that remote daemon's namespace, not this one — so
+# ss/netstat always reported 80/443 "free" even when the daemon had already bound them, and the real
+# `docker compose up` a few lines down then failed outright with "port is already allocated" instead
+# of ever reaching the alt-port fallback path. ss/netstat stay the fast, preferred path for the
+# ordinary same-namespace case (a real customer's box); a non-loopback HEALTH_CHECK_HOST means the
+# daemon is elsewhere, so only a real TCP connect attempt against that host can answer correctly.
+HEALTH_CHECK_HOST="${HEALTH_CHECK_HOST:-127.0.0.1}"
 check_port_free() {
   local port="$1"
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port" && return 1
-    return 0
-  elif command -v netstat >/dev/null 2>&1 && netstat -ltn >/dev/null 2>&1; then
-    netstat -ltn 2>/dev/null | grep -q ":$port " && return 1
-    return 0
+  if [ "$HEALTH_CHECK_HOST" = "127.0.0.1" ] || [ "$HEALTH_CHECK_HOST" = "localhost" ]; then
+    if command -v ss >/dev/null 2>&1; then
+      ss -ltn "( sport = :$port )" 2>/dev/null | grep -q ":$port" && return 1
+      return 0
+    elif command -v netstat >/dev/null 2>&1 && netstat -ltn >/dev/null 2>&1; then
+      netstat -ltn 2>/dev/null | grep -q ":$port " && return 1
+      return 0
+    fi
   fi
-  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && { exec 3<&-; exec 3>&-; return 1; }
+  (exec 3<>"/dev/tcp/${HEALTH_CHECK_HOST}/$port") 2>/dev/null && { exec 3<&-; exec 3>&-; return 1; }
   return 0
 }
 
