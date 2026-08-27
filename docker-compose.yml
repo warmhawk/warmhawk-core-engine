@@ -105,7 +105,7 @@ services:
     build: { context: ., dockerfile: docker/Dockerfile.api }
     <<: *restart-policy
     restart: 'no'
-    command: ['npx', 'prisma', 'migrate', 'deploy', '--schema', '/repo/packages/db/prisma/schema.prisma']
+    command: ['node', '/repo/node_modules/.bin/prisma', 'migrate', 'deploy', '--schema', '/repo/packages/db/prisma/schema.prisma']
     environment:
       DATABASE_URL: postgresql://warmhawk:${POSTGRES_PASSWORD}@postgres:5432/warmhawk
     depends_on:
@@ -229,7 +229,7 @@ services:
     build: { context: ., dockerfile: docker/Dockerfile.api }
     profiles: ['tools']
     working_dir: /repo/packages/ops-scripts
-    command: ['npx', 'tsx', 'src/provisionUptimeKuma.ts']
+    command: ['node', '/repo/node_modules/.bin/tsx', 'src/provisionUptimeKuma.ts']
     environment:
       UPTIME_KUMA_URL: http://uptime-kuma:3001
       UPTIME_KUMA_USERNAME: ${UPTIME_KUMA_USERNAME:-admin}
