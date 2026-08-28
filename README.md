@@ -52,3 +52,5 @@ npm run test:integration    # against the real Postgres/Redis above
 
 Business Source License 1.1 — non-compete Additional Use Grant blocking resale as a competing
 hosted service, converts to Apache 2.0 four years after each version's release date.
+
+<!-- ci-verify: 2026-08-28 push:main -> self-trigger-promote -> Pipeline B live-verification commit, no functional change -->
