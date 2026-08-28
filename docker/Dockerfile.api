@@ -1,8 +1,10 @@
 # WarmHawk API — non-root Docker pattern ported from outreach-infra's Dockerfiles, digest-pinned
-# base image (verified real digest via `docker buildx imagetools inspect node:20-alpine` at
+# base image (verified real digest via `docker buildx imagetools inspect node:22-alpine` at
 # build-time of this repo — re-verify and re-pin before each release, digests rotate as the
-# upstream image is rebuilt).
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
+# upstream image is rebuilt). Bumped from node:20-alpine 2026-08-28 — semantic-release@25's own
+# engine requirement (^22.14.0 || >=24.10.0) needs CI on Node 22+, and this app's own base image
+# was bumped alongside it rather than letting CI and runtime drift onto different Node majors.
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
 WORKDIR /repo
 # Must match the runtime stage's `apk add openssl` below — `prisma generate` fingerprints the
 # OpenSSL present at generate-time to pick which query-engine binary to fetch (e.g.
@@ -26,13 +28,13 @@ RUN npm run db:generate
 # below — but this prune is still worth keeping for a smaller, lower-surface runtime image.)
 RUN npm prune --omit=dev --workspaces --include-workspace-root
 
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS runtime
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
 ENV NODE_ENV=production
 RUN apk update && apk upgrade --no-cache && apk add --no-cache openssl && addgroup -S app && adduser -S app -G app
-# node:20-alpine bundles npm's own internal dependency snapshot (its vendored tar/glob/minimatch/
+# node:22-alpine bundles npm's own internal dependency snapshot (its vendored tar/glob/minimatch/
 # brace-expansion/cross-spawn/sigstore/ip-address, used by npm's own registry/install machinery) —
 # unrelated to anything in this repo's package-lock.json, but still scanned and flagged by the
-# container-security Trivy gate since it's on disk in every node:20-alpine image regardless of
+# container-security Trivy gate since it's on disk in every node:*-alpine image regardless of
 # npm version. Nothing at runtime needs `npm`/`npx`/`corepack` (see CMD below, which invokes tsx
 # directly), so the fix is to delete them rather than chase npm CLI version bumps that don't
 # reliably clear this — found by tracing every flagged package.json's actual path in the built
