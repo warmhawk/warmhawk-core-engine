@@ -69,7 +69,8 @@ confirmed pointing at this server:
 ```
 
 Common causes: DNS not yet propagated, Let's Encrypt rate limits (5 certs/domain/week — wait or
-use `--staging` while testing), port 80 blocked by a firewall between the internet and this box.
+use `--letsencrypt-staging` while testing), port 80 blocked by a firewall between the internet and
+this box.
 
 ## Stripe / license-issuance issues
 
