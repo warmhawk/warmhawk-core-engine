@@ -92,7 +92,7 @@ fail() {
 cleanup() {
   local exit_code=$?
   if [ -n "$SSH_CONTROL_PATH" ] && [ -S "$SSH_CONTROL_PATH" ]; then
-    ssh -S "$SSH_CONTROL_PATH" -O exit "${E2E_SSH_HOST}" >/dev/null 2>&1 || true
+    ssh -n -S "$SSH_CONTROL_PATH" -O exit "${E2E_SSH_HOST}" >/dev/null 2>&1 || true
   fi
   [ -n "$TMP_SSH_KEY" ] && [ -f "$TMP_SSH_KEY" ] && rm -f "$TMP_SSH_KEY"
   if [ "$exit_code" -ne 0 ]; then
@@ -122,7 +122,15 @@ if [ -n "$E2E_SSH_HOST" ]; then
   mkdir -p ~/.ssh
   ssh-keyscan -H "$E2E_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
   SSH_CONTROL_PATH="$(mktemp -u)"
-  SSH_BASE=(ssh -i "$E2E_SSH_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+  # -n: run_on_target's ssh calls execute one-shot remote commands (install.sh, a docker exec) that
+  # never need to read from local stdin. Without it, ssh forwards this step's own stdin to the
+  # remote session — and when Woodpecker feeds a step's whole commands: list to sh over a shared
+  # stdin pipe (rather than as a script file), ssh can race the outer shell for bytes off that same
+  # pipe and silently steal some of a LATER command in this step, corrupting it. Confirmed live:
+  # identical code succeeded in pipeline #60 and failed in #66 with "/bin/sh: syntax error:
+  # unterminated quoted string" right after run_on_target's install.sh call returned — a timing-
+  # dependent race, not a real syntax bug in the later command.
+  SSH_BASE=(ssh -n -i "$E2E_SSH_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
             -o ControlMaster=auto -o "ControlPath=$SSH_CONTROL_PATH" -o ControlPersist=60s
             "root@${E2E_SSH_HOST}")
   run_on_target() { "${SSH_BASE[@]}" "cd '$E2E_REMOTE_DIR' && $*"; }
