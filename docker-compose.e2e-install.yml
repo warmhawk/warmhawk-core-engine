@@ -47,7 +47,15 @@ services:
     ports:
       - '${MAILPIT_SMTP_TEST_PORT:-4620}:1025' # SMTP — the test mailbox sends through this
       - '${MAILPIT_HTTP_TEST_PORT:-4621}:8025' # Web UI + REST API — run.sh polls GET /api/v1/messages here
-    networks: [warmhawk_internal]
+    # Bug fix (release-e2e, 2026-08-28): same failure mode already fixed for nginx (2026-08-25) and
+    # certbot (2026-08-28) in docker-compose.yml -- warmhawk_internal is `internal: true`, so a
+    # container attached to ONLY that network gets its `ports:` publish silently accepted but never
+    # actually wired up (confirmed live: `docker ps` showed mailpit healthy with no host-port
+    # mapping at all, `ss -tlnp` showed nothing listening on 4620/4621, even though `docker compose
+    # config` resolved the ports correctly). warmhawk_edge is the non-internal network those two
+    # fixes added for the same reason; mailpit needs no inbound reachability FROM warmhawk_edge,
+    # just membership in a non-internal network for Docker to actually publish its ports.
+    networks: [warmhawk_internal, warmhawk_edge]
     deploy:
       resources:
         limits: { cpus: '0.25', memory: 128M }

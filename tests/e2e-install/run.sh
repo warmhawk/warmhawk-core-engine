@@ -249,7 +249,19 @@ with smtplib.SMTP(host, port, timeout=15) as smtp:
 print(f"[e2e-install] sent '{subject}' to {mail_to} via {host}:{port}")
 PYEOF
 }
-send_test_email || fail "Direct SMTP send to Mailpit failed."
+if ! send_test_email; then
+  # Diagnostic-only (2026-08-28): every prior release-e2e attempt has died here with
+  # ConnectionRefusedError, even after confirming the network path itself is fine (manual
+  # reproductions from the CI runner, both bare and containerized, reach a live mailpit on this
+  # exact host:port without issue). Dump mailpit's actual state on the scratch host at the moment
+  # of failure so the next real run pins the mechanism instead of guessing further -- safe to
+  # remove once that's done.
+  if [ -n "$E2E_SSH_HOST" ]; then
+    log "SMTP send failed -- dumping scratch-host mailpit diagnostics:"
+    "${SSH_BASE[@]}" "echo '--- docker ps -a (mailpit) ---'; docker ps -a --filter name=mailpit --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'; echo '--- docker logs (mailpit, last 80 lines) ---'; docker logs \$(docker ps -aq --filter name=mailpit | head -n1) --tail 80 2>&1; echo '--- listening ports (4620/4621) ---'; ss -tlnp | grep -E ':46(20|21)' || echo 'nothing listening on 4620/4621'" 2>&1 | sed 's/^/[diag] /' || log "  (diagnostic ssh call itself failed, see above)"
+  fi
+  fail "Direct SMTP send to Mailpit failed."
+fi
 
 # --- 5. Poll Mailpit and assert exactly one message arrived, with the expected subject -----------
 MAILPIT_API="http://${MAILPIT_HTTP_HOST}:${MAILPIT_HTTP_TEST_PORT}/api/v1/messages"
