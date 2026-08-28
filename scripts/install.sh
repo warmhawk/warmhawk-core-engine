@@ -25,6 +25,10 @@
 #     # install alongside an existing web server that already owns 80/443 — see the port-selection
 #     # block below and docs/troubleshooting.md's "Installing alongside an existing web server".
 #     # Omit --http-port/--https-port and this happens automatically when 80/443 are occupied.
+#   ./scripts/install.sh --domain api.yourcompany.com --letsencrypt-staging
+#     # issue a Let's Encrypt STAGING cert instead of production — for repeated automated testing
+#     # against the same domain only (staging certs aren't publicly trusted). Never use this for a
+#     # real customer install.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,6 +64,7 @@ CERT_PATH=""
 KEY_PATH=""
 HTTP_PORT_FLAG=""
 HTTPS_PORT_FLAG=""
+LETSENCRYPT_STAGING=false
 
 log()  { echo "[install] $*"; }
 fail() {
@@ -88,9 +93,24 @@ while [ $# -gt 0 ]; do
     --key-path) KEY_PATH="$2"; shift 2 ;;
     --http-port) HTTP_PORT_FLAG="$2"; shift 2 ;;
     --https-port) HTTPS_PORT_FLAG="$2"; shift 2 ;;
+    --letsencrypt-staging) LETSENCRYPT_STAGING=true; shift ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
+
+# --letsencrypt-staging: points certbot at Let's Encrypt's staging directory instead of production.
+# Staging certs aren't publicly trusted (self-signed root), so this is NOT for real customer
+# installs — it exists for repeated automated testing against the same domain, where production's
+# "5 duplicate certificates per exact domain set per 168h" rate limit is trivially tripped by a
+# handful of e2e runs in one day (hit live: tests/e2e-install/run.sh's scratch host, 2026-08-28).
+# certbot persists whichever --server URL is used into the cert's own renewal config, so the
+# renewal sidecar (docker-compose.yml's `certbot` service) automatically keeps using the same
+# (staging or production) server on every subsequent renewal — no separate wiring needed there.
+CERTBOT_EXTRA_ARGS=()
+if [ "$LETSENCRYPT_STAGING" = true ]; then
+  CERTBOT_EXTRA_ARGS+=(--server https://acme-staging-v02.api.letsencrypt.org/directory)
+  log "NOTE: --letsencrypt-staging set — issuing a Let's Encrypt STAGING certificate (not publicly trusted). Never use this flag for a real customer install."
+fi
 
 # --- Idempotency: load any already-generated secrets from a prior run --------------------------
 if [ -f "$ENV_FILE" ]; then
@@ -110,6 +130,7 @@ if [ "$RETRY_TLS" = true ]; then
   # script ("/bin/sh: can't open 'certbot': No such file or directory").
   docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm --entrypoint certbot certbot \
     certonly --webroot -w /var/www/certbot -d "$WARMHAWK_DOMAIN" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" \
+    "${CERTBOT_EXTRA_ARGS[@]}" \
     || fail "certbot retry failed. Confirm DNS for ${WARMHAWK_DOMAIN} now resolves to this server, then re-run: ./scripts/install.sh --retry-tls"
   enable_tls_template
   log "Restarting nginx so it re-renders its template (envsubst only runs at container start, never on reload)..."
@@ -302,7 +323,8 @@ else
   log "Requesting a Let's Encrypt certificate for ${DOMAIN} via certbot (webroot HTTP-01)..."
   # --entrypoint certbot — see the matching --retry-tls invocation above for why.
   if docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm --entrypoint certbot certbot \
-      certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}"; then
+      certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}" \
+      "${CERTBOT_EXTRA_ARGS[@]}"; then
     enable_tls_template
     log "Restarting nginx so it re-renders its template with TLS enabled (envsubst only runs at container start)..."
     docker compose -f "$REPO_ROOT/docker-compose.yml" restart nginx

@@ -27,7 +27,13 @@
 # --------------------------------------------------------------------------------------------------
 # What this script does, in order:
 #   1. Runs `scripts/install.sh --domain "$E2E_DOMAIN"` against the target — the exact command a
-#      real customer runs, unmodified. (API-surface correction pass: this step previously also
+#      real customer runs, unmodified except for `--letsencrypt-staging` (on by default here, see
+#      E2E_LETSENCRYPT_STAGING below): this script's own health/API checks already use `curl -k`
+#      throughout, so a publicly-trusted cert was never actually required for the assertions this
+#      test makes, and issuing a real production cert on every run against the same reused scratch
+#      domain trips Let's Encrypt's "5 duplicate certs per exact domain set per 168h" rate limit
+#      after only a handful of runs in one day (hit live, 2026-08-28 — see install.sh's own comment
+#      on the flag for the full incident). (API-surface correction pass: this step previously also
 #      passed `--license <test-key>` and a following step polled `POST /auth/activate` — both
 #      removed. Tier 0 carries no license gate at all, `/auth/activate` was never actually
 #      implemented in this repo, and `install.sh` no longer accepts `--license`. See that script's
@@ -64,6 +70,7 @@ E2E_SSH_HOST="${E2E_SSH_HOST:-}"                   # optional — set to drive i
 E2E_SSH_KEY="${E2E_SSH_KEY:-}"                     # optional — PEM contents (not a path)
 E2E_SSH_KEY_PATH="${E2E_SSH_KEY_PATH:-}"           # optional — path to an existing private key file
 E2E_REMOTE_DIR="${E2E_REMOTE_DIR:-$REPO_ROOT}"     # cwd for install.sh — see the project-name note below
+E2E_LETSENCRYPT_STAGING="${E2E_LETSENCRYPT_STAGING:-true}"  # avoid burning the prod LE rate limit on the reused scratch domain
 E2E_HEALTH_TIMEOUT_SECONDS="${E2E_HEALTH_TIMEOUT_SECONDS:-180}"
 E2E_MAIL_TIMEOUT_SECONDS="${E2E_MAIL_TIMEOUT_SECONDS:-60}"
 MAILPIT_HTTP_HOST="${MAILPIT_HTTP_HOST:-$E2E_SSH_HOST}"   # host to reach Mailpit's published HTTP API from
@@ -92,7 +99,7 @@ fail() {
 cleanup() {
   local exit_code=$?
   if [ -n "$SSH_CONTROL_PATH" ] && [ -S "$SSH_CONTROL_PATH" ]; then
-    ssh -S "$SSH_CONTROL_PATH" -O exit "${E2E_SSH_HOST}" >/dev/null 2>&1 || true
+    ssh -n -S "$SSH_CONTROL_PATH" -O exit "${E2E_SSH_HOST}" >/dev/null 2>&1 || true
   fi
   [ -n "$TMP_SSH_KEY" ] && [ -f "$TMP_SSH_KEY" ] && rm -f "$TMP_SSH_KEY"
   if [ "$exit_code" -ne 0 ]; then
@@ -122,7 +129,15 @@ if [ -n "$E2E_SSH_HOST" ]; then
   mkdir -p ~/.ssh
   ssh-keyscan -H "$E2E_SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
   SSH_CONTROL_PATH="$(mktemp -u)"
-  SSH_BASE=(ssh -i "$E2E_SSH_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
+  # -n: run_on_target's ssh calls execute one-shot remote commands (install.sh, a docker exec) that
+  # never need to read from local stdin. Without it, ssh forwards this step's own stdin to the
+  # remote session — and when Woodpecker feeds a step's whole commands: list to sh over a shared
+  # stdin pipe (rather than as a script file), ssh can race the outer shell for bytes off that same
+  # pipe and silently steal some of a LATER command in this step, corrupting it. Confirmed live:
+  # identical code succeeded in pipeline #60 and failed in #66 with "/bin/sh: syntax error:
+  # unterminated quoted string" right after run_on_target's install.sh call returned — a timing-
+  # dependent race, not a real syntax bug in the later command.
+  SSH_BASE=(ssh -n -i "$E2E_SSH_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
             -o ControlMaster=auto -o "ControlPath=$SSH_CONTROL_PATH" -o ControlPersist=60s
             "root@${E2E_SSH_HOST}")
   run_on_target() { "${SSH_BASE[@]}" "cd '$E2E_REMOTE_DIR' && $*"; }
@@ -141,8 +156,12 @@ fi
 # compose` call install.sh makes internally — so install.sh's own bring-up joins the same Compose
 # project and the same `warmhawk_internal` network mailpit is already on, rather than creating a
 # second, competing stack. Keep E2E_REMOTE_DIR pointed at whatever directory that earlier step used.
-log "Running scripts/install.sh --domain ${E2E_DOMAIN} (the real customer command)..."
-run_on_target "./scripts/install.sh --domain '${E2E_DOMAIN}'" \
+INSTALL_CMD="./scripts/install.sh --domain '${E2E_DOMAIN}'"
+if [ "$E2E_LETSENCRYPT_STAGING" = true ]; then
+  INSTALL_CMD="$INSTALL_CMD --letsencrypt-staging"
+fi
+log "Running scripts/install.sh --domain ${E2E_DOMAIN} (the real customer command$([ "$E2E_LETSENCRYPT_STAGING" = true ] && echo ", plus --letsencrypt-staging"))..."
+run_on_target "$INSTALL_CMD" \
   || fail "scripts/install.sh exited non-zero. Check its own [install] log lines above for which step failed."
 log "install.sh completed."
 
