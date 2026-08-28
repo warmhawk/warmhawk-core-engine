@@ -214,8 +214,18 @@ services:
     networks: [warmhawk_internal]
     deploy:
       resources:
-        limits: { cpus: '0.25', memory: 128M }
-        reservations: { cpus: '0.05', memory: 32M }
+        # Bug fix (release-e2e, 2026-08-28): 128M was too tight — Docker Compose v2 (confirmed on
+        # v5.5.0, no swarm involved) applies `deploy.resources.limits` as real cgroup memory caps,
+        # and Kuma's own Node process alone sits around 120-126MB anon-rss WHILE STILL BOOTING
+        # (before finishing DB patches or ever starting to listen). Confirmed live via dmesg on the
+        # scratch host: the kernel OOM-killer was killing the `node` process on a ~15-25s cycle,
+        # forever, `restart: unless-stopped` immediately relaunching it into the same crash loop —
+        # it never once finished booting long enough to accept a connection, which is what
+        # provisionUptimeKuma.ts's connectWithRetry saw as a persistent "xhr poll error" regardless
+        # of retry budget or transport order. 256M gives real steady-state headroom above that ~126MB
+        # boot-time floor.
+        limits: { cpus: '0.25', memory: 256M }
+        reservations: { cpus: '0.05', memory: 64M }
 
   # One-shot admin-account + monitor/notification provisioning for uptime-kuma above — Kuma 1.x
   # ships with nothing configured out of the box, which contradicted tier-config's
@@ -272,7 +282,17 @@ services:
     volumes:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot
-    networks: [warmhawk_internal]
+    # Bug fix (release-e2e, 2026-08-28): `warmhawk_internal` is `internal: true` (see that network's
+    # own header comment above) — Docker gives containers on ONLY that network no default route/NAT
+    # at all, so certbot could never reach the internet, full stop. Confirmed live: `docker compose
+    # run --rm --entrypoint certbot certbot certonly ...` failed with
+    # `requests.exceptions.ConnectionError: ... Failed to establish a new connection: [Errno -3] Try
+    # again` trying to reach acme-v02.api.letsencrypt.org — Errno -3 is DNS resolution failure,
+    # exactly what an internal-only network produces. certbot doesn't talk to any other service over
+    # the network (the webroot HTTP-01 challenge is exchanged with nginx via the shared certbot_www
+    # volume, not a network call), so it only needs an outbound route — added here the same way
+    # nginx already gets one, via the non-internal warmhawk_edge network.
+    networks: [warmhawk_internal, warmhawk_edge]
     deploy:
       resources:
         limits: { cpus: '0.25', memory: 128M }
