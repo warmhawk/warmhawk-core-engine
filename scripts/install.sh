@@ -102,8 +102,14 @@ fi
 if [ "$RETRY_TLS" = true ]; then
   [ -z "${WARMHAWK_DOMAIN:-}" ] && fail "No existing WARMHAWK_DOMAIN found in .env — run a full install first."
   log "Retrying TLS issuance for ${WARMHAWK_DOMAIN}..."
-  docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm certbot \
-    certbot certonly --webroot -w /var/www/certbot -d "$WARMHAWK_DOMAIN" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" \
+  # --entrypoint certbot: the certbot service's own entrypoint (docker-compose.yml)
+  # is pinned to /bin/sh so the renewal loop's `command: ['-c', '...']` works —
+  # but `docker compose run` only replaces `command:`, never `entrypoint:`, so
+  # without this override the override args below would run as `sh certbot
+  # certonly ...`, and sh tries to open a file literally named "certbot" as a
+  # script ("/bin/sh: can't open 'certbot': No such file or directory").
+  docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm --entrypoint certbot certbot \
+    certonly --webroot -w /var/www/certbot -d "$WARMHAWK_DOMAIN" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" \
     || fail "certbot retry failed. Confirm DNS for ${WARMHAWK_DOMAIN} now resolves to this server, then re-run: ./scripts/install.sh --retry-tls"
   enable_tls_template
   log "Restarting nginx so it re-renders its template (envsubst only runs at container start, never on reload)..."
@@ -294,8 +300,9 @@ if [ "$SKIP_CERTBOT" = true ]; then
   TLS_READY=true
 else
   log "Requesting a Let's Encrypt certificate for ${DOMAIN} via certbot (webroot HTTP-01)..."
-  if docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm certbot \
-      certbot certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}"; then
+  # --entrypoint certbot — see the matching --retry-tls invocation above for why.
+  if docker compose -f "$REPO_ROOT/docker-compose.yml" run --rm --entrypoint certbot certbot \
+      certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}"; then
     enable_tls_template
     log "Restarting nginx so it re-renders its template with TLS enabled (envsubst only runs at container start)..."
     docker compose -f "$REPO_ROOT/docker-compose.yml" restart nginx

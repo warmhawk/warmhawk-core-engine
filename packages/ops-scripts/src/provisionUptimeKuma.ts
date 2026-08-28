@@ -75,7 +75,19 @@ async function connectWithRetry(): Promise<Socket> {
   let lastError: Error | null = null;
 
   while (Date.now() < deadline) {
-    const socket = io(KUMA_URL, { reconnection: false, timeout: 10_000, transports: ['websocket', 'polling'] });
+    // 'polling' first, then upgrade — engine.io-client treats an explicit
+    // transports array as attempt order, so listing 'websocket' first skips
+    // the plain-HTTP handshake and opens a raw WS connection right away.
+    // That's the standard socket.io connectivity pitfall: it needs the
+    // Docker network path to support a WS upgrade from the first packet,
+    // which real-world Docker bridge networking doesn't always deliver
+    // instantly against a container that just started — confirmed live via
+    // warmhawk-core-engine's own release-e2e (2026-08-28): kuma-provision
+    // failed every attempt with a bare "websocket error" even with a 60s/2s
+    // retry budget, never once falling back to polling to find out the
+    // server was actually reachable. Polling-first matches Socket.IO's own
+    // default and every Kuma automation example.
+    const socket = io(KUMA_URL, { reconnection: false, timeout: 10_000, transports: ['polling', 'websocket'] });
     try {
       await new Promise<void>((resolve, reject) => {
         socket.once('connect', () => resolve());
