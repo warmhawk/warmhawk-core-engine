@@ -91,7 +91,8 @@ services:
     <<: *restart-policy
     # Redis Durability (V12) — ops/redis.conf (AOF everysec, noeviction) mounted read-only;
     # password injected via --requirepass on the command line, never written into the conf file.
-    command: ['redis-server', '/usr/local/etc/redis/redis.conf', '--requirepass', '${REDIS_PASSWORD}']
+    command:
+      ['redis-server', '/usr/local/etc/redis/redis.conf', '--requirepass', '${REDIS_PASSWORD}']
     volumes:
       - ../ops/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis_data:/data
@@ -106,11 +107,27 @@ services:
         limits: { cpus: '0.5', memory: 256M }
         reservations: { cpus: '0.1', memory: 64M }
 
+  # migrate and api build from the identical context+Dockerfile (just a different command:) — an
+  # explicit shared `image:` tag (rather than each service falling back to its own default
+  # <project>-<service> tag) makes that sharing unambiguous to Compose. Without it, `docker compose
+  # up` intermittently built api's image but never migrate's own separate tag under load, hitting
+  # "No such image: docker-migrate:latest" — confirmed live 2026-08-29 on the release-e2e scratch
+  # host (a resource-constrained 2vCPU/4GB box), not reproducible every run, but real: it broke
+  # pipeline #90 outright. Never reproduced on a normal dev machine's spare capacity.
   migrate:
     build: { context: .., dockerfile: docker/Dockerfile.api }
+    image: docker-api:latest
     <<: *restart-policy
     restart: 'no'
-    command: ['node', '/repo/node_modules/.bin/prisma', 'migrate', 'deploy', '--schema', '/repo/packages/db/prisma/schema.prisma']
+    command:
+      [
+        'node',
+        '/repo/node_modules/.bin/prisma',
+        'migrate',
+        'deploy',
+        '--schema',
+        '/repo/packages/db/prisma/schema.prisma',
+      ]
     environment:
       DATABASE_URL: postgresql://warmhawk:${POSTGRES_PASSWORD}@postgres:5432/warmhawk
     depends_on:
@@ -119,6 +136,7 @@ services:
 
   api:
     build: { context: .., dockerfile: docker/Dockerfile.api }
+    image: docker-api:latest
     <<: *restart-policy
     environment:
       NODE_ENV: production
@@ -283,7 +301,11 @@ services:
     image: certbot/certbot:v2.11.0@sha256:ddf9e5d226a56e886986838fa0ebedc0237511c78664352e8d0f4346ee022cd8
     <<: *restart-policy
     entrypoint: /bin/sh
-    command: ['-c', 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h; done']
+    command:
+      [
+        '-c',
+        'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h; done',
+      ]
     volumes:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot
