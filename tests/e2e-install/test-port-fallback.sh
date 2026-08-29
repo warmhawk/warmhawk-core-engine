@@ -58,7 +58,7 @@ OWN_ENV=false
 cleanup() {
   local exit_code=$?
   log "Tearing down (project-scoped — does not touch any other stack on this host)..."
-  docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
+  docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
   docker rm -f "$PORT_HOG_NAME" >/dev/null 2>&1 || true
   [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env"
   if [ "$exit_code" -eq 0 ]; then
@@ -80,7 +80,7 @@ OWN_ENV=true
 # trap gets a chance to run. Starting from a guaranteed-clean slate here means a stale leftover
 # container never masquerades as a false failure on the next run.
 log "Pre-cleanup: removing any leftover state from a prior interrupted run of this test..."
-docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
+docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
 docker rm -f "$PORT_HOG_NAME" >/dev/null 2>&1 || true
 
 # --- 1. Occupy 80/443 with a throwaway container, simulating a non-empty customer box ------------
@@ -111,7 +111,7 @@ grep -q "^NGINX_HTTPS_HOST_PORT=${ALT_HTTPS_PORT}$" "$REPO_ROOT/.env" \
   || fail ".env does not show NGINX_HTTPS_HOST_PORT=${ALT_HTTPS_PORT} — fallback did not trigger as expected."
 log "Confirmed: .env recorded the alt ports (${ALT_HTTP_PORT}/${ALT_HTTPS_PORT})."
 
-docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" ps nginx | grep -q "Up" \
+docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" ps nginx | grep -q "Up" \
   || fail "nginx container is not running after install.sh completed."
 log "Confirmed: nginx container is running."
 

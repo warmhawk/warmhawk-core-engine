@@ -1,5 +1,10 @@
 # WarmHawk Core Engine — production package compose file, per the V12 Containerization Model.
 #
+# Lives under docker/ (2026-08-29 root-folder cleanup, matching jitterflow's own docker/
+# convention) alongside every docker-compose*.yml/Dockerfile.* in this repo — always invoke as
+# `docker compose -f docker/docker-compose.yml ...` from repo root, never from inside docker/
+# itself (build contexts below are `..`-relative, resolved against this file's own directory).
+#
 # THE RULE (opposite of jitterflow's shared-host model, on purpose — see this repo's build
 # report for the full contrast): every service below sits on the internal-only
 # `warmhawk_internal` Docker network with NO published host port. Only `nginx` publishes 80/443.
@@ -88,7 +93,7 @@ services:
     # password injected via --requirepass on the command line, never written into the conf file.
     command: ['redis-server', '/usr/local/etc/redis/redis.conf', '--requirepass', '${REDIS_PASSWORD}']
     volumes:
-      - ./ops/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ../ops/redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis_data:/data
     networks: [warmhawk_internal]
     healthcheck:
@@ -102,7 +107,7 @@ services:
         reservations: { cpus: '0.1', memory: 64M }
 
   migrate:
-    build: { context: ., dockerfile: docker/Dockerfile.api }
+    build: { context: .., dockerfile: docker/Dockerfile.api }
     <<: *restart-policy
     restart: 'no'
     command: ['node', '/repo/node_modules/.bin/prisma', 'migrate', 'deploy', '--schema', '/repo/packages/db/prisma/schema.prisma']
@@ -113,7 +118,7 @@ services:
     networks: [warmhawk_internal]
 
   api:
-    build: { context: ., dockerfile: docker/Dockerfile.api }
+    build: { context: .., dockerfile: docker/Dockerfile.api }
     <<: *restart-policy
     environment:
       NODE_ENV: production
@@ -153,7 +158,7 @@ services:
         reservations: { cpus: '0.1', memory: 128M }
 
   worker:
-    build: { context: ., dockerfile: docker/Dockerfile.worker }
+    build: { context: .., dockerfile: docker/Dockerfile.worker }
     <<: *restart-policy
     environment:
       NODE_ENV: production
@@ -196,7 +201,7 @@ services:
       NEXTJS_CALLBACK_SECRET: ${NEXTJS_CALLBACK_SECRET}
     volumes:
       - n8n_data:/home/node/.n8n
-      - ./n8n/workflows:/home/node/workflows:ro
+      - ../n8n/workflows:/home/node/workflows:ro
     depends_on:
       postgres: { condition: service_healthy }
       api: { condition: service_started }
@@ -236,7 +241,7 @@ services:
   # (packages/ops-scripts is a workspace member, see docker/Dockerfile.api) rather than adding a
   # new image just for this.
   kuma-provision:
-    build: { context: ., dockerfile: docker/Dockerfile.api }
+    build: { context: .., dockerfile: docker/Dockerfile.api }
     profiles: ['tools']
     working_dir: /repo/packages/ops-scripts
     command: ['node', '/repo/node_modules/.bin/tsx', 'src/provisionUptimeKuma.ts']
@@ -250,7 +255,7 @@ services:
     networks: [warmhawk_internal]
 
   nginx:
-    build: { context: ./nginx }
+    build: { context: ../nginx }
     <<: *restart-policy
     environment:
       WARMHAWK_DOMAIN: ${WARMHAWK_DOMAIN}

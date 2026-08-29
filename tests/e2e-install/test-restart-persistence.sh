@@ -49,7 +49,7 @@ OWN_ENV=false
 cleanup() {
   local exit_code=$?
   log "Tearing down (project-scoped, WITH volumes this time — does not touch any other stack on this host)..."
-  docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
+  docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
   [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env"
   if [ "$exit_code" -eq 0 ]; then
     log "Teardown complete. PASSED."
@@ -67,9 +67,9 @@ OWN_ENV=true
 
 # Defensive pre-cleanup — same reasoning as test-port-fallback.sh's own.
 log "Pre-cleanup: removing any leftover state (including volumes) from a prior interrupted run of this test..."
-docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
+docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
 
-compose() { docker compose -f "$REPO_ROOT/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" "$@"; }
+compose() { docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" "$@"; }
 
 wait_for_health() {
   local label="$1"
