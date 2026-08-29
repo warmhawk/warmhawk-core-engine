@@ -131,6 +131,50 @@ describeIntegration('mailboxes routes (integration, real Postgres)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 
+  /**
+   * Regression guard: `PATCH /:id` used to pass `request.body as never` straight to
+   * `prisma.mailbox.update`'s `data`, so this route's `Body` type (`status`/`dailyCap` only) was
+   * compile-time decoration with no runtime enforcement — any authenticated caller could overwrite
+   * `provider` or the encrypted-credential columns through this endpoint. The route now whitelists
+   * exactly `status`/`dailyCap` field-by-field; this asserts other fields sent in the same payload
+   * are silently dropped rather than applied.
+   */
+  it('ignores fields outside the status/dailyCap whitelist on PATCH', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/mailboxes',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: {
+        email: `whitelist-${Date.now()}@example.com`,
+        domainId,
+        authUsername: 'smtp-user',
+        authPassword: 'original-secret-pw',
+      },
+    });
+    const id = created.json().id;
+    createdMailboxIds.push(id);
+
+    const patched = await app.inject({
+      method: 'PATCH',
+      url: `/v1/mailboxes/${id}`,
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: {
+        dailyCap: 12,
+        provider: 'GOOGLE_OAUTH',
+        authPasswordEncrypted: 'attacker-controlled-value',
+        oauthRefreshTokenEncrypted: 'attacker-controlled-token',
+      },
+    });
+    expect(patched.statusCode).toBe(200);
+    expect(patched.json().dailyCap).toBe(12);
+    expect(patched.json().provider).not.toBe('GOOGLE_OAUTH');
+
+    const stored = await prisma.mailbox.findUniqueOrThrow({ where: { id } });
+    expect(stored.provider).not.toBe('GOOGLE_OAUTH');
+    expect(stored.authPasswordEncrypted).not.toBe('attacker-controlled-value');
+    expect(stored.oauthRefreshTokenEncrypted).not.toBe('attacker-controlled-token');
+  });
+
   it('deletes a mailbox and 404s deleting it again', async () => {
     const created = await app.inject({
       method: 'POST',

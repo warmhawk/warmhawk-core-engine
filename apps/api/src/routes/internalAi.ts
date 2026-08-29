@@ -162,19 +162,29 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
     // Guardrails — "opt-out language detected in reply threads auto-suppresses the lead." This
     // IS that requirement, made real: the classification call above is what makes it happen, not
     // a separate background workflow.
+    //
+    // The suppression-entry upsert and the lead-status update run in one transaction: previously
+    // these were two independent awaits, so a crash or dropped DB connection between them could
+    // leave a SuppressionEntry created with the lead still CONTACTED (or, if the second write hit
+    // a retry/duplicate classify-reply call, applied out of order) — an inconsistent state where
+    // the suppression check elsewhere and this lead's own status row disagree. Both writes are
+    // otherwise idempotent (fixed assignments, not read-modify-write), so the transaction's only
+    // job is all-or-nothing atomicity, not serializing concurrent classify-reply calls.
     if (classification === 'OPT_OUT') {
       const lead = await prisma.lead.findUnique({ where: { id: replyRow.leadId } });
       if (lead) {
-        await prisma.suppressionEntry.upsert({
-          where: { email: lead.email },
-          create: {
-            email: lead.email,
-            reason: 'Reply opt-out language detected',
-            source: 'reply_opt_out',
-          },
-          update: {},
-        });
-        await prisma.lead.update({ where: { id: lead.id }, data: { status: 'SUPPRESSED' } });
+        await prisma.$transaction([
+          prisma.suppressionEntry.upsert({
+            where: { email: lead.email },
+            create: {
+              email: lead.email,
+              reason: 'Reply opt-out language detected',
+              source: 'reply_opt_out',
+            },
+            update: {},
+          }),
+          prisma.lead.update({ where: { id: lead.id }, data: { status: 'SUPPRESSED' } }),
+        ]);
       }
     }
 
