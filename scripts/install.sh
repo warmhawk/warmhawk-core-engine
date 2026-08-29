@@ -79,7 +79,7 @@ fail() {
 # reason (bad env var, port clash inside the container, migration error, etc.) is visible instead.
 dump_compose_logs_and_fail() {
   log "docker compose up failed — dumping recent logs from every service for diagnosis:"
-  docker compose -f "$REPO_ROOT/docker/docker-compose.yml" logs --no-color --tail=100 || true
+  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" logs --no-color --tail=100 || true
   fail "$1"
 }
 
@@ -128,13 +128,13 @@ if [ "$RETRY_TLS" = true ]; then
   # without this override the override args below would run as `sh certbot
   # certonly ...`, and sh tries to open a file literally named "certbot" as a
   # script ("/bin/sh: can't open 'certbot': No such file or directory").
-  docker compose -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot certbot \
+  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot certbot \
     certonly --webroot -w /var/www/certbot -d "$WARMHAWK_DOMAIN" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" \
     "${CERTBOT_EXTRA_ARGS[@]}" \
     || fail "certbot retry failed. Confirm DNS for ${WARMHAWK_DOMAIN} now resolves to this server, then re-run: ./scripts/install.sh --retry-tls"
   enable_tls_template
   log "Restarting nginx so it re-renders its template (envsubst only runs at container start, never on reload)..."
-  docker compose -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
+  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
   log "TLS issuance succeeded and nginx restarted with TLS enabled."
   exit 0
 fi
@@ -194,7 +194,7 @@ check_port_free() {
 # idempotent re-run of an already-installed, working instance would wrongly trip the fallback path,
 # since our own nginx would itself be the thing holding the port.
 nginx_already_running() {
-  docker compose -f "$REPO_ROOT/docker/docker-compose.yml" ps --status running nginx 2>/dev/null | grep -q nginx
+  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" ps --status running nginx 2>/dev/null | grep -q nginx
 }
 
 if [ -n "$HTTP_PORT_FLAG" ] || [ -n "$HTTPS_PORT_FLAG" ]; then
@@ -298,7 +298,7 @@ log "Secrets generated/loaded and written to .env (never committed — see .giti
 
 # --- Bring up nginx HTTP-only + core services (no TLS yet) -------------------------------------
 log "Starting core services (HTTP-only, pre-TLS)..."
-docker compose -f "$REPO_ROOT/docker/docker-compose.yml" up -d postgres redis migrate api worker n8n uptime-kuma nginx \
+docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d postgres redis migrate api worker n8n uptime-kuma nginx \
   || dump_compose_logs_and_fail "core services failed to start — see logs above."
 
 # --- Uptime Kuma auto-provisioning (admin account + monitors + optional alert webhook) ---------
@@ -306,11 +306,11 @@ docker compose -f "$REPO_ROOT/docker/docker-compose.yml" up -d postgres redis mi
 # stack depends on. A failure here (e.g. Kuma still starting up, or a container-runtime quirk)
 # just means monitors weren't created yet; re-run this exact command any time to retry.
 log "Provisioning Uptime Kuma (admin account + monitors)..."
-if docker compose -f "$REPO_ROOT/docker/docker-compose.yml" run --rm kuma-provision; then
+if docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm kuma-provision; then
   log "Uptime Kuma provisioning complete."
 else
   log "WARNING: Uptime Kuma provisioning failed. Retry any time with:"
-  log "  docker compose -f $REPO_ROOT/docker/docker-compose.yml run --rm kuma-provision"
+  log "  docker compose --env-file $REPO_ROOT/.env -f $REPO_ROOT/docker/docker-compose.yml run --rm kuma-provision"
 fi
 
 # --- TLS bootstrap -------------------------------------------------------------------------------
@@ -322,12 +322,12 @@ if [ "$SKIP_CERTBOT" = true ]; then
 else
   log "Requesting a Let's Encrypt certificate for ${DOMAIN} via certbot (webroot HTTP-01)..."
   # --entrypoint certbot — see the matching --retry-tls invocation above for why.
-  if docker compose -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot certbot \
+  if docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot certbot \
       certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}" \
       "${CERTBOT_EXTRA_ARGS[@]}"; then
     enable_tls_template
     log "Restarting nginx so it re-renders its template with TLS enabled (envsubst only runs at container start)..."
-    docker compose -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
+    docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
     TLS_READY=true
     log "TLS certificate issued and nginx restarted with TLS enabled."
   else
@@ -338,7 +338,7 @@ else
   fi
 fi
 
-docker compose -f "$REPO_ROOT/docker/docker-compose.yml" up -d certbot \
+docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d certbot \
   || dump_compose_logs_and_fail "certbot renewal sidecar failed to start — see logs above."
 
 # --- Nightly backup opt-in (prompts once) -------------------------------------------------------
@@ -369,7 +369,7 @@ else
 fi
 
 log "Bringing up the full stack..."
-docker compose -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build \
+docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build \
   || dump_compose_logs_and_fail "final full-stack startup failed — see logs above."
 
 if [ "${PORT_FALLBACK:-false}" = true ]; then
