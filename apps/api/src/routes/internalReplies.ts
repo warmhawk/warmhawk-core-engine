@@ -44,7 +44,7 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
     });
 
     const seenLeadIds = new Set<string>();
-    const pending: {
+    const candidates: {
       leadId: string;
       campaignId: string;
       email: string;
@@ -59,16 +59,30 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
       if (log.lead.status !== 'CONTACTED') continue; // already replied/bounced/suppressed
       if (!log.providerMessageId) continue; // sent before this field existed, or send failed
 
-      const alreadyHasReply = await prisma.reply.findFirst({ where: { leadId: log.leadId } });
-      if (alreadyHasReply) continue;
-
-      pending.push({
+      candidates.push({
         leadId: log.leadId,
         campaignId: log.campaignId,
         email: log.lead.email,
         providerMessageId: log.providerMessageId,
       });
     }
+
+    // A single batched existence check instead of one `reply.findFirst` round-trip per candidate
+    // (was a sequential N+1 inside the loop above — on a mailbox with thousands of CONTACTED
+    // leads this workflow polls every few minutes, that meant thousands of sequential DB
+    // round-trips per poll).
+    const existingReplyLeadIds = candidates.length
+      ? new Set(
+          (
+            await prisma.reply.findMany({
+              where: { leadId: { in: candidates.map((c) => c.leadId) } },
+              select: { leadId: true },
+            })
+          ).map((r) => r.leadId),
+        )
+      : new Set<string>();
+
+    const pending = candidates.filter((c) => !existingReplyLeadIds.has(c.leadId));
 
     return reply.send({ pending });
   });
