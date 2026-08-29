@@ -1,8 +1,8 @@
 # Test-only overlay — INSTALL-FLOW E2E ONLY (tests/e2e-install/run.sh), never used by
 # docker-compose.test.yml's integration-test flow and never shipped to a customer. Adds a Mailpit
 # SMTP catcher so run.sh can send one real test email through and assert it arrived, without
-# touching any live mail provider. Used as:
-#   docker compose -f docker-compose.yml -f docker-compose.e2e-install.yml up -d mailpit
+# touching any live mail provider. Lives under docker/ alongside the base file — used as:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.e2e-install.yml up -d mailpit
 #
 # Always pass BOTH `-f` files together, base file first, exactly as docker-compose.test.yml's own
 # header documents doing for postgres/redis. Two reasons, not just one:

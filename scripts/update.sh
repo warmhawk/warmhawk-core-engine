@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-COMPOSE_FILE="$REPO_ROOT/docker-compose.yml"
+COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 
 log()  { echo "[update] $*"; }
 fail() {

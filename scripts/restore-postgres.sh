@@ -28,7 +28,7 @@ BACKUP_LOCAL_PATH="${BACKUP_LOCAL_PATH:-/var/backups/warmhawk}"
 POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-$(basename "$REPO_ROOT")-postgres-1}"
 POSTGRES_USER="${POSTGRES_USER:-warmhawk}"
 POSTGRES_DB="${POSTGRES_DB:-warmhawk}"
-COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker-compose.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/docker/docker-compose.yml}"
 
 log()  { echo "[restore-postgres] $*"; }
 fail() { echo "[restore-postgres] ERROR: $*" >&2; exit 1; }

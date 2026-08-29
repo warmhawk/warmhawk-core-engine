@@ -211,11 +211,11 @@ log "Best-effort: bootstrapping an admin session and an SMTP_CUSTOM mailbox poin
   BOOTSTRAP_PASSWORD="$(openssl rand -hex 16)"
   BOOTSTRAP_ID="e2eadmin$(openssl rand -hex 8)"
 
-  PASSWORD_HASH="$(run_on_target "docker compose -f docker-compose.yml exec -T api node -e \"console.log(require('bcrypt').hashSync(process.argv[1],10))\" '${BOOTSTRAP_PASSWORD}'" 2>/dev/null)" \
+  PASSWORD_HASH="$(run_on_target "docker compose -f docker/docker-compose.yml exec -T api node -e \"console.log(require('bcrypt').hashSync(process.argv[1],10))\" '${BOOTSTRAP_PASSWORD}'" 2>/dev/null)" \
     || { log "  (skip) couldn't compute a bcrypt hash inside the api container — skipping mailbox bootstrap."; exit 0; }
   [ -z "$PASSWORD_HASH" ] && { log "  (skip) empty bcrypt hash — skipping mailbox bootstrap."; exit 0; }
 
-  run_on_target "docker compose -f docker-compose.yml exec -T postgres psql -U warmhawk -d warmhawk -v ON_ERROR_STOP=1 -c \
+  run_on_target "docker compose -f docker/docker-compose.yml exec -T postgres psql -U warmhawk -d warmhawk -v ON_ERROR_STOP=1 -c \
     \"INSERT INTO users (id, email, \\\"passwordHash\\\", role, \\\"createdAt\\\", \\\"updatedAt\\\") \
        VALUES ('${BOOTSTRAP_ID}', '${BOOTSTRAP_EMAIL}', '${PASSWORD_HASH}', 'ADMIN', now(), now()) \
        ON CONFLICT (email) DO NOTHING;\"" \

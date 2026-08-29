@@ -24,6 +24,7 @@ See `docs/quickstart.md` for the Tier 0 (API-only) 5-minute first-send walkthrou
 
 | Path | What's in it |
 |---|---|
+| `docker/` | `docker-compose*.yml` + `Dockerfile.*` — production stack + test/local/e2e overlays |
 | `apps/api` | Fastify API server — routes, lib (encryption, license, spintax, spam score, OAuth, DNS checks) |
 | `apps/worker` | BullMQ dispatch worker — cadence/jitter, weighted rotation, reconciliation cron |
 | `packages/db` | Prisma schema + generated client |
@@ -40,7 +41,7 @@ See `docs/quickstart.md` for the Tier 0 (API-only) 5-minute first-send walkthrou
 
 ```bash
 npm install
-docker compose -f docker-compose.yml -f docker-compose.test.yml up -d postgres redis
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up -d postgres redis
 npm run db:migrate
 npm test                    # fast unit suite, no external dependencies
 npm run test:integration    # against the real Postgres/Redis above
