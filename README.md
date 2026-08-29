@@ -11,7 +11,6 @@ Prisma schema + install/update scripts — the free, fully-functional Tier 0 eng
 
 ```bash
 curl -fsSL https://warmhawk.com/install | bash -s -- \
-  --license whk_live_XXXXXXXXXXXX \
   --domain api.yourcompany.com
 ```
 
@@ -32,6 +31,7 @@ See `docs/quickstart.md` for the Tier 0 (API-only) 5-minute first-send walkthrou
 | `ops/redis.conf` | AOF-durable Redis config |
 | `nginx/` | Bundled nginx config template + Dockerfile (the only published ports in this package) |
 | `scripts/` | `install.sh`, `update.sh`, `backup-postgres.sh` |
+| `tests/e2e-install/` | Fast-tier install regressions (port fallback, idempotent rerun, restart/upgrade data-safety — no scratch VM needed) + the release-gated `run.sh` (real VM/DNS) |
 | `docs/` | Quickstart, backup/restore, and other self-serve docs |
 | `n8n/workflows` | Dispatch/warmup n8n workflow JSON |
 
@@ -39,12 +39,28 @@ See `docs/quickstart.md` for the Tier 0 (API-only) 5-minute first-send walkthrou
 
 ## 🧪 Local development
 
+Requires Node **22+** (see `engines.node` in `package.json`).
+
 ```bash
 npm install
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up -d postgres redis
+cp .env.example .env        # local dev only — a real install never needs this, install.sh generates it
+docker compose --env-file .env -f docker/docker-compose.yml -f docker/docker-compose.test.yml up -d postgres redis
 npm run db:migrate
 npm test                    # fast unit suite, no external dependencies
 npm run test:integration    # against the real Postgres/Redis above
+```
+
+`--env-file .env` is required — Compose only auto-discovers a `.env` next to the compose file
+itself, and `docker-compose.yml` lives in `docker/`, not the repo root.
+
+Fast-tier install regressions (`tests/e2e-install/test-*.sh`) run anywhere Docker runs, no VM or
+DNS needed:
+
+```bash
+bash tests/e2e-install/test-port-fallback.sh      # falls back to 8080/8443 when 80/443 are taken
+bash tests/e2e-install/test-idempotent-rerun.sh   # re-running install.sh reuses secrets, doesn't regenerate them
+bash tests/e2e-install/test-restart-persistence.sh  # docker compose down/up survives with data intact
+bash tests/e2e-install/test-upgrade-in-place.sh   # update.sh's rebuild/migrate/restart cycle is data-safe
 ```
 
 ---
@@ -53,5 +69,3 @@ npm run test:integration    # against the real Postgres/Redis above
 
 Business Source License 1.1 — non-compete Additional Use Grant blocking resale as a competing
 hosted service, converts to Apache 2.0 four years after each version's release date.
-
-<!-- ci-verify: 2026-08-28 push:main -> self-trigger-promote -> Pipeline B live-verification commit, no functional change -->
