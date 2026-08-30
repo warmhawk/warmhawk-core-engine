@@ -3,8 +3,12 @@
 #
 # Zero-touch upgrade: pulls the latest image/tag, runs any pending migrations, does a rolling
 # `docker compose up -d` restart. One command, no manual steps, no re-entering secrets or the
-# license key (already persisted in .env from install.sh). Symlinked into PATH as `warmhawk`
-# during install for the `warmhawk update` UX named in the spec.
+# license key (already persisted in .env from install.sh).
+#
+# Reached as `warmhawk update` via scripts/warmhawk, which install.sh symlinks into PATH. Note the
+# indirection is load-bearing: $1 here is a git ref, so a bare symlink of this script to
+# /usr/local/bin/warmhawk would make `warmhawk update` try to check out a branch named "update".
+# Covered by tests/e2e-install/test-warmhawk-command.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

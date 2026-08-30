@@ -11,10 +11,15 @@ Prisma schema + install/update scripts — the free, fully-functional Tier 0 eng
 
 ```bash
 curl -fsSL https://warmhawk.com/install | bash -s -- \
-  --domain api.yourcompany.com
+  --domain yourcompany.com
 ```
 
-See `docs/quickstart.md` for the Tier 0 (API-only) 5-minute first-send walkthrough, and
+Pass your **bare company domain**, not a hostname — the installer derives `api.yourcompany.com`
+for this engine (and `dashboard.yourcompany.com` if you add the licensed dashboard later). Passing
+`api.yourcompany.com` here would get you `api.api.yourcompany.com`.
+
+No license is needed: with no `--license`, the installer brings up this engine and stops. See
+`docs/quickstart.md` for the Tier 0 (API-only) 5-minute first-send walkthrough, and
 `docs/backup-and-restore.md` before you need either.
 
 ---
@@ -30,7 +35,7 @@ See `docs/quickstart.md` for the Tier 0 (API-only) 5-minute first-send walkthrou
 | `packages/tier-config` | Single source of truth for Tier 0/1/2 feature gating |
 | `ops/redis.conf` | AOF-durable Redis config |
 | `nginx/` | Bundled nginx config template + Dockerfile (the only published ports in this package) |
-| `scripts/` | `install.sh`, `update.sh`, `backup-postgres.sh` |
+| `scripts/` | `install.sh`, `update.sh`, `backup-postgres.sh`, and `warmhawk` — the CLI install.sh links into PATH (`warmhawk update` / `backup` / `status` / `logs`) |
 | `tests/e2e-install/` | Fast-tier install regressions (port fallback, idempotent rerun, restart/upgrade data-safety — no scratch VM needed) + the release-gated `run.sh` (real VM/DNS) |
 | `docs/` | Quickstart, backup/restore, and other self-serve docs |
 | `n8n/workflows` | Dispatch/warmup n8n workflow JSON |

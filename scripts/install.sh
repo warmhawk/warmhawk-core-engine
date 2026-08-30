@@ -378,7 +378,29 @@ if [ "${PORT_FALLBACK:-false}" = true ]; then
 else
   log "Done. TLS ready: ${TLS_READY}. Visit https://${DOMAIN}/ once TLS is confirmed."
 fi
-log "Run './scripts/update.sh' any time to pull the latest release and migrate in place."
+# --- `warmhawk` command on PATH -----------------------------------------------------------------
+# scripts/update.sh's header has always claimed it was "symlinked into PATH as warmhawk during
+# install"; nothing here actually did it until the 2026-08-30 go-live audit (finding C3), so the
+# `warmhawk update` command the docs promise did not exist on any installed box.
+#
+# Non-fatal by design: a working stack is the point of this script, and an unwritable
+# /usr/local/bin (unprivileged install, read-only /usr, hardened image) must not fail an otherwise
+# successful install. Idempotent — `ln -sf` over our own prior symlink is fine on a re-run.
+WARMHAWK_BIN="/usr/local/bin/warmhawk"
+chmod +x "$SCRIPT_DIR/warmhawk" 2>/dev/null || true
+if [ -e "$WARMHAWK_BIN" ] && [ ! -L "$WARMHAWK_BIN" ]; then
+  # Something that isn't our symlink already owns the name — never clobber it.
+  log "WARNING: ${WARMHAWK_BIN} exists and is not a symlink — leaving it alone."
+  log "  Use './scripts/update.sh' directly, or remove that file and re-run this script."
+elif ln -sf "$SCRIPT_DIR/warmhawk" "$WARMHAWK_BIN" 2>/dev/null; then
+  log "Installed the 'warmhawk' command at ${WARMHAWK_BIN} (try: warmhawk help)."
+else
+  log "NOTE: could not write ${WARMHAWK_BIN} (needs root) — the 'warmhawk' shortcut was not installed."
+  log "  Everything still works via './scripts/update.sh'; or link it yourself later with:"
+  log "    sudo ln -sf ${SCRIPT_DIR}/warmhawk ${WARMHAWK_BIN}"
+fi
+
+log "Run 'warmhawk update' (or './scripts/update.sh') any time to pull the latest release and migrate in place."
 log "Running warmhawk-enterprise-operator too? Copy this .env's OPERATOR_SERVICE_TOKEN value into"
 log "  that repo's own .env as CORE_ENGINE_SERVICE_TOKEN — the two packages never share a .env, so"
 log "  nothing does this for you automatically. Without it, the dashboard's data pages 401."
