@@ -1,11 +1,17 @@
 # Install-Flow E2E Test — release-gated, requires a real VM/CI runner
 
-This directory also holds four fast-tier scripts (`test-port-fallback.sh`,
-`test-idempotent-rerun.sh`, `test-restart-persistence.sh`, `test-upgrade-in-place.sh`) — pure
-local Docker logic, no scratch VM or real DNS needed, wired as Woodpecker's `install-flow-fast`
-workflow (every push/PR, not release-gated). See each script's own header comment for what it
-covers. Everything below this point is about `run.sh` specifically — the one test in this
-directory that genuinely can't run without real infrastructure.
+This directory also holds five fast-tier scripts (`test-port-fallback.sh`,
+`test-idempotent-rerun.sh`, `test-restart-persistence.sh`, `test-upgrade-in-place.sh`,
+`test-warmhawk-command.sh`) — pure local Docker logic, no scratch VM or real DNS needed, wired as
+Woodpecker's `install-flow-fast` workflow (every push/PR, not release-gated). See each script's own
+header comment for what it covers. Everything below this point is about `run.sh` specifically — the
+one test in this directory that genuinely can't run without real infrastructure.
+
+> **⚠️ `test-warmhawk-command.sh` is not in the `install-flow-fast` step list yet.** That list lives
+> in `ks-woodpecker-config`'s `src/templates/self-hosted-ci.ts`, which is another workstream's file
+> — it needs one line added there to run in CI. Until then, run it by hand:
+> `bash tests/e2e-install/test-warmhawk-command.sh`. Unlike its siblings it stands up no stack at
+> all (one short-lived `bash:5` container), so it costs a couple of seconds.
 
 Per the Testing Strategy, this is the "actual customer path" test: run
 `install.sh --domain <test-domain>` against Let's Encrypt's **staging** endpoint, confirm nginx
