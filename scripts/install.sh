@@ -162,8 +162,8 @@ if [ "$RETRY_TLS" = true ]; then
     "${CERTBOT_EXTRA_ARGS[@]}" \
     || fail "certbot retry failed. Confirm DNS for ${WARMHAWK_DOMAIN} now resolves to this server, then re-run: ./scripts/install.sh --retry-tls"
   enable_tls_template
-  log "Restarting nginx so it re-renders its template (envsubst only runs at container start, never on reload)..."
-  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
+  log "Rebuilding nginx (its config template is baked into the image at build time, not bind-mounted — a plain restart would keep serving the old HTTP-only config) and restarting it so it re-renders with TLS enabled..."
+  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
   log "TLS issuance succeeded and nginx restarted with TLS enabled."
   exit 0
 fi
@@ -355,8 +355,8 @@ else
       certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}" \
       "${CERTBOT_EXTRA_ARGS[@]}"; then
     enable_tls_template
-    log "Restarting nginx so it re-renders its template with TLS enabled (envsubst only runs at container start)..."
-    docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
+    log "Rebuilding nginx (its config template is baked into the image at build time, not bind-mounted — a plain restart would keep serving the old HTTP-only config) and restarting it so it re-renders with TLS enabled..."
+    docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
     TLS_READY=true
     log "TLS certificate issued and nginx restarted with TLS enabled."
   else
