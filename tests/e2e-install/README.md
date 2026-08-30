@@ -1,17 +1,32 @@
 # Install-Flow E2E Test — release-gated, requires a real VM/CI runner
 
-This directory also holds five fast-tier scripts (`test-port-fallback.sh`,
-`test-idempotent-rerun.sh`, `test-restart-persistence.sh`, `test-upgrade-in-place.sh`,
-`test-warmhawk-command.sh`) — pure local Docker logic, no scratch VM or real DNS needed, wired as
-Woodpecker's `install-flow-fast` workflow (every push/PR, not release-gated). See each script's own
-header comment for what it covers. Everything below this point is about `run.sh` specifically — the
-one test in this directory that genuinely can't run without real infrastructure.
+This directory holds five fast-tier scripts — pure local Docker logic, no scratch VM or real DNS
+needed. **Four of them run in CI** as Woodpecker's `install-flow-fast` workflow (every push/PR, not
+release-gated): `test-port-fallback.sh`, `test-idempotent-rerun.sh`, `test-restart-persistence.sh`,
+`test-upgrade-in-place.sh`. See each script's own header comment for what it covers. Everything
+below this point is about `run.sh` specifically — the one test in this directory that genuinely
+can't run without real infrastructure.
 
-> **⚠️ `test-warmhawk-command.sh` is not in the `install-flow-fast` step list yet.** That list lives
-> in `ks-woodpecker-config`'s `src/templates/self-hosted-ci.ts`, which is another workstream's file
-> — it needs one line added there to run in CI. Until then, run it by hand:
-> `bash tests/e2e-install/test-warmhawk-command.sh`. Unlike its siblings it stands up no stack at
-> all (one short-lived `bash:5` container), so it costs a couple of seconds.
+> **⚠️ The fifth, `test-warmhawk-command.sh`, is NOT wired into CI — so nothing currently guards the
+> `warmhawk` PATH symlink on a push.** The step list is the `installFlowTest.scriptPaths` array in
+> `ks-woodpecker-config`'s `src/repo-map.ts` (the `warmhawk-core-engine` entry). Adding this one
+> line there is the whole fix:
+>
+> ```ts
+> 'tests/e2e-install/test-warmhawk-command.sh',
+> ```
+>
+> Left unmade deliberately as of 2026-08-30: that array sits in the middle of the install-flow
+> verification workstream another agent owns, and editing it risks colliding with their in-flight
+> work. Until it lands, run the script by hand — unlike its siblings it stands up no stack at all
+> (one short-lived `bash:5` container), so it costs a couple of seconds:
+>
+> ```bash
+> bash tests/e2e-install/test-warmhawk-command.sh
+> ```
+>
+> (An earlier version of this note pointed at `src/templates/self-hosted-ci.ts`. That file only
+> declares the *type* for `scriptPaths`; the actual list is in `repo-map.ts`.)
 
 Per the Testing Strategy, this is the "actual customer path" test: run
 `install.sh --domain <test-domain>` against Let's Encrypt's **staging** endpoint, confirm nginx
