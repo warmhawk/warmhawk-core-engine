@@ -29,6 +29,13 @@
 #     # issue a Let's Encrypt STAGING cert instead of production — for repeated automated testing
 #     # against the same domain only (staging certs aren't publicly trusted). Never use this for a
 #     # real customer install.
+#   ./scripts/install.sh --domain api.yourcompany.com --acme-server https://internal-ca.example.com/directory
+#     # point certbot at any ACME server instead of Let's Encrypt production — generalizes
+#     # --letsencrypt-staging (kept as an alias) to also cover an enterprise's internal ACME CA
+#     # or a fully local test CA (e.g. Pebble) with zero public exposure.
+#   ./scripts/install.sh --domain e2e.internal --acme-server https://pebble:14000/dir --acme-ca-bundle /pebble.minica.pem
+#     # --acme-ca-bundle makes certbot trust a private ACME server's own certificate (Pebble's own
+#     # API is HTTPS-only with a throwaway root) — never meaningful outside a test CA like this.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +72,8 @@ KEY_PATH=""
 HTTP_PORT_FLAG=""
 HTTPS_PORT_FLAG=""
 LETSENCRYPT_STAGING=false
+ACME_SERVER=""
+ACME_CA_BUNDLE=""
 
 log()  { echo "[install] $*"; }
 fail() {
@@ -94,22 +103,42 @@ while [ $# -gt 0 ]; do
     --http-port) HTTP_PORT_FLAG="$2"; shift 2 ;;
     --https-port) HTTPS_PORT_FLAG="$2"; shift 2 ;;
     --letsencrypt-staging) LETSENCRYPT_STAGING=true; shift ;;
+    --acme-server) ACME_SERVER="$2"; shift 2 ;;
+    --acme-ca-bundle) ACME_CA_BUNDLE="$2"; shift 2 ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
 
-# --letsencrypt-staging: points certbot at Let's Encrypt's staging directory instead of production.
-# Staging certs aren't publicly trusted (self-signed root), so this is NOT for real customer
-# installs — it exists for repeated automated testing against the same domain, where production's
-# "5 duplicate certificates per exact domain set per 168h" rate limit is trivially tripped by a
-# handful of e2e runs in one day (hit live: tests/e2e-install/run.sh's scratch host, 2026-08-28).
+# --acme-server generalizes --letsencrypt-staging: both point certbot at some ACME directory other
+# than Let's Encrypt's production one. --letsencrypt-staging remains a fixed alias for LE's own
+# staging directory; --acme-server accepts any URL, including an enterprise's internal ACME CA or a
+# fully local test CA (e.g. Pebble, used by this repo's own release-e2e gate — zero public exposure).
+# Neither is for a real customer install: staging/test certs aren't publicly trusted (self-signed
+# root), and staging exists specifically because production's "5 duplicate certificates per exact
+# domain set per 168h" rate limit is trivially tripped by repeated automated testing against the
+# same domain (hit live: tests/e2e-install/run.sh's scratch host, 2026-08-28).
 # certbot persists whichever --server URL is used into the cert's own renewal config, so the
 # renewal sidecar (docker-compose.yml's `certbot` service) automatically keeps using the same
-# (staging or production) server on every subsequent renewal — no separate wiring needed there.
+# server on every subsequent renewal — no separate wiring needed there.
 CERTBOT_EXTRA_ARGS=()
-if [ "$LETSENCRYPT_STAGING" = true ]; then
+if [ -n "$ACME_SERVER" ]; then
+  CERTBOT_EXTRA_ARGS+=(--server "$ACME_SERVER")
+  log "NOTE: --acme-server set — issuing a certificate from ${ACME_SERVER} instead of Let's Encrypt production. Never use this for a real customer install."
+elif [ "$LETSENCRYPT_STAGING" = true ]; then
   CERTBOT_EXTRA_ARGS+=(--server https://acme-staging-v02.api.letsencrypt.org/directory)
   log "NOTE: --letsencrypt-staging set — issuing a Let's Encrypt STAGING certificate (not publicly trusted). Never use this flag for a real customer install."
+fi
+
+# --acme-ca-bundle: makes certbot's own TLS client trust a private ACME server's certificate (e.g.
+# Pebble, a local test CA with no publicly-trusted root — see --acme-server's own comment above).
+# certbot is Python/`requests`-based, which honors REQUESTS_CA_BUNDLE process-wide; the file also
+# has to be readable INSIDE the certbot container, so it's bind-mounted at the same path it's read
+# from on the host running this script (a throwaway path inside a CI sandbox — never meaningful for
+# a real customer install, which has no reason to ever pass this flag). Empirically verified against
+# a real Pebble instance + this exact `docker compose run` shape before shipping this flag.
+CERTBOT_RUN_DOCKER_ARGS=()
+if [ -n "$ACME_CA_BUNDLE" ]; then
+  CERTBOT_RUN_DOCKER_ARGS+=(-v "$ACME_CA_BUNDLE:$ACME_CA_BUNDLE:ro" -e REQUESTS_CA_BUNDLE="$ACME_CA_BUNDLE")
 fi
 
 # --- Idempotency: load any already-generated secrets from a prior run --------------------------
@@ -128,13 +157,13 @@ if [ "$RETRY_TLS" = true ]; then
   # without this override the override args below would run as `sh certbot
   # certonly ...`, and sh tries to open a file literally named "certbot" as a
   # script ("/bin/sh: can't open 'certbot': No such file or directory").
-  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot certbot \
+  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot "${CERTBOT_RUN_DOCKER_ARGS[@]}" certbot \
     certonly --webroot -w /var/www/certbot -d "$WARMHAWK_DOMAIN" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" \
     "${CERTBOT_EXTRA_ARGS[@]}" \
     || fail "certbot retry failed. Confirm DNS for ${WARMHAWK_DOMAIN} now resolves to this server, then re-run: ./scripts/install.sh --retry-tls"
   enable_tls_template
-  log "Restarting nginx so it re-renders its template (envsubst only runs at container start, never on reload)..."
-  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
+  log "Rebuilding nginx (its config template is baked into the image at build time, not bind-mounted — a plain restart would keep serving the old HTTP-only config) and restarting it so it re-renders with TLS enabled..."
+  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
   log "TLS issuance succeeded and nginx restarted with TLS enabled."
   exit 0
 fi
@@ -322,12 +351,12 @@ if [ "$SKIP_CERTBOT" = true ]; then
 else
   log "Requesting a Let's Encrypt certificate for ${DOMAIN} via certbot (webroot HTTP-01)..."
   # --entrypoint certbot — see the matching --retry-tls invocation above for why.
-  if docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot certbot \
+  if docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot "${CERTBOT_RUN_DOCKER_ARGS[@]}" certbot \
       certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}" \
       "${CERTBOT_EXTRA_ARGS[@]}"; then
     enable_tls_template
-    log "Restarting nginx so it re-renders its template with TLS enabled (envsubst only runs at container start)..."
-    docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" restart nginx
+    log "Rebuilding nginx (its config template is baked into the image at build time, not bind-mounted — a plain restart would keep serving the old HTTP-only config) and restarting it so it re-renders with TLS enabled..."
+    docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
     TLS_READY=true
     log "TLS certificate issued and nginx restarted with TLS enabled."
   else
