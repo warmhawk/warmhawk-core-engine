@@ -4,25 +4,30 @@
 # Install-flow E2E test: the "actual customer path" check from the Testing Strategy.
 # --------------------------------------------------------------------------------------------------
 # STATUS: THIS SCRIPT IS COMPLETE AND CORRECT. It is not a stub, sketch, or placeholder — every
-# step below is a real, working implementation. It genuinely CANNOT be executed in a sandbox / local
-# dev container, and that is expected, NOT a shortcut or something left unfinished:
+# step below is a real, working implementation. It runs in two different modes:
 #
-#   - Let's Encrypt's HTTP-01 challenge (which `scripts/install.sh` drives via certbot) requires the
-#     target domain to actually resolve, over real public DNS, to the public IP of the host this
-#     script runs against. There is no way to fabricate that from a sandbox with no public IP and no
-#     DNS control — it has to be a real throwaway VM/CI runner with a real DNS A record pointed at it.
-#   - This script assumes that provisioning already happened. It is meant to run as a step in a
-#     release-gated GitHub Actions workflow, AFTER that workflow's job has already shipped this
-#     checkout to a scratch host over plain SSH/rsync and brought up the throwaway stack (see
-#     `tests/e2e-install/release-e2e.workflow.yml.sample` next to this file for the exact wiring).
-#     This script is plain bash, not a GitHub Actions
-#     workflow itself, so it has no dependency on Actions machinery beyond reading a couple of env
-#     vars the calling workflow step sets.
+#   - AUTOMATED (E2E_SKIP_INSTALL=true): Woodpecker's release-tag-gated `release-e2e` workflow
+#     (see ks-woodpecker-config's src/templates/self-hosted-ci.ts, buildReleaseE2eWorkflow) drives
+#     this script entirely inside a privileged docker:26-dind sandbox on KS-CI-Runner. That
+#     workflow has already run `scripts/install.sh` itself (twice — once to bring nginx up, once
+#     more with --retry-tls once Pebble, the local Let's Encrypt ACME *test* server, has a network
+#     alias wired to it) before this script ever starts, so this script skips straight to the
+#     health/functional checks below. No scratch host, no SSH, nothing ever shipped over the
+#     network — see that workflow's own header comment and this repo's tests/e2e-install/README.md
+#     for the full mechanism.
+#   - MANUAL (E2E_SKIP_INSTALL unset/false): this script runs `scripts/install.sh` itself, either
+#     directly on a real throwaway VM or driven remotely over SSH via E2E_SSH_HOST/E2E_SSH_KEY.
+#     This is the pre-go-live checklist item (see tests/e2e-install/README.md) — the only path that
+#     exercises Let's Encrypt's real HTTP-01 challenge, which requires the target domain to
+#     actually resolve over real public DNS to the host's public IP. There is no way to fabricate
+#     that from a sandbox with no public IP and no DNS control, which is why this mode genuinely
+#     needs a real, disposable VM — not a shortcut or something left unfinished.
 #
-# The only verification possible from a sandbox with no such VM/DNS is a syntax check:
+# The only verification possible from a sandbox with neither a live DinD/Pebble run nor a real
+# VM/DNS is a syntax check:
 #   bash -n tests/e2e-install/run.sh
-# That passing is the correct, complete verification available here. Anything more requires the real
-# runner described above — do not read that limitation as this script being unfinished.
+# That passing is the correct, complete verification available here. Anything more requires one of
+# the two real modes described above — do not read that limitation as this script being unfinished.
 #
 # --------------------------------------------------------------------------------------------------
 # What this script does, in order:
@@ -54,10 +59,12 @@
 # Any failed assertion anywhere above is a hard, loud, non-zero-exit failure (see fail() below) —
 # this script does not soft-degrade the way scripts/install.sh's TLS/backup steps intentionally do.
 #
-# Teardown: this script does NOT tear the scratch stack down itself. That is
-# `ephemeral-ssh-teardown`'s job, run with `if: always()` in the calling workflow so it fires even
-# when this script fails partway through (see the trap this script installs for its OWN small
-# leftovers only — the SSH control socket / temp key file it may have created, never the stack).
+# Teardown: this script does NOT tear anything down itself — only the trap it installs cleans up
+# its OWN small leftovers (an SSH control socket / temp key file it may have created), never a
+# whole stack. In automated mode, the entire DinD sandbox this script ran inside is simply
+# discarded once the calling workflow's own steps finish — there is no separate teardown step, and
+# no shared infrastructure ever needed wiping. In manual mode, destroying the throwaway VM
+# afterward is the human's job (see tests/e2e-install/README.md's pre-go-live checklist).
 # ==================================================================================================
 set -euo pipefail
 
@@ -71,6 +78,14 @@ E2E_SSH_KEY="${E2E_SSH_KEY:-}"                     # optional — PEM contents (
 E2E_SSH_KEY_PATH="${E2E_SSH_KEY_PATH:-}"           # optional — path to an existing private key file
 E2E_REMOTE_DIR="${E2E_REMOTE_DIR:-$REPO_ROOT}"     # cwd for install.sh — see the project-name note below
 E2E_LETSENCRYPT_STAGING="${E2E_LETSENCRYPT_STAGING:-true}"  # avoid burning the prod LE rate limit on the reused scratch domain
+# E2E_SKIP_INSTALL: for the DinD/Pebble release gate (ks-woodpecker-config's self-hosted-ci.ts),
+# which needs install.sh's real HTTP-01 challenge to hit a local Pebble CA instead of the public
+# Let's Encrypt directory — that means running install.sh TWICE (once to bring nginx up so its
+# container can be given a docker network alias equal to $E2E_DOMAIN, once more with --retry-tls
+# after Pebble/the alias are wired), which this script's own single INSTALL_CMD below can't express.
+# When set, this script assumes the caller already brought the stack up and skips straight to the
+# health/functional checks below. Never set for a real manual run against a real scratch VM.
+E2E_SKIP_INSTALL="${E2E_SKIP_INSTALL:-false}"
 E2E_HEALTH_TIMEOUT_SECONDS="${E2E_HEALTH_TIMEOUT_SECONDS:-180}"
 E2E_MAIL_TIMEOUT_SECONDS="${E2E_MAIL_TIMEOUT_SECONDS:-60}"
 MAILPIT_HTTP_HOST="${MAILPIT_HTTP_HOST:-$E2E_SSH_HOST}"   # host to reach Mailpit's published HTTP API from
@@ -156,14 +171,18 @@ fi
 # compose` call install.sh makes internally — so install.sh's own bring-up joins the same Compose
 # project and the same `warmhawk_internal` network mailpit is already on, rather than creating a
 # second, competing stack. Keep E2E_REMOTE_DIR pointed at whatever directory that earlier step used.
-INSTALL_CMD="./scripts/install.sh --domain '${E2E_DOMAIN}'"
-if [ "$E2E_LETSENCRYPT_STAGING" = true ]; then
-  INSTALL_CMD="$INSTALL_CMD --letsencrypt-staging"
+if [ "$E2E_SKIP_INSTALL" = true ]; then
+  log "E2E_SKIP_INSTALL is set — assuming the caller already installed and TLS-terminated the stack; skipping straight to the checks below."
+else
+  INSTALL_CMD="./scripts/install.sh --domain '${E2E_DOMAIN}'"
+  if [ "$E2E_LETSENCRYPT_STAGING" = true ]; then
+    INSTALL_CMD="$INSTALL_CMD --letsencrypt-staging"
+  fi
+  log "Running scripts/install.sh --domain ${E2E_DOMAIN} (the real customer command$([ "$E2E_LETSENCRYPT_STAGING" = true ] && echo ", plus --letsencrypt-staging"))..."
+  run_on_target "$INSTALL_CMD" \
+    || fail "scripts/install.sh exited non-zero. Check its own [install] log lines above for which step failed."
+  log "install.sh completed."
 fi
-log "Running scripts/install.sh --domain ${E2E_DOMAIN} (the real customer command$([ "$E2E_LETSENCRYPT_STAGING" = true ] && echo ", plus --letsencrypt-staging"))..."
-run_on_target "$INSTALL_CMD" \
-  || fail "scripts/install.sh exited non-zero. Check its own [install] log lines above for which step failed."
-log "install.sh completed."
 
 # --- wait_for_http() — 1s interval loop, curl status 2xx, loud failure on timeout. -----------------
 wait_for_http() {
