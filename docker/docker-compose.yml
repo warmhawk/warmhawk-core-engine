@@ -10,6 +10,9 @@
 # `warmhawk_internal` Docker network with NO published host port. Only `nginx` publishes 80/443.
 # A WarmHawk customer's own server has no ks-platform-infra, no shared edge-nginx, no Coolify —
 # this package has to be a complete, self-contained unit with zero assumptions about the host.
+# `warmhawk_edge` is still a plain created network (not `external: true`) so a bare-VM install
+# needs nothing pre-existing — EDGE_NETWORK_NAME/EDGE_NGINX_ALIAS below only matter to a host
+# that also runs a shared edge proxy wanting to reach nginx by a stable, predictable name.
 #
 # LOCAL DEV PORT ALLOCATION (new, V12 — documented here per the same convention jitterflow's own
 # docker-compose.yml header uses): this file itself publishes NO bare ports (matching what ships
@@ -53,6 +56,7 @@ networks:
   # Fixed by mirroring warmhawk-enterprise-operator/docker-compose.yml's already-correct pattern —
   # a second, non-internal network dedicated solely to nginx.
   warmhawk_edge:
+    name: ${EDGE_NETWORK_NAME:-warmhawk-edge}
 
 volumes:
   postgres_data:
@@ -289,7 +293,13 @@ services:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot
     depends_on: [api]
-    networks: [warmhawk_internal, warmhawk_edge]
+    networks:
+      warmhawk_internal: {}
+      # Alias, not container_name — this repo has no CONTAINER_PREFIX, and compose's own
+      # `<project>-nginx-1` naming varies by version, so a shared edge proxy needs a name
+      # that doesn't depend on either.
+      warmhawk_edge:
+        aliases: ['${EDGE_NGINX_ALIAS:-warmhawk-core-engine-nginx}']
     deploy:
       resources:
         limits: { cpus: '0.5', memory: 128M }

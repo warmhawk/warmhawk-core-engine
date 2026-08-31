@@ -305,6 +305,13 @@ gen_secret() { openssl rand -hex "$1" | tr -d '\r\n'; }
 : "${N8N_ENCRYPTION_KEY:=$(gen_secret 32)}"
 : "${UPTIME_KUMA_USERNAME:=admin}"
 : "${UPTIME_KUMA_PASSWORD:=$(gen_secret 24)}"
+# Only matters on a host that also runs a shared edge proxy (e.g. a multi-tenant staging box) —
+# a bare-VM customer install never sets these and gets the defaults below, which docker-compose.yml
+# also falls back to on its own. Persisted here (not just left as a shell env var) so every later
+# `--env-file .env` command — including scripts/update.sh — resolves the same names, and so two
+# installs sharing one host stay on distinct edge networks once each sets these before its first run.
+: "${EDGE_NETWORK_NAME:=warmhawk-edge}"
+: "${EDGE_NGINX_ALIAS:=warmhawk-core-engine-nginx}"
 
 cat > "$ENV_FILE" <<EOF
 WARMHAWK_DOMAIN=$DOMAIN
@@ -322,6 +329,8 @@ UPTIME_KUMA_PASSWORD=$UPTIME_KUMA_PASSWORD
 # Optional — set this to a webhook URL (Slack/Discord/PagerDuty/etc.) to receive Uptime Kuma
 # down/up alerts. Leave blank to run dashboard-only monitoring with no external alerting.
 UPTIME_KUMA_ALERT_WEBHOOK_URL=${UPTIME_KUMA_ALERT_WEBHOOK_URL:-}
+EDGE_NETWORK_NAME=$EDGE_NETWORK_NAME
+EDGE_NGINX_ALIAS=$EDGE_NGINX_ALIAS
 EOF
 log "Secrets generated/loaded and written to .env (never committed — see .gitignore)."
 
