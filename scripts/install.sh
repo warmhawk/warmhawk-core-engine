@@ -312,6 +312,14 @@ gen_secret() { openssl rand -hex "$1" | tr -d '\r\n'; }
 # installs sharing one host stay on distinct edge networks once each sets these before its first run.
 : "${EDGE_NETWORK_NAME:=warmhawk-edge}"
 : "${EDGE_NGINX_ALIAS:=warmhawk-core-engine-nginx}"
+# Without this, Compose falls back to the checkout directory's basename as the project name —
+# and since this repo's compose file lives in docker/, that fallback is the meaningless "docker",
+# giving every container a "docker-api-1"-style name. Every `docker compose` call in this script
+# already passes `--env-file "$REPO_ROOT/.env"`, and Compose reads COMPOSE_PROJECT_NAME from
+# that file directly (confirmed: no `-p` flag needed on any call below), so persisting it here is
+# the whole fix. Same reasoning as EDGE_NETWORK_NAME above: two installs sharing one host need
+# distinct values, set once before each one's first run.
+: "${COMPOSE_PROJECT_NAME:=warmhawk-core-engine}"
 
 cat > "$ENV_FILE" <<EOF
 WARMHAWK_DOMAIN=$DOMAIN
@@ -331,6 +339,7 @@ UPTIME_KUMA_PASSWORD=$UPTIME_KUMA_PASSWORD
 UPTIME_KUMA_ALERT_WEBHOOK_URL=${UPTIME_KUMA_ALERT_WEBHOOK_URL:-}
 EDGE_NETWORK_NAME=$EDGE_NETWORK_NAME
 EDGE_NGINX_ALIAS=$EDGE_NGINX_ALIAS
+COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
 EOF
 log "Secrets generated/loaded and written to .env (never committed — see .gitignore)."
 
