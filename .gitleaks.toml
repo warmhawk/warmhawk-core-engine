@@ -1,0 +1,26 @@
+title = "warmhawk-core-engine gitleaks config"
+
+# One file, one entry. `.env/.env.example` ships every secret-shaped variable as an intentionally
+# empty placeholder (`KEY=`, no value) — scripts/install.sh generates the real values via
+# `openssl rand` on each customer's own box; nothing here is ever a working credential. Only
+# NEXTJS_CALLBACK_SECRET trips gitleaks' generic-api-key rule (confirmed: the rule matches on the
+# variable name itself when the value is empty, not on any actual secret content — POSTGRES_
+# PASSWORD/REDIS_PASSWORD/JWT_SECRET/etc. on the same file sit empty too and don't trigger it).
+# An inline `# gitleaks:allow` already suppresses this on the current line, but that only covers
+# the current tree — this repo's very first commit carries the same empty placeholder at the old
+# pre-move path (.env.example, before the 2026-08-28 move into .env/), and a full-history scan
+# (as opposed to CI's single-commit clone) still flags that blob. The regex below covers both
+# paths so a full audit scan comes back clean too, not just the CI gate.
+#
+# Scope stays tight on purpose: one known file, one rule. A real secret landing anywhere else, or
+# matching a different rule, still gets caught.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documented empty secret placeholders in the install-time env template (NEXTJS_CALLBACK_SECRET's name alone trips generic-api-key with no value present)"
+targetRules = ["generic-api-key"]
+paths = [
+  '''^(\.env/)?\.env\.example$''',
+]
