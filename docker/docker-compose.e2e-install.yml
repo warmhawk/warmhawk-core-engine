@@ -31,14 +31,12 @@
 # webhook port (4605) — no new range needed.
 #
 # Digest pinning note: every image in docker-compose.yml is pinned to a sha256 digest (V12
-# convention). This file intentionally is NOT pinned the same way — resolving axllent/mailpit's
-# real current digest requires a registry round-trip this authoring pass deliberately avoided (no
-# live network calls beyond what the task explicitly asked for). Whoever wires this into a real
-# CI runner should resolve and pin the digest then, matching every other image in this repo.
+# convention). This one now is too — resolved 2026-09-01 against Docker Hub's registry API and
+# cross-checked with a real `docker pull` (Docker-Content-Digest header and RepoDigests agreed).
 
 services:
   mailpit:
-    image: axllent/mailpit:v1.20.0 # TODO: pin to sha256 digest before first real CI run (see note above)
+    image: axllent/mailpit:v1.20.0@sha256:6105f08377323c3e11a21b6e5e51648e33151fb4e525aab8d0961573c9e94a4d
     restart: unless-stopped
     environment:
       # Mailpit's own message store is ephemeral/in-memory by default, which is exactly right for
