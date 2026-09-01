@@ -42,7 +42,7 @@ fail() {
 }
 
 # See test-port-fallback.sh's identical guard for why this exists: only ever set true once the
-# pre-existence guard below has actually passed — otherwise a pre-existing .env that doesn't
+# pre-existence guard below has actually passed — otherwise a pre-existing .env/.env that doesn't
 # belong to this run gets deleted by this trap on the exact failure path meant to protect it.
 OWN_ENV=false
 
@@ -50,7 +50,7 @@ cleanup() {
   local exit_code=$?
   log "Tearing down (project-scoped, WITH volumes this time — does not touch any other stack on this host)..."
   docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
-  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env"
+  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env/.env"
   if [ "$exit_code" -eq 0 ]; then
     log "Teardown complete. PASSED."
   else
@@ -62,14 +62,14 @@ trap cleanup EXIT
 
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is not available."
-[ -f "$REPO_ROOT/.env" ] && fail "$REPO_ROOT/.env already exists — refusing to overwrite a real install's config. Remove it (after confirming it's not a live instance) and re-run."
+[ -f "$REPO_ROOT/.env/.env" ] && fail "$REPO_ROOT/.env/.env already exists — refusing to overwrite a real install's config. Remove it (after confirming it's not a live instance) and re-run."
 OWN_ENV=true
 
 # Defensive pre-cleanup — same reasoning as test-port-fallback.sh's own.
 log "Pre-cleanup: removing any leftover state (including volumes) from a prior interrupted run of this test..."
 docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
 
-compose() { docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" "$@"; }
+compose() { docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" "$@"; }
 
 wait_for_health() {
   local label="$1"

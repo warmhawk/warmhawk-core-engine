@@ -6,17 +6,17 @@
 # --------------------------------------------------------------------------------------------------
 # Like test-port-fallback.sh, this needs neither a real scratch VM nor real public DNS — it runs
 # anywhere Docker runs. What it verifies is different: that running install.sh a SECOND time
-# against an already-installed stack reuses the secrets already written to .env instead of silently
+# against an already-installed stack reuses the secrets already written to .env/.env instead of silently
 # regenerating them (which would desync every running container's DATABASE_URL/REDIS_URL/JWT_SECRET
-# from what .env now claims), and that the stack is still healthy afterward.
+# from what .env/.env now claims), and that the stack is still healthy afterward.
 #
 # What this script does, in order:
 #   1. Runs scripts/install.sh --domain <non-resolving test domain> --skip-certbot once, isolated
 #      into its own Compose project (COMPOSE_PROJECT_NAME) so it never touches any other stack
 #      already running on this machine.
-#   2. Confirms the app is genuinely healthy and snapshots .env's checksum.
+#   2. Confirms the app is genuinely healthy and snapshots .env/.env's checksum.
 #   3. Runs the exact same install.sh command again, without tearing anything down first.
-#   4. Asserts: the second run's own log said it detected and reused existing secrets, .env is
+#   4. Asserts: the second run's own log said it detected and reused existing secrets, .env/.env is
 #      byte-for-byte unchanged (proves secrets weren't regenerated out from under the running
 #      containers), and the app is still healthy.
 #   5. Tears its OWN stack down, always, even on failure.
@@ -38,7 +38,7 @@ fail() {
 }
 
 # See test-port-fallback.sh's identical guard for why this exists: only ever set true once the
-# pre-existence guard below has actually passed — otherwise a pre-existing .env that doesn't
+# pre-existence guard below has actually passed — otherwise a pre-existing .env/.env that doesn't
 # belong to this run gets deleted by this trap on the exact failure path meant to protect it.
 OWN_ENV=false
 
@@ -46,7 +46,7 @@ cleanup() {
   local exit_code=$?
   log "Tearing down (project-scoped — does not touch any other stack on this host)..."
   docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
-  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env"
+  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env/.env"
   rm -f "${RUN2_LOG:-}" "${ENV_SNAPSHOT:-}"
   if [ "$exit_code" -eq 0 ]; then
     log "Teardown complete. PASSED."
@@ -59,7 +59,7 @@ trap cleanup EXIT
 
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is not available."
-[ -f "$REPO_ROOT/.env" ] && fail "$REPO_ROOT/.env already exists — refusing to overwrite a real install's config. Remove it (after confirming it's not a live instance) and re-run."
+[ -f "$REPO_ROOT/.env/.env" ] && fail "$REPO_ROOT/.env/.env already exists — refusing to overwrite a real install's config. Remove it (after confirming it's not a live instance) and re-run."
 OWN_ENV=true
 
 # Defensive pre-cleanup — same reasoning as test-port-fallback.sh's own.
@@ -89,8 +89,8 @@ log "Running scripts/install.sh --domain ${TEST_DOMAIN} --skip-certbot (run 1 of
 wait_for_health "after run 1"
 
 ENV_SNAPSHOT="$(mktemp)"
-cp "$REPO_ROOT/.env" "$ENV_SNAPSHOT"
-log "Snapshotted .env after run 1 ($(sha256sum "$ENV_SNAPSHOT" | cut -d' ' -f1))."
+cp "$REPO_ROOT/.env/.env" "$ENV_SNAPSHOT"
+log "Snapshotted .env/.env after run 1 ($(sha256sum "$ENV_SNAPSHOT" | cut -d' ' -f1))."
 
 # --- 2. Second install — same args, nothing torn down in between ----------------------------------
 log "Running scripts/install.sh --domain ${TEST_DOMAIN} --skip-certbot (run 2 of 2, no teardown in between)..."
@@ -103,22 +103,22 @@ cat "$RUN2_LOG"
 
 # --- 3. Assert idempotency, not just "didn't crash" ------------------------------------------------
 grep -q "re-run detected, reusing existing secrets" "$RUN2_LOG" \
-  || fail "second run's own log never said it detected an existing .env and reused secrets — see full log above."
+  || fail "second run's own log never said it detected an existing .env/.env and reused secrets — see full log above."
 log "Confirmed: second run recognized the existing install and reused its secrets."
 
-if ! cmp -s "$ENV_SNAPSHOT" "$REPO_ROOT/.env"; then
-  fail ".env changed between run 1 and run 2 — secrets were regenerated, which desyncs already-running containers' env from what .env now claims. Diff:
-$(diff "$ENV_SNAPSHOT" "$REPO_ROOT/.env" || true)"
+if ! cmp -s "$ENV_SNAPSHOT" "$REPO_ROOT/.env/.env"; then
+  fail ".env/.env changed between run 1 and run 2 — secrets were regenerated, which desyncs already-running containers' env from what .env/.env now claims. Diff:
+$(diff "$ENV_SNAPSHOT" "$REPO_ROOT/.env/.env" || true)"
 fi
-log "Confirmed: .env is byte-for-byte identical after the second run — secrets were reused, not regenerated."
+log "Confirmed: .env/.env is byte-for-byte identical after the second run — secrets were reused, not regenerated."
 
 wait_for_health "after run 2"
 
 log ""
 log "=================================================================================="
 log " IDEMPOTENT-RERUN TEST: ALL ASSERTIONS PASSED"
-log "   - install.sh detected the existing .env on the second run and reused its secrets"
-log "   - .env was not rewritten with new secret values"
+log "   - install.sh detected the existing .env/.env on the second run and reused its secrets"
+log "   - .env/.env was not rewritten with new secret values"
 log "   - the app was genuinely healthy both before and after the second run"
 log "=================================================================================="
 

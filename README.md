@@ -48,14 +48,14 @@ Requires Node **22+** (see `engines.node` in `package.json`).
 
 ```bash
 npm install
-cp .env.example .env        # local dev only — a real install never needs this, install.sh generates it
-docker compose --env-file .env -f docker/docker-compose.yml -f docker/docker-compose.test.yml up -d postgres redis
+cp .env/.env.example .env/.env  # local dev only — a real install never needs this, install.sh generates it
+docker compose --env-file .env/.env -f docker/docker-compose.yml -f docker/docker-compose.test.yml up -d postgres redis
 npm run db:migrate
 npm test                    # fast unit suite, no external dependencies
 npm run test:integration    # against the real Postgres/Redis above
 ```
 
-`--env-file .env` is required — Compose only auto-discovers a `.env` next to the compose file
+`--env-file .env/.env` is required — Compose only auto-discovers a `.env` next to the compose file
 itself, and `docker-compose.yml` lives in `docker/`, not the repo root.
 
 Fast-tier install regressions (`tests/e2e-install/test-*.sh`) run anywhere Docker runs, no VM or

@@ -34,7 +34,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
 
 compose() {
-  docker compose --env-file "$REPO_ROOT/.env" -f "$COMPOSE_FILE" "$@"
+  docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" "$@"
 }
 
 usage() {

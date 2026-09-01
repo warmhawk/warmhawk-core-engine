@@ -15,7 +15,7 @@
    take **weeks** — the same order of magnitude as Google's CASA assessment for the
    `https://mail.google.com/` scope.
 4. Once registered, set `MICROSOFT_OAUTH_CLIENT_ID`, `MICROSOFT_OAUTH_CLIENT_SECRET`, and
-   `MICROSOFT_OAUTH_REDIRECT_URI` in `.env`.
+   `MICROSOFT_OAUTH_REDIRECT_URI` in `.env/.env`.
 
 ## Why this isn't a launch blocker
 
