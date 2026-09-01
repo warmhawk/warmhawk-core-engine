@@ -151,7 +151,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       MAILBOX_CREDENTIAL_KEY: ${MAILBOX_CREDENTIAL_KEY}
       NEXTJS_CALLBACK_SECRET: ${NEXTJS_CALLBACK_SECRET}
-      # Auth bridge for warmhawk-enterprise-operator's dashboard — see .env.example and
+      # Auth bridge for warmhawk-enterprise-operator's dashboard — see .env/.env.example and
       # lib/requireAuth.ts's header comment. Optional: blank is fine for a Tier-0-only install.
       OPERATOR_SERVICE_TOKEN: ${OPERATOR_SERVICE_TOKEN:-}
       DASHBOARD_APP_URL: ${DASHBOARD_APP_URL:-}
@@ -164,7 +164,7 @@ services:
       # Stripe/license issuance was removed from this repo (V12 fix) — that
       # code now lives solely in warmhawk-site, the one piece of billing
       # infrastructure WarmHawk operates centrally. See warmhawk-site's
-      # docker-compose.yml / .env.example for STRIPE_*/LICENSE_SIGNING_PRIVATE_KEY.
+      # docker-compose.yml / .env/.env.example for STRIPE_*/LICENSE_SIGNING_PRIVATE_KEY.
       # Native OTEL export — inert until the customer sets an endpoint (Observability section).
       OTEL_SERVICE_NAME: warmhawk-api
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}

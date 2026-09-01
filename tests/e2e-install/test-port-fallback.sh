@@ -20,7 +20,7 @@
 #   2. Runs scripts/install.sh --domain <non-resolving test domain> --skip-certbot, isolated into
 #      its own Compose project (COMPOSE_PROJECT_NAME) so it never touches any other stack already
 #      running on this machine.
-#   3. Asserts install.sh actually fell back (didn't just fail): .env picked up alt ports, nginx is
+#   3. Asserts install.sh actually fell back (didn't just fail): .env/.env picked up alt ports, nginx is
 #      running and bound to them, and a real HTTP request through the alt port reaches the API.
 #   4. Tears its OWN stack down (`docker compose -p ... down -v`, project-scoped — never touches
 #      sibling containers) and removes the port-hog container, always, even on failure.
@@ -48,10 +48,10 @@ fail() {
 }
 
 # Bug fix (deeper-coverage authoring pass, 2026-08-26): only ever set true once the
-# pre-existence guard below has actually passed. Earlier, this trap's `rm -f "$REPO_ROOT/.env"`
+# pre-existence guard below has actually passed. Earlier, this trap's `rm -f "$REPO_ROOT/.env/.env"`
 # ran unconditionally — including on the exact failure path where the guard rejects a
-# PRE-EXISTING .env that does not belong to this run, which deleted it anyway. Confirmed live:
-# a stray .env left over from unrelated manual testing was destroyed this way, with no running
+# PRE-EXISTING .env/.env that does not belong to this run, which deleted it anyway. Confirmed live:
+# a stray .env/.env left over from unrelated manual testing was destroyed this way, with no running
 # containers left to prove after the fact whether it was actually still load-bearing.
 OWN_ENV=false
 
@@ -60,7 +60,7 @@ cleanup() {
   log "Tearing down (project-scoped — does not touch any other stack on this host)..."
   docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
   docker rm -f "$PORT_HOG_NAME" >/dev/null 2>&1 || true
-  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env"
+  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env/.env"
   if [ "$exit_code" -eq 0 ]; then
     log "Teardown complete. PASSED."
   else
@@ -72,7 +72,7 @@ trap cleanup EXIT
 
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed."
 docker compose version >/dev/null 2>&1 || fail "Docker Compose plugin is not available."
-[ -f "$REPO_ROOT/.env" ] && fail "$REPO_ROOT/.env already exists — refusing to overwrite a real install's config. Remove it (after confirming it's not a live instance) and re-run."
+[ -f "$REPO_ROOT/.env/.env" ] && fail "$REPO_ROOT/.env/.env already exists — refusing to overwrite a real install's config. Remove it (after confirming it's not a live instance) and re-run."
 OWN_ENV=true
 
 # Defensive pre-cleanup: a prior run of this same test killed mid-build/mid-up (Ctrl-C, CI cancel,
@@ -105,11 +105,11 @@ log "Running scripts/install.sh --domain ${TEST_DOMAIN} --skip-certbot (real scr
 ) || fail "install.sh exited non-zero — it should degrade to alt-port mode, not fail outright, when 80/443 are occupied."
 
 # --- 3. Assert the fallback actually happened, not just "didn't crash" ---------------------------
-grep -q "^NGINX_HTTP_HOST_PORT=${ALT_HTTP_PORT}$" "$REPO_ROOT/.env" \
-  || fail ".env does not show NGINX_HTTP_HOST_PORT=${ALT_HTTP_PORT} — fallback did not trigger as expected. Contents: $(grep NGINX_ "$REPO_ROOT/.env" || true)"
-grep -q "^NGINX_HTTPS_HOST_PORT=${ALT_HTTPS_PORT}$" "$REPO_ROOT/.env" \
-  || fail ".env does not show NGINX_HTTPS_HOST_PORT=${ALT_HTTPS_PORT} — fallback did not trigger as expected."
-log "Confirmed: .env recorded the alt ports (${ALT_HTTP_PORT}/${ALT_HTTPS_PORT})."
+grep -q "^NGINX_HTTP_HOST_PORT=${ALT_HTTP_PORT}$" "$REPO_ROOT/.env/.env" \
+  || fail ".env/.env does not show NGINX_HTTP_HOST_PORT=${ALT_HTTP_PORT} — fallback did not trigger as expected. Contents: $(grep NGINX_ "$REPO_ROOT/.env/.env" || true)"
+grep -q "^NGINX_HTTPS_HOST_PORT=${ALT_HTTPS_PORT}$" "$REPO_ROOT/.env/.env" \
+  || fail ".env/.env does not show NGINX_HTTPS_HOST_PORT=${ALT_HTTPS_PORT} — fallback did not trigger as expected."
+log "Confirmed: .env/.env recorded the alt ports (${ALT_HTTP_PORT}/${ALT_HTTPS_PORT})."
 
 docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" ps nginx | grep -q "Up" \
   || fail "nginx container is not running after install.sh completed."

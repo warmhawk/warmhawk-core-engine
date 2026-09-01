@@ -14,12 +14,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Load .env if present (for POSTGRES_PASSWORD, BACKUP_* vars) without requiring the caller to
+# Load .env/.env if present (for POSTGRES_PASSWORD, BACKUP_* vars) without requiring the caller to
 # export them manually.
-if [ -f "$REPO_ROOT/.env" ]; then
+if [ -f "$REPO_ROOT/.env/.env" ]; then
   set -a
   # shellcheck disable=SC1091
-  source "$REPO_ROOT/.env"
+  source "$REPO_ROOT/.env/.env"
   set +a
 fi
 
