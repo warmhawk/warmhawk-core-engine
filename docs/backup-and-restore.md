@@ -15,7 +15,7 @@
 | List existing backups | `ls -lh $BACKUP_LOCAL_PATH` |
 | Restore the most recent backup | `./scripts/restore-postgres.sh --latest` |
 | Restore a specific backup | `./scripts/restore-postgres.sh /path/to/warmhawk-postgres-<timestamp>.sql.gz` |
-| Change retention window | Edit `BACKUP_RETENTION_DAYS` in `.env` (default 14 days) |
+| Change retention window | Edit `BACKUP_RETENTION_DAYS` in `.env/.env` (default 14 days) |
 
 ---
 
@@ -28,7 +28,7 @@ writes a cron entry that runs `scripts/backup-postgres.sh` every night. The scri
    binary version-matching required.
 2. Pipes the dump through `gzip -9` to `${BACKUP_LOCAL_PATH}/warmhawk-postgres-<timestamp>.sql.gz`.
 3. Optionally copies that file off-box via `rclone`, if you've configured
-   `BACKUP_RCLONE_REMOTE` in `.env` (your own S3/B2/etc. bucket — WarmHawk never receives or
+   `BACKUP_RCLONE_REMOTE` in `.env/.env` (your own S3/B2/etc. bucket — WarmHawk never receives or
    stores this backup itself).
 4. Prunes local backups older than `BACKUP_RETENTION_DAYS` (default 14).
 

@@ -49,13 +49,13 @@ docker run --rm \
   -v "$REPO_ROOT:/src:ro" \
   bash:5 bash -euo pipefail -c '
     # Build a throwaway "installed instance" in a writable dir. Deliberately NOT the read-only
-    # /src mount: update.sh refuses to run without a .env ("this instance was never installed"),
-    # and depending on the developer’s own untracked .env would make this test pass or fail based
+    # /src mount: update.sh refuses to run without a .env/.env ("this instance was never installed"),
+    # and depending on the developer’s own untracked .env/.env would make this test pass or fail based
     # on the host it ran on.
-    mkdir -p /work/scripts
+    mkdir -p /work/scripts /work/.env
     cp /src/scripts/warmhawk /src/scripts/update.sh /work/scripts/
     chmod +x /work/scripts/warmhawk /work/scripts/update.sh
-    : > /work/.env
+    : > /work/.env/.env
 
     ln -sf /work/scripts/warmhawk /usr/local/bin/warmhawk
 

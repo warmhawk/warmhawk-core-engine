@@ -40,7 +40,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
-ENV_FILE="$REPO_ROOT/.env"
+ENV_FILE="$REPO_ROOT/.env/.env"
 NGINX_TEMPLATE="$REPO_ROOT/nginx/nginx.conf.template"
 
 # Bug fix (DooD end-to-end install run, 2026-08-25): mirrors
@@ -88,7 +88,7 @@ fail() {
 # reason (bad env var, port clash inside the container, migration error, etc.) is visible instead.
 dump_compose_logs_and_fail() {
   log "docker compose up failed — dumping recent logs from every service for diagnosis:"
-  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" logs --no-color --tail=100 || true
+  docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" logs --no-color --tail=100 || true
   fail "$1"
 }
 
@@ -143,13 +143,13 @@ fi
 
 # --- Idempotency: load any already-generated secrets from a prior run --------------------------
 if [ -f "$ENV_FILE" ]; then
-  log ".env already exists — re-run detected, reusing existing secrets where present."
+  log ".env/.env already exists — re-run detected, reusing existing secrets where present."
   set -a; source "$ENV_FILE"; set +a
 fi
 
 # --- --retry-tls short-circuit: only redo the certbot step, nothing else -----------------------
 if [ "$RETRY_TLS" = true ]; then
-  [ -z "${WARMHAWK_DOMAIN:-}" ] && fail "No existing WARMHAWK_DOMAIN found in .env — run a full install first."
+  [ -z "${WARMHAWK_DOMAIN:-}" ] && fail "No existing WARMHAWK_DOMAIN found in .env/.env — run a full install first."
   log "Retrying TLS issuance for ${WARMHAWK_DOMAIN}..."
   # --entrypoint certbot: the certbot service's own entrypoint (docker-compose.yml)
   # is pinned to /bin/sh so the renewal loop's `command: ['-c', '...']` works —
@@ -157,13 +157,13 @@ if [ "$RETRY_TLS" = true ]; then
   # without this override the override args below would run as `sh certbot
   # certonly ...`, and sh tries to open a file literally named "certbot" as a
   # script ("/bin/sh: can't open 'certbot': No such file or directory").
-  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot "${CERTBOT_RUN_DOCKER_ARGS[@]}" certbot \
+  docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot "${CERTBOT_RUN_DOCKER_ARGS[@]}" certbot \
     certonly --webroot -w /var/www/certbot -d "$WARMHAWK_DOMAIN" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" \
     "${CERTBOT_EXTRA_ARGS[@]}" \
     || fail "certbot retry failed. Confirm DNS for ${WARMHAWK_DOMAIN} now resolves to this server, then re-run: ./scripts/install.sh --retry-tls"
   enable_tls_template
   log "Rebuilding nginx (its config template is baked into the image at build time, not bind-mounted — a plain restart would keep serving the old HTTP-only config) and restarting it so it re-renders with TLS enabled..."
-  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
+  docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
   log "TLS issuance succeeded and nginx restarted with TLS enabled."
   exit 0
 fi
@@ -177,7 +177,7 @@ log "Running preflight checks..."
 command -v docker >/dev/null 2>&1 || fail "Docker is not installed. Install Docker first: https://docs.docker.com/engine/install/"
 # Bug fix (install-flow-fast's first real DinD run, 2026-08-26): gen_secret below shells out to
 # openssl directly (not a containerized one) — without this check, a host missing it doesn't fail
-# here, it silently writes EMPTY secrets into .env (openssl rand producing no output is not itself
+# here, it silently writes EMPTY secrets into .env/.env (openssl rand producing no output is not itself
 # an error `set -e` catches, since it's nested inside a `:=` parameter expansion), which then
 # surfaces many minutes later as postgres refusing to start on an empty POSTGRES_PASSWORD, with
 # nothing pointing back at the real cause. Confirmed live: this exact CI step's own base image
@@ -223,7 +223,7 @@ check_port_free() {
 # idempotent re-run of an already-installed, working instance would wrongly trip the fallback path,
 # since our own nginx would itself be the thing holding the port.
 nginx_already_running() {
-  docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" ps --status running nginx 2>/dev/null | grep -q nginx
+  docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" ps --status running nginx 2>/dev/null | grep -q nginx
 }
 
 if [ -n "$HTTP_PORT_FLAG" ] || [ -n "$HTTPS_PORT_FLAG" ]; then
@@ -291,9 +291,9 @@ log "Preflight checks passed (Docker present, ports ${NGINX_HTTP_HOST_PORT}/${NG
 # Windows/MSYS dev box, not real Linux CI/customer targets) emit a trailing CRLF rather than a
 # bare LF — `tr -d '\n'` alone left a stray \r embedded at the end of the secret. Invisible in
 # every log (a CR never renders as a visible character) but a real value corruption: sourcing
-# this same .env back on a re-run strips that \r again on reload, so the "same" secret came back
+# this same .env/.env back on a re-run strips that \r again on reload, so the "same" secret came back
 # one byte shorter than what was actually written — caught by test-idempotent-rerun.sh's
-# byte-for-byte .env comparison, not by anything that only checks the app still starts.
+# byte-for-byte .env/.env comparison, not by anything that only checks the app still starts.
 gen_secret() { openssl rand -hex "$1" | tr -d '\r\n'; }
 
 : "${POSTGRES_PASSWORD:=$(gen_secret 32)}"
@@ -308,19 +308,22 @@ gen_secret() { openssl rand -hex "$1" | tr -d '\r\n'; }
 # Only matters on a host that also runs a shared edge proxy (e.g. a multi-tenant staging box) —
 # a bare-VM customer install never sets these and gets the defaults below, which docker-compose.yml
 # also falls back to on its own. Persisted here (not just left as a shell env var) so every later
-# `--env-file .env` command — including scripts/update.sh — resolves the same names, and so two
+# `--env-file .env/.env` command — including scripts/update.sh — resolves the same names, and so two
 # installs sharing one host stay on distinct edge networks once each sets these before its first run.
 : "${EDGE_NETWORK_NAME:=warmhawk-edge}"
 : "${EDGE_NGINX_ALIAS:=warmhawk-core-engine-nginx}"
 # Without this, Compose falls back to the checkout directory's basename as the project name —
 # and since this repo's compose file lives in docker/, that fallback is the meaningless "docker",
 # giving every container a "docker-api-1"-style name. Every `docker compose` call in this script
-# already passes `--env-file "$REPO_ROOT/.env"`, and Compose reads COMPOSE_PROJECT_NAME from
+# already passes `--env-file "$REPO_ROOT/.env/.env"`, and Compose reads COMPOSE_PROJECT_NAME from
 # that file directly (confirmed: no `-p` flag needed on any call below), so persisting it here is
 # the whole fix. Same reasoning as EDGE_NETWORK_NAME above: two installs sharing one host need
 # distinct values, set once before each one's first run.
 : "${COMPOSE_PROJECT_NAME:=warmhawk-core-engine}"
 
+# .env/ normally already exists (it ships .env.example, tracked in git), but don't assume a git
+# clone is how this got here — a release tarball or sparse checkout might not include it.
+mkdir -p "$(dirname "$ENV_FILE")"
 cat > "$ENV_FILE" <<EOF
 WARMHAWK_DOMAIN=$DOMAIN
 NGINX_HTTP_HOST_PORT=$NGINX_HTTP_HOST_PORT
@@ -341,11 +344,11 @@ EDGE_NETWORK_NAME=$EDGE_NETWORK_NAME
 EDGE_NGINX_ALIAS=$EDGE_NGINX_ALIAS
 COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
 EOF
-log "Secrets generated/loaded and written to .env (never committed — see .gitignore)."
+log "Secrets generated/loaded and written to .env/.env (never committed — see .gitignore)."
 
 # --- Bring up nginx HTTP-only + core services (no TLS yet) -------------------------------------
 log "Starting core services (HTTP-only, pre-TLS)..."
-docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d postgres redis migrate api worker n8n uptime-kuma nginx \
+docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d postgres redis migrate api worker n8n uptime-kuma nginx \
   || dump_compose_logs_and_fail "core services failed to start — see logs above."
 
 # --- Uptime Kuma auto-provisioning (admin account + monitors + optional alert webhook) ---------
@@ -353,11 +356,11 @@ docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose
 # stack depends on. A failure here (e.g. Kuma still starting up, or a container-runtime quirk)
 # just means monitors weren't created yet; re-run this exact command any time to retry.
 log "Provisioning Uptime Kuma (admin account + monitors)..."
-if docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm kuma-provision; then
+if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm kuma-provision; then
   log "Uptime Kuma provisioning complete."
 else
   log "WARNING: Uptime Kuma provisioning failed. Retry any time with:"
-  log "  docker compose --env-file $REPO_ROOT/.env -f $REPO_ROOT/docker/docker-compose.yml run --rm kuma-provision"
+  log "  docker compose --env-file $REPO_ROOT/.env/.env -f $REPO_ROOT/docker/docker-compose.yml run --rm kuma-provision"
 fi
 
 # --- TLS bootstrap -------------------------------------------------------------------------------
@@ -369,12 +372,12 @@ if [ "$SKIP_CERTBOT" = true ]; then
 else
   log "Requesting a Let's Encrypt certificate for ${DOMAIN} via certbot (webroot HTTP-01)..."
   # --entrypoint certbot — see the matching --retry-tls invocation above for why.
-  if docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot "${CERTBOT_RUN_DOCKER_ARGS[@]}" certbot \
+  if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" run --rm --entrypoint certbot "${CERTBOT_RUN_DOCKER_ARGS[@]}" certbot \
       certonly --webroot -w /var/www/certbot -d "$DOMAIN" --non-interactive --agree-tos -m "admin@${DOMAIN}" \
       "${CERTBOT_EXTRA_ARGS[@]}"; then
     enable_tls_template
     log "Rebuilding nginx (its config template is baked into the image at build time, not bind-mounted — a plain restart would keep serving the old HTTP-only config) and restarting it so it re-renders with TLS enabled..."
-    docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
+    docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build nginx
     TLS_READY=true
     log "TLS certificate issued and nginx restarted with TLS enabled."
   else
@@ -385,7 +388,7 @@ else
   fi
 fi
 
-docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d certbot \
+docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d certbot \
   || dump_compose_logs_and_fail "certbot renewal sidecar failed to start — see logs above."
 
 # --- Nightly backup opt-in (prompts once) -------------------------------------------------------
@@ -410,13 +413,13 @@ if [ "$ENABLE_BACKUPS" = "yes" ] && [ "$BACKUP_PATH_WRITABLE" = true ]; then
   log "Nightly backups enabled (02:00 daily -> ${BACKUP_TARGET_DIR}, ${BACKUP_RETENTION_DAYS:-14}-day retention)."
 elif [ "$ENABLE_BACKUPS" = "yes" ] && [ "$BACKUP_PATH_WRITABLE" = false ]; then
   log "WARNING: backups were requested but ${BACKUP_TARGET_DIR} is not writable — cron NOT installed."
-  log "  Next step: fix permissions on ${BACKUP_TARGET_DIR} (or set BACKUP_LOCAL_PATH in .env), then re-run this script."
+  log "  Next step: fix permissions on ${BACKUP_TARGET_DIR} (or set BACKUP_LOCAL_PATH in .env/.env), then re-run this script."
 else
   log "Nightly backups skipped by choice. Enable later by re-running this script."
 fi
 
 log "Bringing up the full stack..."
-docker compose --env-file "$REPO_ROOT/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build \
+docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d --build \
   || dump_compose_logs_and_fail "final full-stack startup failed — see logs above."
 
 if [ "${PORT_FALLBACK:-false}" = true ]; then
@@ -448,6 +451,6 @@ else
 fi
 
 log "Run 'warmhawk update' (or './scripts/update.sh') any time to pull the latest release and migrate in place."
-log "Running warmhawk-enterprise-operator too? Copy this .env's OPERATOR_SERVICE_TOKEN value into"
-log "  that repo's own .env as CORE_ENGINE_SERVICE_TOKEN — the two packages never share a .env, so"
+log "Running warmhawk-enterprise-operator too? Copy this .env/.env's OPERATOR_SERVICE_TOKEN value into"
+log "  that repo's own .env/.env as CORE_ENGINE_SERVICE_TOKEN — the two packages never share a .env/.env, so"
 log "  nothing does this for you automatically. Without it, the dashboard's data pages 401."

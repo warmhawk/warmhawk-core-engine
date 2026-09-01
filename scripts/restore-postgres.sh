@@ -17,10 +17,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
-if [ -f "$REPO_ROOT/.env" ]; then
+if [ -f "$REPO_ROOT/.env/.env" ]; then
   set -a
   # shellcheck disable=SC1091
-  source "$REPO_ROOT/.env"
+  source "$REPO_ROOT/.env/.env"
   set +a
 fi
 
@@ -68,7 +68,7 @@ if [ "$ASSUME_YES" != true ]; then
 fi
 
 log "Stopping api/worker/n8n (postgres stays up)..."
-docker compose --env-file "$REPO_ROOT/.env" -f "$COMPOSE_FILE" stop api worker n8n 2>/dev/null || true
+docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" stop api worker n8n 2>/dev/null || true
 
 log "Terminating existing connections to '${POSTGRES_DB}' and dropping/recreating it..."
 docker exec "$POSTGRES_CONTAINER" psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -c \
@@ -85,10 +85,10 @@ if ! gunzip -c "$BACKUP_FILE" | docker exec -i "$POSTGRES_CONTAINER" psql -U "$P
 fi
 
 log "Restore completed — data is in. Starting api/worker/n8n back up..."
-if ! docker compose --env-file "$REPO_ROOT/.env" -f "$COMPOSE_FILE" start api worker n8n 2>/dev/null && \
-   ! docker compose --env-file "$REPO_ROOT/.env" -f "$COMPOSE_FILE" up -d api worker n8n 2>/dev/null; then
+if ! docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" start api worker n8n 2>/dev/null && \
+   ! docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" up -d api worker n8n 2>/dev/null; then
   echo "[restore-postgres] WARNING: the database restore itself SUCCEEDED, but bringing api/worker/n8n" >&2
-  echo "  back up failed. Re-run: docker compose --env-file ${REPO_ROOT}/.env -f ${COMPOSE_FILE} up -d api worker n8n" >&2
+  echo "  back up failed. Re-run: docker compose --env-file ${REPO_ROOT}/.env/.env -f ${COMPOSE_FILE} up -d api worker n8n" >&2
   exit 0
 fi
 
