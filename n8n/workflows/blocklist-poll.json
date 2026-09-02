@@ -1,0 +1,91 @@
+{
+  "name": "WarmHawk Blocklist Poll",
+  "nodes": [
+    {
+      "id": "b1-schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-800, 0],
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 1 }] }
+      }
+    },
+    {
+      "id": "b2-active-domains",
+      "name": "Get Active Domains",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/domains/active",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" }]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b3-split-domains",
+      "name": "Split Out Domains",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [-320, 0],
+      "parameters": { "fieldToSplitOut": "domains" }
+    },
+    {
+      "id": "b4-loop-domains",
+      "name": "Loop Domains",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-80, 0],
+      "parameters": { "batchSize": 1, "options": {} }
+    },
+    {
+      "id": "b5-poll-round-complete",
+      "name": "Blocklist Poll Round Complete",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [160, -160],
+      "parameters": {}
+    },
+    {
+      "id": "b6-check-blocklist",
+      "name": "Check Blocklist",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [160, 160],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/domains/check-blocklist",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"domainName\": $json.domainName } }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": { "main": [[{ "node": "Get Active Domains", "type": "main", "index": 0 }]] },
+    "Get Active Domains": { "main": [[{ "node": "Split Out Domains", "type": "main", "index": 0 }]] },
+    "Split Out Domains": { "main": [[{ "node": "Loop Domains", "type": "main", "index": 0 }]] },
+    "Loop Domains": {
+      "main": [
+        [{ "node": "Blocklist Poll Round Complete", "type": "main", "index": 0 }],
+        [{ "node": "Check Blocklist", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Blocklist": { "main": [[{ "node": "Loop Domains", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

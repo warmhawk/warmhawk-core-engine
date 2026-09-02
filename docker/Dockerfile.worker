@@ -1,0 +1,49 @@
+# WarmHawk BullMQ dispatch worker — same non-root, digest-pinned pattern as Dockerfile.api;
+# shares the same build stage shape since both apps live in one npm workspace. Bumped from
+# node:20-alpine to node:22-alpine 2026-08-28 alongside Dockerfile.api — see that file's identical
+# comment for why (semantic-release@25's CI engine requirement, kept in sync with runtime).
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
+WORKDIR /repo
+# Must match the runtime stage's `apk add openssl` below — see Dockerfile.api's identical fix for
+# why (prisma generate needs to see the same OpenSSL runtime will have, or it fetches the wrong
+# query-engine binary).
+RUN apk update && apk upgrade --no-cache && apk add --no-cache openssl
+COPY package.json package-lock.json* ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/worker/package.json apps/worker/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/tier-config/package.json packages/tier-config/package.json
+RUN npm install --workspaces --include-workspace-root
+COPY . .
+RUN npm run db:generate
+# devDependencies (vitest, typescript, eslint, etc.) have no business in the runtime image;
+# `db:generate` above already ran with the `prisma` devDependency present, so this can safely run
+# after it. (The actual Trivy container-security gate failure traced to npm's own bundled
+# node_modules baked into the base image, not this repo's tree — see the runtime stage's `rm -rf`
+# below — but this prune is still worth keeping for a smaller, lower-surface runtime image.)
+RUN npm prune --omit=dev --workspaces --include-workspace-root
+
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runtime
+ENV NODE_ENV=production
+RUN apk update && apk upgrade --no-cache && apk add --no-cache openssl && addgroup -S app && adduser -S app -G app
+# node:22-alpine bundles npm's own internal dependency snapshot (its vendored tar/glob/minimatch/
+# brace-expansion/cross-spawn/sigstore/ip-address, used by npm's own registry/install machinery) —
+# unrelated to anything in this repo's package-lock.json, but still scanned and flagged by the
+# container-security Trivy gate since it's on disk in every node:*-alpine image regardless of
+# npm version. Nothing at runtime needs `npm`/`npx`/`corepack` (see CMD below, which invokes tsx
+# directly), so the fix is to delete them rather than chase npm CLI version bumps that don't
+# reliably clear this — found by tracing every flagged package.json's actual path in the built
+# image back to /usr/local/lib/node_modules/npm/node_modules/*, not this repo's own node_modules.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
+  /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
+WORKDIR /repo
+
+COPY --from=build --chown=app:app /repo/node_modules ./node_modules
+COPY --from=build --chown=app:app /repo/package.json ./package.json
+COPY --from=build --chown=app:app /repo/packages ./packages
+COPY --from=build --chown=app:app /repo/apps/worker ./apps/worker
+COPY --from=build --chown=app:app /repo/constants.ts ./constants.ts
+
+USER app
+WORKDIR /repo/apps/worker
+CMD ["node", "/repo/node_modules/.bin/tsx", "src/index.ts"]

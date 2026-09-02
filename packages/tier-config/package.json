@@ -1,0 +1,17 @@
+{
+  "name": "@warmhawk/tier-config",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Single source of truth for WarmHawk tier/feature constants (dashboard access, Kuma/OTEL bundling, backup defaults, 2FA, team management, support SLA).",
+  "main": "src/constants.ts",
+  "types": "src/constants.ts",
+  "exports": {
+    ".": "./src/constants.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

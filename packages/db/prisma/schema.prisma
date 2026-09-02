@@ -1,0 +1,452 @@
+// WarmHawk Core Engine — Prisma schema.
+//
+// Models: Lead, Campaign, Domain, Mailbox, SuppressionEntry, ExecutionLog, User, and related
+// enums, extended per the WarmHawk V12 spec with: AiProvider enum + AiProviderKey model (Phase 3),
+// Reply model + related enum (Reply Management & Unified Inbox, V11, genuinely new),
+// InstanceSettings (CAN-SPAM physical-address enforcement — new). `MICROSOFT_365` is now a fully
+// implemented provider path (see lib/microsoftOAuth.ts).
+//
+// V12 fix: a `License` model + `LicenseStatus` enum previously lived here (Phase 4), built by
+// mistake during a parallel-agent build — Tier 0 (this engine) carries no license gate at all;
+// see the note near where InstanceSettings is defined, below, for where that logic actually lives.
+//
+// NOTE ON REPO BOUNDARIES: `TeamMember` is intentionally NOT modeled here. Per the V12
+// Containerization Model ("the two packages never share... a Postgres instance") and the Team &
+// User Management section ("the licensed dashboard's Postgres schema"), team membership is
+// dashboard/account-level data that lives in the licensed dashboard's OWN separate Postgres
+// instance, not this engine's. See this repo's build report for the explicit judgment call.
+
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../generated/client"
+  // "native" for local (non-container) dev; linux-musl-openssl-3.0.x for the Alpine-based
+  // Docker images (docker/Dockerfile.api, docker/Dockerfile.worker) — without this explicit
+  // pin, `prisma generate` running inside those images' build stage fetched the plain
+  // "linux-musl" engine (no OpenSSL suffix) regardless of whether openssl was installed at
+  // generate time, which then failed to load at runtime against Alpine's actual OpenSSL 3.x.
+  // Found running this image for the first time locally.
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------------------------
+
+enum UserRole {
+  ADMIN
+  OPERATOR
+}
+
+enum DnsRecordStatus {
+  PENDING
+  PASS
+  FAIL
+}
+
+enum MailboxProvider {
+  GOOGLE_WORKSPACE
+  MICROSOFT_365
+  SMTP_CUSTOM
+}
+
+enum MailboxStatus {
+  WARMUP
+  ACTIVE
+  PAUSED
+}
+
+enum CampaignStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  COMPLETED
+  ARCHIVED
+}
+
+enum LeadStatus {
+  UNTOUCHED
+  QUEUED
+  CONTACTED
+  OPENED
+  REPLIED
+  BOUNCED
+  FAILED
+  SUPPRESSED
+}
+
+enum ExecutionStatus {
+  PENDING
+  SENT
+  OPENED
+  REPLIED
+  BOUNCED
+  FAILED
+}
+
+/// New, V12/Phase 3 — BYOK AI personalization provider choice.
+enum AiProvider {
+  GEMINI
+  CLAUDE
+}
+
+/// New, V11 — Reply Management & Unified Inbox. Previously only a generic `REPLIED` value existed
+/// on ExecutionLog.status with no content/classification.
+enum ReplyClassification {
+  INTERESTED
+  NOT_INTERESTED
+  OUT_OF_OFFICE
+  AUTO_REPLY
+  OPT_OUT
+  UNCLASSIFIED
+}
+
+/// Seed-Inbox Placement Test (Guardrails, V12 — option (c), "placement sampling," the spec's own
+/// recommended default for a solo/bootstrap launch). A handful of owned/founder-configured seed
+/// accounts BCC'd on real campaign sends; NOT a claim of full inbox-placement testing — see
+/// `SeedPlacementResult` and `GET /domains/:id/placement-sample`'s honest "placement sampling
+/// across N seed inboxes" labeling.
+enum SeedAccountProvider {
+  GMAIL
+  OUTLOOK
+  YAHOO
+  ZOHO
+}
+
+/// Where a seed account's copy of a send actually landed, per Guardrails' three real inbox
+/// categories worth distinguishing (INBOX = success, SPAM/PROMOTIONS = the two most common
+/// competitor-cited placement failures, UNCLASSIFIED = checked but not found in any known folder
+/// within the polling window — a real, honest outcome, not an error).
+enum SeedPlacementFolder {
+  INBOX
+  SPAM
+  PROMOTIONS
+  UNCLASSIFIED
+}
+
+// ---------------------------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------------------------
+
+/// Minimal API-auth user — protects warmhawk-core-engine's own management routes (domains,
+/// campaigns, leads admin actions). Distinct from the licensed dashboard's own dashboard
+/// login/session model, which lives in that product's own separate Postgres instance. Tier 0 ("no
+/// web UI") customers create/manage this via a bootstrap CLI step or the quickstart doc, not a
+/// web form.
+model User {
+  id                  String    @id @default(cuid())
+  email               String    @unique
+  passwordHash        String
+  role                UserRole  @default(OPERATOR)
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  twoFactorSecretEnc  String?
+  twoFactorEnabled    Boolean   @default(false)
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  @@map("users")
+}
+
+model Domain {
+  id          String          @id @default(cuid())
+  domainName  String          @unique
+  redirectUrl String?
+  spfStatus   DnsRecordStatus @default(PENDING)
+  dkimStatus  DnsRecordStatus @default(PENDING)
+  dmarcStatus DnsRecordStatus @default(PENDING)
+
+  /// New, V11 — continuous DNSBL/blocklist monitoring. Per-list PASS/FAIL/PENDING, e.g.
+  /// `{ "spamhausZen": "PASS", "spamhausDbl": "PASS", "barracuda": "FAIL", "sorbs": "PASS" }`.
+  blocklistStatus      Json?
+  lastBlocklistCheckAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  mailboxes Mailbox[]
+
+  @@map("domains")
+}
+
+model Mailbox {
+  id        String          @id @default(cuid())
+  email     String          @unique
+  provider  MailboxProvider @default(SMTP_CUSTOM)
+  dailyCap  Int             @default(25)
+  sentToday Int             @default(0)
+  status    MailboxStatus   @default(WARMUP)
+  domainId  String
+  domain    Domain          @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  // SMTP/IMAP credentials — authPasswordEncrypted is AES-256-GCM ciphertext (never plaintext).
+  smtpHost              String?
+  smtpPort              Int?    @default(587)
+  imapHost              String?
+  imapPort              Int?    @default(993)
+  authUsername          String?
+  authPasswordEncrypted String?
+
+  // OAuth path (GOOGLE_WORKSPACE — ported; MICROSOFT_365 — new, same shape).
+  oauthRefreshTokenEncrypted String?
+  oauthConnectedAt          DateTime?
+  oauthScope                String?
+
+  // Cadence enforcement — last successful send timestamp, read by computeNextSlotSeconds.ts.
+  lastSentAt DateTime?
+
+  // Warmup tracking — null = not yet started.
+  warmupStartedAt DateTime?
+
+  // Reputation protection — bounce/complaint circuit breaker (Guardrails).
+  rollingBounceRate Float   @default(0)
+  autoFlaggedAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  executionLogs ExecutionLog[]
+  replies       Reply[]
+
+  @@index([domainId])
+  @@index([status])
+  @@map("mailboxes")
+}
+
+model Campaign {
+  id               String         @id @default(cuid())
+  name             String
+  status           CampaignStatus @default(DRAFT)
+  aiPromptTemplate String         @db.Text
+
+  /// Native spintax-capable template (`{option one|option two}`), rendered per-send whether or
+  /// not an AI provider is configured (Pre-Send Content Quality, V11).
+  template String? @db.Text
+
+  /// Nullable — no configured provider means the campaign sends its template as-is rather than
+  /// failing (Phase 3).
+  aiProvider AiProvider?
+
+  /// CAN-SPAM auto-injection — the sending pipeline refuses to send a campaign missing either
+  /// this or the instance-wide physical mailing address (see InstanceSettings).
+  unsubscribeUrlTemplate String?
+
+  /// Reputation protection — bounce/complaint circuit breaker threshold (default 5%, Guardrails).
+  bounceRateThreshold Float   @default(0.05)
+  pausedForBounceRate Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  leads         Lead[]
+  executionLogs ExecutionLog[]
+  replies       Reply[]
+
+  /// Seed-Inbox Placement Test (V12) — placement-sampling results recorded against this
+  /// campaign's real sends. See `SeedPlacementResult`.
+  seedPlacementResults SeedPlacementResult[]
+
+  @@map("campaigns")
+}
+
+model Lead {
+  id           String     @id @default(cuid())
+  campaignId   String
+  campaign     Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  email        String
+  firstName    String?
+  lastName     String?
+  company      String?
+  customFields Json?
+  status       LeadStatus @default(UNTOUCHED)
+  retryCount   Int        @default(0)
+  nextRetryAt  DateTime?
+
+  /// Redis Durability & Crash Recovery (V12) — the BullMQ job id + expected slot time this lead
+  /// was last enqueued under, so `reconcileStuckLeads()` can detect a row whose status implies
+  /// "should be queued" but that has no matching BullMQ job (write-then-crash gap) and
+  /// re-enqueue it.
+  queuedJobId  String?
+  queuedSlotAt DateTime?
+
+  /// GDPR right-to-erasure (Guardrails) — set when `DELETE /v1/leads/erase` scrubs this row's PII
+  /// (email/firstName/lastName/company/customFields). The row itself is kept, not hard-deleted, so
+  /// campaign/send aggregate counts stay accurate ("preserves anonymized counts" per spec) — only
+  /// this timestamp and the nulled/placeholder fields distinguish an erased lead from a live one.
+  piiErasedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  executionLogs ExecutionLog[]
+  replies       Reply[]
+
+  @@unique([campaignId, email])
+  @@index([status])
+  @@index([campaignId])
+  @@map("leads")
+}
+
+/// Hard floor for suppression enforcement (Guardrails — "no code path anywhere may re-add or
+/// bypass a suppressed email"). `source` records how the entry was created, for CAN-SPAM/GDPR
+/// audit purposes (unsubscribe-link click, reply-detected opt-out language, manual entry, or
+/// bounce-driven).
+model SuppressionEntry {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  reason    String?
+  source    String   @default("manual")
+  createdAt DateTime @default(now())
+
+  @@map("suppression_list")
+}
+
+model ExecutionLog {
+  id             String          @id @default(cuid())
+  campaignId     String?
+  campaign       Campaign?       @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  leadId         String?
+  lead           Lead?           @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  mailboxId      String?
+  mailbox        Mailbox?        @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+  n8nExecutionId String?
+  status         ExecutionStatus @default(PENDING)
+  payloadSent    Json?
+  responseReceived Json?
+  errorMessage   String?
+
+  /// RFC 8058 headers actually attached to this send — recorded so the deliverability
+  /// integration test (Testing Strategy) can assert their presence per-send, not just at the
+  /// template-config level.
+  listUnsubscribeHeader     String?
+  listUnsubscribePostHeader String?
+
+  /// EU AI Act Article 50 disclosure marker — true when this send had the AI-content-disclosure
+  /// marker appended (Campaign.aiProvider set + recipient resolved to an EU-region signal).
+  euAiDisclosureAppended Boolean @default(false)
+
+  /// The SMTP provider's Message-ID for this send (nodemailer's `info.messageId`, e.g.
+  /// "<abc123@host>") — an opaque identifier, never personalized content, so it doesn't reopen the
+  /// privacy fix that stopped `payloadSent` from retaining subject/body text. `replies.ts`'s
+  /// `/pending` route surfaces this so the reply-poll n8n workflow can thread replies via IMAP's
+  /// standard In-Reply-To/References headers instead of fragile subject-substring matching.
+  providerMessageId String?
+
+  createdAt DateTime @default(now())
+
+  @@index([campaignId])
+  @@index([leadId])
+  @@index([mailboxId])
+  @@index([createdAt])
+  @@map("execution_logs")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Models — new in V11/V12
+// ---------------------------------------------------------------------------------------------
+
+/// Phase 3 — BYOK AI personalization. One active key per provider per instance.
+model AiProviderKey {
+  id               String     @id @default(cuid())
+  provider         AiProvider @unique
+  apiKeyEncrypted  String
+  model            String
+  isActive         Boolean    @default(true)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  @@map("ai_provider_keys")
+}
+
+/// Reply Management & Unified Inbox (V11) — genuinely new model.
+model Reply {
+  id             String              @id @default(cuid())
+  leadId         String
+  lead           Lead                @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  campaignId     String
+  campaign       Campaign            @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  mailboxId      String
+  mailbox        Mailbox             @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  rawContent     String              @db.Text
+  classification ReplyClassification @default(UNCLASSIFIED)
+  classifiedAt   DateTime?
+  repliedAt      DateTime
+  createdAt      DateTime            @default(now())
+
+  @@index([campaignId])
+  @@index([leadId])
+  @@index([mailboxId])
+  @@index([classification])
+  @@map("replies")
+}
+
+// NOTE (V12 fix): a `License` model previously lived here (Phase 4 build), issued by a Stripe
+// webhook handler that also lived in this repo. Both were built here by mistake during a
+// parallel-agent build — per the spec, warmhawk-core-engine ("Tier 0") carries no license gate at
+// all and has no business owning Stripe integration, a private signing key, or a license-issuance
+// audit trail. That logic (and its own License model) now lives solely in WarmHawk's
+// billing/marketing site (issuance) and the licensed dashboard (verification + its own separate
+// License record, in its own separate Postgres instance).
+
+/// Singleton instance-wide settings — CAN-SPAM auto-injection reads `physicalMailingAddress` and
+/// refuses to send a campaign if it's unset (Guardrails). Always exactly one row, id = "default".
+model InstanceSettings {
+  id                     String   @id @default("default")
+  physicalMailingAddress String?
+  updatedAt              DateTime @updatedAt
+
+  @@map("instance_settings")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Seed-Inbox Placement Test (new, V12) — Guardrails' recommended option (c) for a solo/bootstrap
+// launch: "BCC a handful of owned seed accounts on a real send, report which folder each one
+// landed in... labeled honestly as 'placement sampling across N seed inboxes', never as full
+// inbox-placement testing." This is genuinely customer/founder-configured — the code path is
+// complete and correct, but produces real data only once real seed accounts are configured, which
+// is expected and fine (see this repo's build report).
+// ---------------------------------------------------------------------------------------------
+
+/// A founder/customer-owned mailbox used ONLY to receive a BCC copy of real sends and report
+/// where it landed — never itself a sending mailbox (see `Mailbox`, above, which is distinct).
+/// `imapConfigEncrypted` is a single AES-256-GCM ciphertext blob (same `lib/encryption.ts`
+/// mechanism as `Mailbox.authPasswordEncrypted`) holding the serialized JSON
+/// `{ host, port, username, password }` needed to poll this account's own inbox via IMAP —
+/// deliberately a simpler shape than `Mailbox`'s full OAuth/SMTP/IMAP split, since a seed account
+/// only ever needs read-IMAP-folder access, never a send credential.
+model SeedAccount {
+  id                  String              @id @default(cuid())
+  provider            SeedAccountProvider
+  emailAddress        String              @unique
+  imapConfigEncrypted String
+  isActive            Boolean             @default(true)
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  placements SeedPlacementResult[]
+
+  @@index([isActive])
+  @@map("seed_accounts")
+}
+
+/// One placement-sampling data point: where a single seed account's BCC'd copy of a given
+/// campaign's send landed, as of one polling check. Multiple rows accumulate per
+/// (campaignId, seedAccountId) over time by design — placement can shift between checks, and the
+/// history itself is part of the signal `GET /domains/:id/placement-sample` aggregates.
+model SeedPlacementResult {
+  id            String              @id @default(cuid())
+  campaignId    String
+  campaign      Campaign            @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  seedAccountId String
+  seedAccount   SeedAccount         @relation(fields: [seedAccountId], references: [id], onDelete: Cascade)
+  folder        SeedPlacementFolder @default(UNCLASSIFIED)
+  checkedAt     DateTime            @default(now())
+
+  @@index([campaignId])
+  @@index([seedAccountId])
+  @@map("seed_placement_results")
+}

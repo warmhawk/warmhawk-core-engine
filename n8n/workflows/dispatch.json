@@ -1,0 +1,111 @@
+{
+  "name": "WarmHawk Dispatch",
+  "nodes": [
+    {
+      "id": "d1-webhook",
+      "name": "Webhook: warmhawk/dispatch",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-800, 0],
+      "webhookId": "warmhawk-dispatch",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "warmhawk/dispatch",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "d2-personalize",
+      "name": "Call internal/ai/personalize",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-560, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/ai/personalize",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"campaignId\": $json.body.campaignId, \"leadId\": $json.body.leadId } }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "d3-build-payload",
+      "name": "Build Email Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-320, 0],
+      "parameters": {
+        "jsCode": "// personalizeContent() (apps/api/src/lib/aiProviderClient.ts) returns a single\n// generatedText string, not a { subject, body } pair - WarmHawk's Campaign model has no\n// discrete subject field (see packages/db/prisma/schema.prisma). Split on the first newline:\n// the first line becomes the subject (falls back to a generic opener if the AI/template output\n// has no natural first-line break), the remainder is the body.\nconst trigger = $('Webhook: warmhawk/dispatch').first().json.body;\nconst personalized = $input.first().json;\nconst generatedText = personalized.generatedText || '';\n\nconst firstNewline = generatedText.indexOf('\\n');\nlet subject;\nlet body;\nif (firstNewline > 0 && firstNewline < 120) {\n  subject = generatedText.slice(0, firstNewline).trim();\n  body = generatedText.slice(firstNewline + 1).trim();\n} else {\n  subject = 'Quick question';\n  body = generatedText.trim();\n}\nif (!subject) subject = 'Quick question';\nif (!body) body = generatedText.trim() || subject;\n\nreturn [{\n  json: {\n    leadId: trigger.leadId,\n    mailboxId: trigger.mailboxId,\n    campaignId: trigger.campaignId,\n    email: trigger.email,\n    subject,\n    body,\n    aiUsed: personalized.aiUsed === true\n  }\n}];"
+      }
+    },
+    {
+      "id": "d4-send",
+      "name": "Call internal/mail/send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-80, 0],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/mail/send",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"mailboxId\": $json.mailboxId, \"to\": $json.email, \"subject\": $json.subject, \"body\": $json.body, \"campaignId\": $json.campaignId, \"leadId\": $json.leadId, \"n8nExecutionId\": $execution.id } }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "d5-respond-sent",
+      "name": "Respond Sent",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [160, -140],
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={{ { \"status\": \"sent\", \"leadId\": $('Build Email Payload').item.json.leadId, \"messageId\": $json.messageId } }}"
+      }
+    },
+    {
+      "id": "d6-respond-failed",
+      "name": "Respond Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.2,
+      "position": [160, 140],
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 200,
+        "responseBody": "={{ { \"status\": \"failed\", \"leadId\": $('Build Email Payload').item.json.leadId, \"error\": $json.error || 'send failed' } }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook: warmhawk/dispatch": { "main": [[{ "node": "Call internal/ai/personalize", "type": "main", "index": 0 }]] },
+    "Call internal/ai/personalize": { "main": [[{ "node": "Build Email Payload", "type": "main", "index": 0 }]] },
+    "Build Email Payload": { "main": [[{ "node": "Call internal/mail/send", "type": "main", "index": 0 }]] },
+    "Call internal/mail/send": {
+      "main": [
+        [{ "node": "Respond Sent", "type": "main", "index": 0 }],
+        [{ "node": "Respond Failed", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

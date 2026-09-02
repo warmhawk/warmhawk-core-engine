@@ -1,0 +1,52 @@
+{
+  "name": "WarmHawk Seed Placement Poll",
+  "nodes": [
+    {
+      "id": "s1-schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 0],
+      "parameters": {
+        "rule": { "interval": [{ "field": "hours", "hoursInterval": 6 }] }
+      }
+    },
+    {
+      "id": "s2-poll",
+      "name": "Poll Seed Placement",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-360, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/seed-placement/poll",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"lookbackHours\": 24 } }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "s3-log-summary",
+      "name": "Log Poll Summary",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [-120, 0],
+      "notes": "Terminal node - the response ({campaignsChecked, seedAccountsChecked, resultsRecorded}) is visible in this execution's data for manual/alerting review; GET /domains/:id/placement-sample is the actual dashboard-facing read path for the accumulated results.",
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": { "main": [[{ "node": "Poll Seed Placement", "type": "main", "index": 0 }]] },
+    "Poll Seed Placement": { "main": [[{ "node": "Log Poll Summary", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

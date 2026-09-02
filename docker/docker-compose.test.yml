@@ -1,0 +1,51 @@
+# Test/CI overlay — adds host-published ports for Postgres/Redis so the test runner (running on
+# the host, or in a separate CI job container) can reach them directly, and relaxes a couple of
+# production-only settings. Lives under docker/ alongside the base file — used as:
+# `docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up -d`
+# (always invoked from repo root).
+#
+# V12 process lesson: Docker Compose `ports:` CONCATENATE, they don't override, across `-f`
+# files. The base docker-compose.yml deliberately declares NO `ports:` block for postgres/redis/
+# api (only nginx publishes a port there), so adding one here is the only mapping in effect for
+# these services — never a competing/duplicate mapping. Host ports below are parameterized
+# `${VAR:-default}` per the reserved local-dev range documented in docker-compose.yml's header
+# (4600-4649) so a developer can override on a per-machine basis without editing this file.
+#
+# Cleanup-pass fix (2026-08-21): the base file also puts every service on the `warmhawk_internal`
+# network with `internal: true` (correct for the shipped customer package — no service but nginx
+# should ever be host-reachable). But `internal: true` disables Docker's NAT/masquerade setup for
+# that network entirely, which means a `ports:` publish on a container whose ONLY network is
+# `warmhawk_internal` is silently accepted (it shows up in `docker inspect`'s HostConfig) but never
+# actually wired up — the host genuinely cannot reach it. Confirmed by hand: `docker port` on the
+# postgres container showed no mapping and `Test-NetConnection localhost 4601` failed even with
+# postgres healthy. This override flips the network back to routable, but ONLY for the test/CI
+# overlay — the production docker-compose.yml is untouched, so a real customer deployment still
+# gets the fully internal network exactly as designed.
+networks:
+  warmhawk_internal:
+    internal: false
+
+services:
+  postgres:
+    ports:
+      - '${POSTGRES_TEST_PORT:-4601}:5432'
+    deploy:
+      resources:
+        limits: { cpus: '1.0', memory: 512M }
+
+  redis:
+    ports:
+      - '${REDIS_TEST_PORT:-4602}:6379'
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 128M }
+
+  uptime-kuma:
+    ports:
+      - '${UPTIME_KUMA_TEST_PORT:-4604}:3001'
+
+  # Nginx/certbot aren't needed for integration testing (routes are exercised in-process via
+  # Fastify's `app.inject()` or directly against the api container's internal port) — omit them
+  # from the test stack entirely by not depending on them; `docker compose up` without `--profile`
+  # here still starts them, so CI explicitly targets only the services it needs:
+  #   docker compose -f docker/docker-compose.yml -f docker/docker-compose.test.yml up -d postgres redis
