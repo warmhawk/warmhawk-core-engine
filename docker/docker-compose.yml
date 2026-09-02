@@ -35,6 +35,14 @@
 # 4500-4599 don't overlap either way, so there was never an actual port collision, just a wrong
 # cross-reference.)
 
+# Pinned explicitly (2026-09-02, after a real near-miss) — without it Compose derives the default
+# project name from this file's own directory basename ("docker"), identical to several sibling
+# repos' own docker/ folder (warmhawk-enterprise-operator, etc). A same-machine
+# `docker compose up` from one of those, also unpinned, resolved to the same project name and
+# briefly recreated an unrelated repo's own postgres container as if it were this repo's
+# "postgres" service. See warmhawk-enterprise-operator/docker/docker-compose.yml's identical fix.
+name: warmhawk-core-engine
+
 networks:
   warmhawk_internal:
     internal: true
