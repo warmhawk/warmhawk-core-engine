@@ -2,7 +2,7 @@
   "name": "@warmhawk/api",
   "version": "0.1.0",
   "private": true,
-  "description": "WarmHawk Core Engine — API server (Fastify). Direct API access is Tier 0 (free, open-core); no license gate lives here — see warmhawk-enterprise-operator for the licensed dashboard.",
+  "description": "WarmHawk Core Engine — API server (Fastify). Direct API access is Tier 0 (free, open-core); no license gate lives here — the licensed dashboard is WarmHawk's separate product.",
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",

@@ -1,8 +1,7 @@
 /**
  * Fastify preHandler guarding internal-only routes (`/internal/ai/personalize`,
  * `/internal/ai/classify-reply`, `/internal/imap/search`, `/internal/imap/flag`) with a shared
- * callback-secret header, checked with a constant-time comparison — ported pattern from
- * outreach-infra's `requireCallbackSecret` middleware.
+ * callback-secret header, checked with a constant-time comparison.
  *
  * Per the V12 Containerization Model, these routes are additionally reachable ONLY over the
  * package's internal Docker network (`warmhawk_internal`) — nginx never proxies them. This

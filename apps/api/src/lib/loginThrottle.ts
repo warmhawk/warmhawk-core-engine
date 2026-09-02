@@ -2,8 +2,8 @@
  * Login brute-force protection — Guardrails / Account security: "Dashboard login brute-force
  * protection: rate-limit and lock out POST /auth/login after repeated failures." This engine's
  * own `/auth/login` protects its management API (see lib/requireAuth.ts's note on API-vs-
- * dashboard auth); the dashboard's own login endpoint (warmhawk-enterprise-operator) implements
- * the equivalent check against ITS OWN separate Postgres/session model.
+ * dashboard auth); the licensed dashboard's own login endpoint implements
+ * the equivalent check against its own separate Postgres/session model.
  *
  * Pure evaluation logic factored out for unit testing; the route (routes/auth.ts) is responsible
  * for reading/writing `User.failedLoginAttempts`/`lockedUntil`.

@@ -94,10 +94,10 @@ function anonymizedEmail(leadId: string): string {
 export async function leadsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
-  /** NEW, additive — warmhawk-enterprise-operator's Leads page (`GET /leads`) and its
+  /** NEW, additive — the licensed dashboard's Leads page (`GET /leads`) and its
    *  import-dialog revalidation call both already assumed this route; it did not exist. Returns
    *  an envelope (not a bare array, unlike domains/campaigns/mailboxes) so the dashboard can show
-   *  a total count without a second round trip — matches the shape the operator was already
+   *  a total count without a second round trip — matches the shape the dashboard was already
    *  built against. */
   app.get<{ Querystring: ListLeadsQuery }>('/', async (request) => {
     const { campaignId } = request.query;

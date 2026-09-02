@@ -1,9 +1,8 @@
 /**
- * BullMQ job processor — ported forward from outreach-infra's `apps/api/src/worker/processor.ts`.
- * Re-checks mailbox eligibility at dispatch time (a mailbox can be paused/capped between enqueue
- * and the job actually firing, given the jittered delay), then hands off the real send to the
- * n8n dispatch workflow over the internal Docker network — this process never talks to an SMTP
- * server directly.
+ * BullMQ job processor — re-checks mailbox eligibility at dispatch time (a mailbox can be
+ * paused/capped between enqueue and the job actually firing, given the jittered delay), then hands
+ * off the real send to the n8n dispatch workflow over the internal Docker network — this process
+ * never talks to an SMTP server directly.
  */
 import type { Job } from 'bullmq';
 import { prisma } from '@warmhawk/db';

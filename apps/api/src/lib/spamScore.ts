@@ -3,7 +3,7 @@
  * pre-send spam-word/content scorer, both as a trust-building lead magnet and a real feature").
  * Heuristic, not a trained classifier: spam-trigger word/phrase list, excessive
  * punctuation/ALL-CAPS detection, link-count and urgency-language checks. Surfaced live in the
- * campaign builder as the customer types (warmhawk-enterprise-operator), computed here so both
+ * campaign builder as the customer types, in the licensed dashboard, computed here so both
  * the dashboard and a future public tool can call one function.
  */
 

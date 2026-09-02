@@ -1,6 +1,6 @@
 /**
  * Reply records — new, V11 (Reply Management & Unified Inbox). This route serves
- * warmhawk-enterprise-operator's Unified Reply Inbox page (that dashboard has no Postgres access
+ * the licensed dashboard's Unified Reply Inbox page (that dashboard has no Postgres access
  * of its own to core-engine's data — it calls this API via `CORE_ENGINE_API_URL`, per the
  * Containerization Model's "two packages are independently deployable... talk via
  * CORE_ENGINE_API_URL"). Dashboard-facing, guarded by the same JWT auth as the rest of this API's

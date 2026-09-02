@@ -17,7 +17,7 @@ first; `support@warmhawk.com` (Tier 1: 1-business-day / 4h-critical) if you're s
 
 Most installs land on an empty box and `install.sh` binds nginx straight to 80/443. If this server
 already runs something else on those ports — another app, a hand-rolled nginx/Apache/Caddy, or
-`warmhawk-enterprise-operator`'s own nginx — `install.sh` detects that and falls back automatically
+the licensed dashboard product's own nginx — `install.sh` detects that and falls back automatically
 instead of failing:
 
 - [x] nginx publishes alt ports instead — `8080`/`8443` by default, or whatever you pass via
@@ -75,10 +75,9 @@ this box.
 ## Stripe / license-issuance issues
 
 This repo (Tier 0) has no Stripe integration and issues no licenses — it carries no license gate
-at all. The Stripe webhook and RSA license signing live in `warmhawk-site`; license verification
-lives in `warmhawk-enterprise-operator`'s `LicenseGate`. See those repos' own troubleshooting docs
-(`warmhawk-site`'s `/docs/stripe-webhooks` and `/docs/license-activation`) for webhook-delivery and
-signature issues.
+at all. Billing and license activation are handled by WarmHawk's other products (the account/
+billing site and the licensed dashboard) — if you're seeing a billing or licensing issue, contact
+`support@warmhawk.com` rather than looking for it here.
 
 ## Common `docker compose` problems
 
@@ -90,7 +89,7 @@ signature issues.
 
 ## Backup/restore
 
-See `docs/backup-and-restore.md` — the same doc used for the Pre-Production restore drill.
+See `docs/backup-and-restore.md`.
 
 ## `warmhawk update` (`scripts/update.sh`) failures
 
@@ -102,5 +101,5 @@ See `docs/backup-and-restore.md` — the same doc used for the Pre-Production re
 ## Microsoft 365 mailbox connect
 
 Requires a completed Entra app registration under your own tenant (or WarmHawk's, once verified
-under the WarmHawk brand) — see `docs/microsoft-365-oauth-setup.md`. Until then, connect the
-mailbox via SMTP/IMAP username+password instead (the universal fallback for any provider).
+under the WarmHawk brand). Until then, connect the mailbox via SMTP/IMAP username+password instead
+(the universal fallback for any provider).

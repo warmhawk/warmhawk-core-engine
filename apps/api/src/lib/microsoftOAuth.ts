@@ -1,8 +1,7 @@
 /**
  * Microsoft 365 OAuth mailbox-connect flow — genuinely NEW build (V11 Mailbox Connection
- * Upgrade): `MICROSOFT_365` existed only as an unused Prisma enum value in outreach-infra, with
- * zero implementation behind it (a Microsoft 365 mailbox there has no path but raw
- * username/password). This mirrors `googleOAuth.ts`'s shape exactly — same
+ * Upgrade): a Microsoft 365 mailbox previously had no path but raw username/password. This
+ * mirrors `googleOAuth.ts`'s shape exactly — same
  * authorize-URL/exchange/mint-access-token trio, same encrypted-refresh-token storage pattern in
  * `oauthCallback.ts` — using the Microsoft identity platform's OAuth2 v2.0 endpoints directly
  * (no external SDK dependency, since `@azure/msal-node` would be the only reason to add one and

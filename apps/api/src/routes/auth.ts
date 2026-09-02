@@ -1,7 +1,7 @@
 /**
  * `POST /auth/login` — authenticates against this engine's own `User` table (protects
  * warmhawk-core-engine's management routes; see lib/requireAuth.ts's note distinguishing this
- * from warmhawk-enterprise-operator's separate dashboard login). Rate-limited AND brute-force
+ * from the licensed dashboard's separate login). Rate-limited AND brute-force
  * locked out per the Guardrails section, both layers active simultaneously (rate limiting slows
  * a distributed attempt; the per-account lockout stops a slow, patient one).
  */

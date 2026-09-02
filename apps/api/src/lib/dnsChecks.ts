@@ -1,10 +1,8 @@
 /**
- * Domain-authentication (SPF/DKIM/DMARC) health checker — ported forward from outreach-infra's
- * `apps/api/src/routes/domains.ts` DNS-check logic (confirmed already built and working there —
- * Guardrails: "verified in outreach-infra... live DNS-TXT resolution... this is not new
- * engineering, it's a straight port"). Extended, V11, with continuous blocklist/DNSBL monitoring
- * (Spamhaus ZEN/DBL, Barracuda, SORBS) — genuinely new, since a one-time SPF/DKIM/DMARC check at
- * setup doesn't catch a domain landing on a blocklist within 72 hours of a bad list/misconfig.
+ * Domain-authentication (SPF/DKIM/DMARC) health checker, using live DNS-TXT resolution. Extended,
+ * V11, with continuous blocklist/DNSBL monitoring (Spamhaus ZEN/DBL, Barracuda, SORBS) — genuinely
+ * new, since a one-time SPF/DKIM/DMARC check at setup doesn't catch a domain landing on a
+ * blocklist within 72 hours of a bad list/misconfig.
  */
 import dns from 'node:dns';
 

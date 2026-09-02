@@ -1,8 +1,6 @@
 /**
  * AES-256-GCM encryption helper — used for mailbox credentials (app passwords, OAuth refresh
- * tokens) and `AiProviderKey.apiKeyEncrypted`. Ported pattern from `outreach-infra`'s mailbox
- * credential encryption (same algorithm/shape); see the port-survey note in this repo's build
- * report for the original file this was modeled on.
+ * tokens) and `AiProviderKey.apiKeyEncrypted`.
  *
  * Format produced by `encrypt()`: `<ivHex>:<authTagHex>:<ciphertextHex>` — a single string that's
  * easy to store in one Postgres column and trivially reversible by `decrypt()`.

@@ -1,8 +1,8 @@
 # WarmHawk — Tier 0 Quickstart (first send in 5 minutes)
 
 > New, closing a real gap: Tier 0 has been "direct API endpoints, no web UI" since day one with
-> no onboarding material of its own. This is that starting point — a curl-based walkthrough,
-> mirroring jitterflow's own "5 minutes to your first webhook."
+> no onboarding material of its own. This is that starting point — a curl-based walkthrough to
+> your first send.
 
 No dashboard required for any of this — every step is a plain HTTP call against your own running
 instance (`https://api.yourcompany.com` after `install.sh`, or `http://localhost:4600` in local

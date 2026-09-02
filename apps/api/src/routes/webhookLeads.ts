@@ -1,10 +1,8 @@
 /**
- * Webhook lead ingest — ported forward from outreach-infra's `apps/api/src/routes/
- * webhookLeads.ts`, refactored to call the SHARED `leadIngest.ts` validation function (per the
+ * Webhook lead ingest — refactored to call the SHARED `leadIngest.ts` validation function (per the
  * V12 spec: "factor shared validation into leadIngest.ts so both the webhook route and the
  * import route call one function" — previously this validation logic lived only inline here).
- * Rate-limited per the Guardrails section (this route already had `@fastify/rate-limit`'s
- * Express-equivalent in outreach-infra; ported forward as a per-route Fastify config).
+ * Rate-limited per the Guardrails section, using `@fastify/rate-limit`'s per-route config.
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma, Prisma } from '@warmhawk/db';

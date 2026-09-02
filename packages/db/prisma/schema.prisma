@@ -1,12 +1,10 @@
 // WarmHawk Core Engine — Prisma schema.
 //
-// Ported forward from `outreach-infra`'s packages/db/prisma/schema.prisma (Lead, Campaign,
-// Domain, Mailbox, SuppressionEntry, ExecutionLog, User, and all enums), then extended per the
-// WarmHawk V12 spec with: AiProvider enum + AiProviderKey model (Phase 3), Reply model + related
-// enum (Reply Management & Unified Inbox, V11 — confirmed absent in outreach-infra, genuinely
-// new), InstanceSettings (CAN-SPAM physical-address enforcement — new). `MICROSOFT_365` already
-// existed as an unused enum value in outreach-infra; it is now a fully implemented provider path
-// (see lib/microsoftOAuth.ts).
+// Models: Lead, Campaign, Domain, Mailbox, SuppressionEntry, ExecutionLog, User, and related
+// enums, extended per the WarmHawk V12 spec with: AiProvider enum + AiProviderKey model (Phase 3),
+// Reply model + related enum (Reply Management & Unified Inbox, V11, genuinely new),
+// InstanceSettings (CAN-SPAM physical-address enforcement — new). `MICROSOFT_365` is now a fully
+// implemented provider path (see lib/microsoftOAuth.ts).
 //
 // V12 fix: a `License` model + `LicenseStatus` enum previously lived here (Phase 4), built by
 // mistake during a parallel-agent build — Tier 0 (this engine) carries no license gate at all;
@@ -14,8 +12,8 @@
 //
 // NOTE ON REPO BOUNDARIES: `TeamMember` is intentionally NOT modeled here. Per the V12
 // Containerization Model ("the two packages never share... a Postgres instance") and the Team &
-// User Management section ("warmhawk-enterprise-operator's Postgres schema"), team membership is
-// dashboard/account-level data that lives in warmhawk-enterprise-operator's OWN separate Postgres
+// User Management section ("the licensed dashboard's Postgres schema"), team membership is
+// dashboard/account-level data that lives in the licensed dashboard's OWN separate Postgres
 // instance, not this engine's. See this repo's build report for the explicit judgment call.
 
 generator client {
@@ -96,8 +94,8 @@ enum AiProvider {
   CLAUDE
 }
 
-/// New, V11 — Reply Management & Unified Inbox. Confirmed absent in outreach-infra; only a
-/// generic `REPLIED` value existed on ExecutionLog.status with no content/classification.
+/// New, V11 — Reply Management & Unified Inbox. Previously only a generic `REPLIED` value existed
+/// on ExecutionLog.status with no content/classification.
 enum ReplyClassification {
   INTERESTED
   NOT_INTERESTED
@@ -131,12 +129,12 @@ enum SeedPlacementFolder {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Models — ported forward from outreach-infra
+// Models
 // ---------------------------------------------------------------------------------------------
 
 /// Minimal API-auth user — protects warmhawk-core-engine's own management routes (domains,
-/// campaigns, leads admin actions). Distinct from warmhawk-enterprise-operator's dashboard
-/// login/session model, which lives in that repo's own separate Postgres instance. Tier 0 ("no
+/// campaigns, leads admin actions). Distinct from the licensed dashboard's own dashboard
+/// login/session model, which lives in that product's own separate Postgres instance. Tier 0 ("no
 /// web UI") customers create/manage this via a bootstrap CLI step or the quickstart doc, not a
 /// web form.
 model User {
@@ -271,7 +269,7 @@ model Lead {
   /// Redis Durability & Crash Recovery (V12) — the BullMQ job id + expected slot time this lead
   /// was last enqueued under, so `reconcileStuckLeads()` can detect a row whose status implies
   /// "should be queued" but that has no matching BullMQ job (write-then-crash gap) and
-  /// re-enqueue it, ported concept from jitterflow's `reconcileStuckJobs`.
+  /// re-enqueue it.
   queuedJobId  String?
   queuedSlotAt DateTime?
 
@@ -364,7 +362,7 @@ model AiProviderKey {
   @@map("ai_provider_keys")
 }
 
-/// Reply Management & Unified Inbox (V11) — genuinely new, no equivalent in outreach-infra.
+/// Reply Management & Unified Inbox (V11) — genuinely new model.
 model Reply {
   id             String              @id @default(cuid())
   leadId         String
@@ -390,9 +388,9 @@ model Reply {
 // webhook handler that also lived in this repo. Both were built here by mistake during a
 // parallel-agent build — per the spec, warmhawk-core-engine ("Tier 0") carries no license gate at
 // all and has no business owning Stripe integration, a private signing key, or a license-issuance
-// audit trail. That logic (and its own License model) now lives solely in warmhawk-site (issuance)
-// and warmhawk-enterprise-operator (verification + its own separate License record, in its own
-// separate Postgres instance — see that repo's prisma/schema.prisma).
+// audit trail. That logic (and its own License model) now lives solely in WarmHawk's
+// billing/marketing site (issuance) and the licensed dashboard (verification + its own separate
+// License record, in its own separate Postgres instance).
 
 /// Singleton instance-wide settings — CAN-SPAM auto-injection reads `physicalMailingAddress` and
 /// refuses to send a campaign if it's unset (Guardrails). Always exactly one row, id = "default".

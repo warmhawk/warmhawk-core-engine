@@ -1,9 +1,8 @@
 /**
- * Weighted mailbox rotation + lead scheduling — ported forward from outreach-infra's
- * `apps/api/src/worker/enqueuer.ts` (verified already built — Competitor Pain Points #13:
- * "Woodpecker: rotation across mailboxes is sequential, not weighted" / "enqueuer.ts does
- * least-recently-used, capacity-aware rotation"), extended for the V12 Redis Durability section:
- * every enqueue now also persists `queuedJobId`/`queuedSlotAt` onto the Lead row so
+ * Weighted mailbox rotation + lead scheduling — addresses Competitor Pain Points #13:
+ * "Woodpecker: rotation across mailboxes is sequential, not weighted" by doing
+ * least-recently-used, capacity-aware rotation instead. Extended for the V12 Redis Durability
+ * section: every enqueue now also persists `queuedJobId`/`queuedSlotAt` onto the Lead row so
  * `reconcile.ts`'s `reconcileStuckLeads()` can detect a write-then-crash gap (DB says "should be
  * queued", no matching BullMQ job exists) and safely re-enqueue.
  *

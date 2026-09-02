@@ -1,4 +1,4 @@
-# WarmHawk API — non-root Docker pattern ported from outreach-infra's Dockerfiles, digest-pinned
+# WarmHawk API — non-root Docker pattern, digest-pinned
 # base image (verified real digest via `docker buildx imagetools inspect node:22-alpine` at
 # build-time of this repo — re-verify and re-pin before each release, digests rotate as the
 # upstream image is rebuilt). Bumped from node:20-alpine 2026-08-28 — semantic-release@25's own

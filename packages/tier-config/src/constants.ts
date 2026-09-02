@@ -1,23 +1,23 @@
 /**
  * WarmHawk — Single Source of Truth for tier/feature constants (V12 spec, "Single Source of
- * Truth — Tier & Feature Constants"). Ported pattern from jitterflow's `packages/plan-limits`.
+ * Truth — Tier & Feature Constants").
  *
  * WHY THIS FILE EXISTS
  * ---------------------------------------------------------------------------------------------
  * The Monetization Feature Matrix in the WarmHawk V12 spec is otherwise just a markdown table
- * with nothing in the codebase enforcing it — exactly the drift risk jitterflow names as its own
- * #8 mistake ("docs and shipped pricing drifting apart for months, unnoticed"). Every tier-gated
- * behavior in either WarmHawk repo MUST read from this file. No route, no UI component, no
- * `LicenseGate` check may hardcode a tier name or a feature flag independently of this file.
+ * with nothing in the codebase enforcing it — a common, easy-to-miss risk: docs and shipped
+ * pricing quietly drifting apart for months, unnoticed. Every tier-gated behavior in either
+ * WarmHawk repo MUST read from this file. No route, no UI component, no `LicenseGate` check may
+ * hardcode a tier name or a feature flag independently of this file.
  *
  * CROSS-REPO CONTRACT — READ THIS BEFORE EDITING
  * ---------------------------------------------------------------------------------------------
  * This file lives in `warmhawk-core-engine` (packages/tier-config) and is imported directly by
- * that repo's own API/worker code. `warmhawk-enterprise-operator` is a SEPARATE repo/package
+ * that repo's own API/worker code. The licensed dashboard is a SEPARATE repo/package
  * boundary (own Postgres, own containers, own nginx — the two packages never share a Docker
  * network, a Postgres instance, or an nginx container, per the Containerization Model) and
  * therefore CANNOT `import` this file directly across a repo boundary at build time. Instead,
- * `warmhawk-enterprise-operator` ships its OWN copy of this exact file (same relative path
+ * the licensed dashboard ships its OWN copy of this exact file (same relative path
  * suggested: `packages/tier-config/src/constants.ts`), which MUST match this file's exported
  * shape byte-for-byte in terms of:
  *
@@ -28,17 +28,16 @@
  *   5. The exported helper functions' names and signatures (`getTierFeatures`, `isFeatureEnabled`,
  *      `hasTeamManagement`, `hasTwoFactorRequirement`).
  *
- * If the two files ever diverge, `warmhawk-enterprise-operator`'s `LicenseGate` and dashboard UI
+ * If the two files ever diverge, the licensed dashboard's `LicenseGate` and dashboard UI
  * will enforce a DIFFERENT feature matrix than the one `warmhawk-core-engine`/marketing renders
  * from — the exact drift this file exists to prevent. Until a private npm registry or git
  * submodule-free shared-package mechanism is set up between the two repos, keeping them in sync
  * is a manual, reviewed step on every edit to this file — note it in `CHANGELOG.md` when it
  * happens so the sibling repo's maintainer (or agent) knows to re-sync.
  *
- * The marketing site (`warmhawk-site`) cannot import a TypeScript file into static
- * marketing pages either — its pricing table stays hand-synced against this file, same as
- * jitterflow's `llms.txt`/legal page discipline: re-checked against this file before every
- * release, never assumed current.
+ * WarmHawk's billing/marketing site cannot import a TypeScript file into static
+ * marketing pages either — its pricing table stays hand-synced against this file, re-checked
+ * against it before every release, never assumed current.
  */
 
 /** The three commercial tiers, in ascending order. String literals, never renamed casually —

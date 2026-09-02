@@ -1,9 +1,7 @@
 /**
- * Mailbox OAuth connect flow — ported forward from outreach-infra's
- * `apps/api/src/routes/oauthCallback.ts` (Google Workspace, already fully built and verified
- * there) and extended, V11, with the Microsoft 365 equivalent (`microsoftOAuth.ts`), wired into
- * the SAME callback handler pattern per the spec ("wiring MICROSOFT_365 into the same
- * oauthCallback.ts handler pattern already proven for Google").
+ * Mailbox OAuth connect flow — Google Workspace, extended, V11, with the Microsoft 365 equivalent
+ * (`microsoftOAuth.ts`), wired into the SAME callback handler pattern per the spec ("wiring
+ * MICROSOFT_365 into the same oauthCallback.ts handler pattern already proven for Google").
  *
  * `GET /oauth/:provider/authorize?mailboxId=` — starts the consent flow (dashboard's
  * "Connect with Google"/"Connect with Microsoft" buttons redirect here).

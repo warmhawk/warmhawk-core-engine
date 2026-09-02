@@ -13,8 +13,7 @@
 # certbot's HTTP-01 webroot challenge itself requires nginx to already be serving port 80, this
 # was an unconditional chicken-and-egg crash loop (`nginx: [emerg] cannot load certificate ...:
 # No such file or directory`) on EVERY fresh install, --skip-certbot or not — confirmed live.
-# Fixed by adopting warmhawk-enterprise-operator's already-correct pattern (see that repo's own
-# nginx/nginx.conf.template): ship HTTP-only below, with the TLS bootstrap: scripts/install.sh
+# Fixed by shipping HTTP-only below, with the TLS bootstrap: scripts/install.sh
 # brings this up HTTP-only first, runs `certbot certonly --webroot` against the webroot path
 # below, then enable_tls_template() (install.sh) swaps in the commented-out block below and
 # restarts nginx (envsubst only runs at container START, never on `-s reload`, since the TLS

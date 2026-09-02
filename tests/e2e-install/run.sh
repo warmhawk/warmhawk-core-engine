@@ -6,15 +6,13 @@
 # STATUS: THIS SCRIPT IS COMPLETE AND CORRECT. It is not a stub, sketch, or placeholder — every
 # step below is a real, working implementation. It runs in two different modes:
 #
-#   - AUTOMATED (E2E_SKIP_INSTALL=true): Woodpecker's release-tag-gated `release-e2e` workflow
-#     (see ks-woodpecker-config's src/templates/self-hosted-ci.ts, buildReleaseE2eWorkflow) drives
-#     this script entirely inside a privileged docker:26-dind sandbox on KS-CI-Runner. That
+#   - AUTOMATED (E2E_SKIP_INSTALL=true): the CI pipeline's release-tag-gated `release-e2e` workflow
+#     drives this script entirely inside a privileged docker:26-dind sandbox in CI. That
 #     workflow has already run `scripts/install.sh` itself (twice — once to bring nginx up, once
 #     more with --retry-tls once Pebble, the local Let's Encrypt ACME *test* server, has a network
 #     alias wired to it) before this script ever starts, so this script skips straight to the
 #     health/functional checks below. No scratch host, no SSH, nothing ever shipped over the
-#     network — see that workflow's own header comment and this repo's tests/e2e-install/README.md
-#     for the full mechanism.
+#     network — see this repo's tests/e2e-install/README.md for the full mechanism.
 #   - MANUAL (E2E_SKIP_INSTALL unset/false): this script runs `scripts/install.sh` itself, either
 #     directly on a real throwaway VM or driven remotely over SSH via E2E_SSH_HOST/E2E_SSH_KEY.
 #     This is the pre-go-live checklist item (see tests/e2e-install/README.md) — the only path that
@@ -78,13 +76,13 @@ E2E_SSH_KEY="${E2E_SSH_KEY:-}"                     # optional — PEM contents (
 E2E_SSH_KEY_PATH="${E2E_SSH_KEY_PATH:-}"           # optional — path to an existing private key file
 E2E_REMOTE_DIR="${E2E_REMOTE_DIR:-$REPO_ROOT}"     # cwd for install.sh — see the project-name note below
 E2E_LETSENCRYPT_STAGING="${E2E_LETSENCRYPT_STAGING:-true}"  # avoid burning the prod LE rate limit on the reused scratch domain
-# E2E_SKIP_INSTALL: for the DinD/Pebble release gate (ks-woodpecker-config's self-hosted-ci.ts),
-# which needs install.sh's real HTTP-01 challenge to hit a local Pebble CA instead of the public
-# Let's Encrypt directory — that means running install.sh TWICE (once to bring nginx up so its
-# container can be given a docker network alias equal to $E2E_DOMAIN, once more with --retry-tls
-# after Pebble/the alias are wired), which this script's own single INSTALL_CMD below can't express.
-# When set, this script assumes the caller already brought the stack up and skips straight to the
-# health/functional checks below. Never set for a real manual run against a real scratch VM.
+# E2E_SKIP_INSTALL: for the DinD/Pebble release gate, which needs install.sh's real HTTP-01
+# challenge to hit a local Pebble CA instead of the public Let's Encrypt directory — that means
+# running install.sh TWICE (once to bring nginx up so its container can be given a docker network
+# alias equal to $E2E_DOMAIN, once more with --retry-tls after Pebble/the alias are wired), which
+# this script's own single INSTALL_CMD below can't express. When set, this script assumes the
+# caller already brought the stack up and skips straight to the health/functional checks below.
+# Never set for a real manual run against a real scratch VM.
 E2E_SKIP_INSTALL="${E2E_SKIP_INSTALL:-false}"
 E2E_HEALTH_TIMEOUT_SECONDS="${E2E_HEALTH_TIMEOUT_SECONDS:-180}"
 E2E_MAIL_TIMEOUT_SECONDS="${E2E_MAIL_TIMEOUT_SECONDS:-60}"
@@ -146,12 +144,12 @@ if [ -n "$E2E_SSH_HOST" ]; then
   SSH_CONTROL_PATH="$(mktemp -u)"
   # -n: run_on_target's ssh calls execute one-shot remote commands (install.sh, a docker exec) that
   # never need to read from local stdin. Without it, ssh forwards this step's own stdin to the
-  # remote session — and when Woodpecker feeds a step's whole commands: list to sh over a shared
-  # stdin pipe (rather than as a script file), ssh can race the outer shell for bytes off that same
-  # pipe and silently steal some of a LATER command in this step, corrupting it. Confirmed live:
-  # identical code succeeded in pipeline #60 and failed in #66 with "/bin/sh: syntax error:
-  # unterminated quoted string" right after run_on_target's install.sh call returned — a timing-
-  # dependent race, not a real syntax bug in the later command.
+  # remote session — and when the CI pipeline feeds a step's whole commands: list to sh over a
+  # shared stdin pipe (rather than as a script file), ssh can race the outer shell for bytes off
+  # that same pipe and silently steal some of a LATER command in this step, corrupting it. Confirmed
+  # live: identical code succeeded in one pipeline run and failed in a later one with "/bin/sh:
+  # syntax error: unterminated quoted string" right after run_on_target's install.sh call returned —
+  # a timing-dependent race, not a real syntax bug in the later command.
   SSH_BASE=(ssh -n -i "$E2E_SSH_KEY_PATH" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new
             -o ControlMaster=auto -o "ControlPath=$SSH_CONTROL_PATH" -o ControlPersist=60s
             "root@${E2E_SSH_HOST}")

@@ -7,8 +7,8 @@ see `docker-compose.yml`), authenticated via the `X-Callback-Secret` header
 (`requireCallbackSecret`). The AI-personalization step targets this repo's own internal
 `/internal/ai/personalize` endpoint instead of an external gateway — there is no `ai-gateway-net`
 equivalent anywhere in this product, per the spec. None of these workflows talk to Postgres
-directly (unlike `outreach-infra`'s equivalent workflows) — n8n has no direct DB credential in
-this design, only the shared callback secret, so every step is a real HTTP call to this API.
+directly — n8n has no direct DB credential in this design, only the shared callback secret, so
+every step is a real HTTP call to this API.
 
 - **`dispatch.json`** — triggered by the worker's callback
   (`N8N_BASE_URL`/`webhook/warmhawk/dispatch`, fired from `apps/worker/src/processor.ts` with

@@ -1,8 +1,7 @@
 /**
- * Cadence/jitter math — ported forward from outreach-infra's `apps/api/src/worker/
- * computeNextSlotSeconds.ts` unchanged (verified already built — Competitor Pain Points #12:
- * "Lemlist pushes unsafe daily send volumes on new domains" / "computeNextSlotSeconds.ts enforces
- * an 8-min cadence floor + jitter"). Pure function, no I/O, fully unit-testable.
+ * Cadence/jitter math — addresses Competitor Pain Points #12: "Lemlist pushes unsafe daily send
+ * volumes on new domains" by enforcing an 8-min cadence floor + jitter. Pure function, no I/O,
+ * fully unit-testable.
  */
 const CADENCE_FLOOR_MS = 8 * 60 * 1000; // 8-minute floor since this mailbox's last send
 const JITTER_BASE_SECONDS = 240; // jitter band: 240-480s

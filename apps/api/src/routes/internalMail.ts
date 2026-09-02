@@ -1,9 +1,8 @@
 /**
  * Internal-only send-trigger — `POST /internal/mail/send`. This is the endpoint the n8n dispatch
  * workflow (`n8n/workflows/dispatch.json`) actually calls to fire an SMTP/OAuth send, after
- * `/internal/ai/personalize` has produced the copy. Ported forward as a genuinely new file (no
- * equivalent existed in this repo until now) — `outreach-infra`'s `mail-relay/send` route is the
- * reference pattern this was modeled on (see `lib/mailSender.ts`'s header comment).
+ * `/internal/ai/personalize` has produced the copy (see `lib/mailSender.ts`'s header comment for
+ * the send implementation this route delegates to).
  *
  * Guarded by `requireCallbackSecret` and, per the Containerization Model, reachable ONLY over the
  * internal Docker network — nginx has no location block for `/internal/*` anywhere in this repo.

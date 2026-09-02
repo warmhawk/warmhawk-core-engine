@@ -16,7 +16,8 @@
 #
 # What this script does, in order:
 #   1. Starts a throwaway container bound to 80/443 — simulates a customer's box that already runs
-#      something else there (a hand-rolled nginx, another app, warmhawk-enterprise-operator, etc).
+#      something else there (a hand-rolled nginx, another app, another WarmHawk product's own
+#      nginx, etc).
 #   2. Runs scripts/install.sh --domain <non-resolving test domain> --skip-certbot, isolated into
 #      its own Compose project (COMPOSE_PROJECT_NAME) so it never touches any other stack already
 #      running on this machine.

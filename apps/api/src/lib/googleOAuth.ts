@@ -1,17 +1,14 @@
 /**
- * Google Workspace OAuth mailbox-connect flow — ported forward from outreach-infra's
- * `apps/api/src/lib/googleOAuth.ts` (verified already fully built there — Mailbox Connection
- * Upgrade, V11: "Google Workspace OAuth is already fully built... stores an AES-256-GCM-encrypted
- * refresh token, never a raw password. Authenticates over IMAP using XOAUTH2"). Ported
- * essentially unchanged; only the env var names are WarmHawk's own (no outreach-infra-internal
- * naming).
+ * Google Workspace OAuth mailbox-connect flow (Mailbox Connection Upgrade, V11): stores an
+ * AES-256-GCM-encrypted refresh token, never a raw password, and authenticates over IMAP using
+ * XOAUTH2.
  *
  * IMPORTANT — re-verification note (Phase 1/3-4, per the spec): the OAuth consent screen/app used
  * here needs its own Google verification (CASA third-party security assessment for the
  * `https://mail.google.com/` sensitive scope) under the WarmHawk brand — a rebrand typically means
- * a new app registration, so outreach-infra's existing verified app does NOT carry over
- * automatically. This is external, weeks-long, and explicitly NOT a Go-Live blocker (SMTP/IMAP
- * password remains the universal fallback) — start it early (Phase 3/4), track it separately.
+ * a new app registration, so no existing verified app carries over automatically. This is
+ * external, weeks-long, and explicitly NOT a Go-Live blocker (SMTP/IMAP password remains the
+ * universal fallback) — start it early (Phase 3/4), track it separately.
  */
 import { OAuth2Client } from 'google-auth-library';
 

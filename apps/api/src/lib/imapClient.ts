@@ -1,8 +1,8 @@
 /**
- * IMAP client factory — ported forward from outreach-infra's `apps/api/src/lib/imapClient.ts`.
- * OAuth-connected mailboxes (Google or Microsoft) authenticate via XOAUTH2 using a freshly-minted
- * access token; SMTP/IMAP-password mailboxes use the stored (encrypted) password. Both paths
- * decrypt server-side only, in this process, and never write plaintext credentials to a log.
+ * IMAP client factory. OAuth-connected mailboxes (Google or Microsoft) authenticate via XOAUTH2
+ * using a freshly-minted access token; SMTP/IMAP-password mailboxes use the stored (encrypted)
+ * password. Both paths decrypt server-side only, in this process, and never write plaintext
+ * credentials to a log.
  */
 import { ImapFlow } from 'imapflow';
 import { prisma } from '@warmhawk/db';
