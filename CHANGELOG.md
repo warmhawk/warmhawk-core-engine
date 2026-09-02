@@ -28,7 +28,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
   inboxes, not full inbox-placement testing).
 - **Mailbox auth**: SMTP/IMAP username+password as the universal fallback for any provider, plus
   Google Workspace OAuth. Microsoft 365 OAuth is built and unit-tested, pending Microsoft's Entra
-  app verification — see `docs/microsoft-365-oauth-setup.md`.
+  app verification.
 - **Reply handling**: IMAP polling, AI-assisted reply classification, and automatic
   opt-out-to-suppression wiring.
 - **AI personalization (BYOK)**: bring your own Gemini or Claude API key; personalization retries

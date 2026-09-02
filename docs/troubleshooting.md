@@ -102,5 +102,5 @@ See `docs/backup-and-restore.md` — the same doc used for the Pre-Production re
 ## Microsoft 365 mailbox connect
 
 Requires a completed Entra app registration under your own tenant (or WarmHawk's, once verified
-under the WarmHawk brand) — see `docs/microsoft-365-oauth-setup.md`. Until then, connect the
-mailbox via SMTP/IMAP username+password instead (the universal fallback for any provider).
+under the WarmHawk brand). Until then, connect the mailbox via SMTP/IMAP username+password instead
+(the universal fallback for any provider).
