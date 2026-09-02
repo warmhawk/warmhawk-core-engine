@@ -75,10 +75,9 @@ this box.
 ## Stripe / license-issuance issues
 
 This repo (Tier 0) has no Stripe integration and issues no licenses — it carries no license gate
-at all. The Stripe webhook and RSA license signing live in `warmhawk-site`; license verification
-lives in `warmhawk-enterprise-operator`'s `LicenseGate`. See those repos' own troubleshooting docs
-(`warmhawk-site`'s `/docs/stripe-webhooks` and `/docs/license-activation`) for webhook-delivery and
-signature issues.
+at all. Billing and license activation are handled by WarmHawk's other products (the account/
+billing site and the licensed dashboard) — if you're seeing a billing or licensing issue, contact
+`support@warmhawk.com` rather than looking for it here.
 
 ## Common `docker compose` problems
 
@@ -90,7 +89,7 @@ signature issues.
 
 ## Backup/restore
 
-See `docs/backup-and-restore.md` — the same doc used for the Pre-Production restore drill.
+See `docs/backup-and-restore.md`.
 
 ## `warmhawk update` (`scripts/update.sh`) failures
 
