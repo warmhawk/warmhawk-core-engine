@@ -1,10 +1,9 @@
 /**
- * WarmHawk worker bootstrap — ported shutdown pattern from outreach-infra's
- * `apps/api/src/worker/index.ts` (SIGINT/SIGTERM -> close worker, queue, redis connection,
- * disconnect Prisma, then exit), extended per V12 with:
+ * WarmHawk worker bootstrap — graceful shutdown pattern (SIGINT/SIGTERM -> close worker, queue,
+ * redis connection, disconnect Prisma, then exit), extended per V12 with:
  *   - the reconciliation cron (`reconcileStuckLeads`, every few minutes)
  *   - a slightly longer grace-period shutdown so an in-flight job actually finishes rather than
- *     being cut off mid-dispatch, matching jitterflow's `stop_grace_period: 30s` reasoning.
+ *     being cut off mid-dispatch (a 30s stop_grace_period).
  */
 import 'dotenv/config';
 import { startOtel, shutdownOtel } from './otel';
@@ -77,8 +76,8 @@ async function main() {
     clearInterval(enqueuerInterval);
     clearInterval(reconcileInterval);
     // Give any in-flight job a grace window to finish rather than cutting it off mid-dispatch
-    // (matches jitterflow's `stop_grace_period: 30s` reasoning; enforced by the compose file's
-    // own stop_grace_period, this is just the process-level half of that contract).
+    // (a 30s stop_grace_period; enforced by the compose file's own stop_grace_period, this is
+    // just the process-level half of that contract).
     await worker.close();
     await queue.close();
     await connection.quit();

@@ -1,6 +1,6 @@
 /**
  * Regression guard for the operator-dashboard auth bridge (`lib/requireAuth.ts`):
- * warmhawk-enterprise-operator has no per-human credential against this engine's own `User`
+ * the licensed dashboard has no per-human credential against this engine's own `User`
  * table, so it authenticates as a single shared `OPERATOR_SERVICE_TOKEN` instead of a signed JWT.
  * Exercised against a real `requireAuth`-guarded route (`GET /v1/replies`) via `app.inject()`
  * rather than calling the middleware in isolation, so this also proves the route is actually

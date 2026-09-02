@@ -1,10 +1,9 @@
 /**
  * SMTP send-trigger — the actual "send this email" step the n8n dispatch workflow calls over the
- * internal Docker network (`POST /internal/mail/send`, see `routes/internalMail.ts`). Ported
- * pattern from `outreach-infra`'s `apps/api/src/routes/mailRelay.ts` (nodemailer, OAuth2/password
- * dual auth path), rebuilt for WarmHawk's Fastify/AES-256-GCM/multi-provider-OAuth conventions and
- * extended with the compliance/guardrail hooks that were only documented, not wired to a real send
- * path, before this file existed:
+ * internal Docker network (`POST /internal/mail/send`, see `routes/internalMail.ts`). Built on
+ * nodemailer with a dual OAuth2/password auth path, using WarmHawk's Fastify/AES-256-GCM/
+ * multi-provider-OAuth conventions, and extended with the compliance/guardrail hooks that were
+ * only documented, not wired to a real send path, before this file existed:
  *
  *   - CAN-SPAM auto-injection gate (`sendCompliance.ts#assertCanSpamCompliant`)
  *   - RFC 8058 one-click unsubscribe headers, unconditionally attached
@@ -72,9 +71,8 @@ export interface SendMailResult {
 }
 
 /** SMTP/nodemailer error message + structured fields most commonly seen on a permanent ("hard")
- *  bounce, vs. everything else being treated as transient — same heuristic list proven in
- *  `outreach-infra`'s dispatcher (`Classify Send Failure` code node), ported here since this repo
- *  does the classification server-side instead of in an n8n Code node. */
+ *  bounce, vs. everything else being treated as transient — this repo does the classification
+ *  server-side instead of in an n8n Code node. */
 const HARD_BOUNCE_PATTERNS = [
   '550',
   '551',
@@ -148,9 +146,8 @@ async function applyBounceCircuitBreaker(params: {
   }
 }
 
-/** Max retry attempts before a lead is suppressed rather than retried again — matches
- *  `outreach-infra`'s dispatcher (`retryCount + 1 >= 4`). Exponential backoff, capped at 48h, with
- *  +/-10% jitter, same formula. */
+/** Max retry attempts before a lead is suppressed rather than retried again (`retryCount + 1 >= 4`).
+ *  Exponential backoff, capped at 48h, with +/-10% jitter. */
 const MAX_RETRY_ATTEMPTS = 4;
 const BASE_RETRY_DELAY_SECONDS = 1800; // 30 minutes
 const MAX_RETRY_DELAY_SECONDS = 172_800; // 48 hours
@@ -321,8 +318,8 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
       });
 
       if (leadId) {
-        // "Handle success" half of the dispatch pipeline — mirrors outreach-infra's "Mark Lead
-        // Contacted" + "Log Sent Execution" Postgres nodes, done server-side here instead.
+        // "Handle success" half of the dispatch pipeline — marks the lead contacted and logs the
+        // execution, done server-side here instead of in n8n Postgres nodes.
         await prisma.lead
           .update({
             where: { id: leadId },
@@ -368,8 +365,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
   } catch (err) {
     // nodemailer SMTP errors carry a structured responseCode (e.g. 550) and code (e.g.
     // "EENVELOPE", "ETIMEDOUT") alongside the free-text message — surface both so callers can
-    // classify hard vs. soft failures without string-matching the message as their only signal,
-    // matching outreach-infra's proven pattern.
+    // classify hard vs. soft failures without string-matching the message as their only signal.
     const smtpErr = err as { responseCode?: number; code?: string; message?: string };
     const message = err instanceof Error ? err.message : 'Failed to send email';
 

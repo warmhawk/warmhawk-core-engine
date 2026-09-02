@@ -2,8 +2,8 @@
 
 Open-core, self-hosted cold-email/outbound sending infrastructure. API server + BullMQ worker +
 Prisma schema + install/update scripts — the free, fully-functional Tier 0 engine
-("direct API endpoints, no web UI"). The licensed dashboard lives in the separate, private
-`warmhawk-enterprise-operator` repo.
+("direct API endpoints, no web UI"). The web dashboard is a separate, private licensed
+dashboard product.
 
 ---
 

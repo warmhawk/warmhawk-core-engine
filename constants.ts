@@ -1,8 +1,6 @@
 /**
- * WarmHawk Core Engine — root shared constants.
- * Ported forward from outreach-infra's root `constants.ts` (pagination, warmup tiers, dev
- * fallback URLs), rebranded (no outreach-infra-internal naming), and extended per the
- * V12 spec with `MAX_CSV_ROWS` / `MAX_CSV_FILE_BYTES` (Phase 2, CSV import caps).
+ * WarmHawk Core Engine — root shared constants (pagination, warmup tiers, dev fallback URLs),
+ * extended per the V12 spec with `MAX_CSV_ROWS` / `MAX_CSV_FILE_BYTES` (Phase 2, CSV import caps).
  */
 
 // --- Pagination

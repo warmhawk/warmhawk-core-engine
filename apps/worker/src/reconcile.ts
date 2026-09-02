@@ -1,14 +1,13 @@
 /**
- * Reconciliation cron — Redis Durability & Crash Recovery (V12), ported concept from jitterflow's
- * `reconcileStuckJobs`. Closes the same class of gap: a Lead row can be marked QUEUED (Postgres
- * write committed) immediately before the corresponding `queue.add()` call, and a crash, deploy
- * restart, or Redis hiccup between those two writes leaves a Lead that Postgres thinks is queued
- * but that no BullMQ job actually represents — a lead that silently never gets emailed, with no
- * error surfaced anywhere (the exact gap the V12 Redis Durability section calls out).
+ * Reconciliation cron — Redis Durability & Crash Recovery (V12). Closes a specific gap: a Lead
+ * row can be marked QUEUED (Postgres write committed) immediately before the corresponding
+ * `queue.add()` call, and a crash, deploy restart, or Redis hiccup between those two writes leaves
+ * a Lead that Postgres thinks is queued but that no BullMQ job actually represents — a lead that
+ * silently never gets emailed, with no error surfaced anywhere (the exact gap the V12 Redis
+ * Durability section calls out).
  *
- * Runs on an interval from `apps/worker/src/index.ts` (every few minutes, matching jitterflow's
- * own cadence) — only acts on leads well past their expected send slot, so it never races a
- * legitimately-still-delayed job.
+ * Runs on an interval from `apps/worker/src/index.ts` (every few minutes) — only acts on leads
+ * well past their expected send slot, so it never races a legitimately-still-delayed job.
  */
 import type { Queue } from 'bullmq';
 import { prisma } from '@warmhawk/db';

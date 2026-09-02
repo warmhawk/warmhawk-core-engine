@@ -1,43 +1,39 @@
 # WarmHawk Core Engine — production package compose file, per the V12 Containerization Model.
 #
-# Lives under docker/ (2026-08-29 root-folder cleanup, matching jitterflow's own docker/
-# convention) alongside every docker-compose*.yml/Dockerfile.* in this repo — always invoke as
+# Lives under docker/ (2026-08-29 root-folder cleanup) alongside every
+# docker-compose*.yml/Dockerfile.* in this repo — always invoke as
 # `docker compose -f docker/docker-compose.yml ...` from repo root, never from inside docker/
 # itself (build contexts below are `..`-relative, resolved against this file's own directory).
 #
-# THE RULE (opposite of jitterflow's shared-host model, on purpose — see this repo's build
-# report for the full contrast): every service below sits on the internal-only
+# THE RULE: every service below sits on the internal-only
 # `warmhawk_internal` Docker network with NO published host port. Only `nginx` publishes 80/443.
-# A WarmHawk customer's own server has no ks-platform-infra, no shared edge-nginx, no Coolify —
+# A WarmHawk customer's own server may already be running other things we know nothing about —
 # this package has to be a complete, self-contained unit with zero assumptions about the host.
 # `warmhawk_edge` is still a plain created network (not `external: true`) so a bare-VM install
 # needs nothing pre-existing — EDGE_NETWORK_NAME/EDGE_NGINX_ALIAS below only matter to a host
 # that also runs a shared edge proxy wanting to reach nginx by a stable, predictable name.
 #
-# LOCAL DEV PORT ALLOCATION (new, V12 — documented here per the same convention jitterflow's own
-# docker-compose.yml header uses): this file itself publishes NO bare ports (matching what ships
+# LOCAL DEV PORT ALLOCATION (new, V12): this file itself publishes NO bare ports (matching what ships
 # to customers exactly, so local dev and production never drift). Engineers/CI needing direct
 # host access to Postgres/Redis/the API for local development or docker-compose.test.yml-driven
 # integration tests use the `docker-compose.test.yml` OVERLAY, which adds `${VAR:-default}` host
 # ports scoped to the reserved range below — added in the overlay, not here, so this base file's
 # absence of a `ports:` block for these services can never conflict with it (Compose `ports:`
-# concatenate, not override, across `-f` files — a V12 process lesson from jitterflow's own
-# history; a base file with NO ports block for a service means the overlay's `ports:` for that
-# service is the only one in effect, never a collision).
+# concatenate, not override, across `-f` files; a base file with NO ports block for a service
+# means the overlay's `ports:` for that service is the only one in effect, never a collision).
 #
-# Reserved local-dev range: 4600-4649, chosen to avoid every other project already running
-# on this shared engineering machine: outreach-infra (3000/4000/5678), jitterflow
-# (5433/6380/4100/4101/4200/4300/4401), gemini-gateway (8080), leadhound-engine (9501).
+# Reserved local-dev range: 4600-4649, chosen to avoid collisions with other projects already
+# running on this shared engineering machine.
 #   4600 = api (dev/test direct access)         4601 = postgres (docker-compose.test.yml)
 #   4602 = redis (docker-compose.test.yml)      4603 = n8n
 #   4604 = uptime-kuma                          4605 = n8n (webhook base URL, dev)
-# warmhawk-enterprise-operator (sibling repo, separate Postgres/containers per the
+# The licensed dashboard (sibling product, separate Postgres/containers per the
 # Containerization Model) reserves its own, non-overlapping range: 4500-4599 (dashboard Postgres
-# on 4501 by default, per that repo's docker-compose.test.yml) — see that repo's own
-# docker-compose.yml header for its exact allocation. (This comment previously said "starting at
-# 4650" — stale/aspirational from when the two repos were built in parallel and never reconciled
-# against what the other repo actually shipped; corrected here. 4600-4649 and 4500-4599 don't
-# overlap either way, so there was never an actual port collision, just a wrong cross-reference.)
+# on 4501 by default) — see that product's own compose file header for its exact allocation.
+# (This comment previously said "starting at 4650" — stale/aspirational from early parallel
+# development, never reconciled against what actually shipped; corrected here. 4600-4649 and
+# 4500-4599 don't overlap either way, so there was never an actual port collision, just a wrong
+# cross-reference.)
 
 networks:
   warmhawk_internal:
@@ -53,7 +49,7 @@ networks:
   # testing"), which is exactly why this instance of the same bug, on the one container this
   # package's entire design depends on being host-reachable, went uncaught until a real end-to-end
   # install: nginx started fine (no crash) and was completely unreachable from outside regardless.
-  # Fixed by mirroring warmhawk-enterprise-operator/docker-compose.yml's already-correct pattern —
+  # Fixed by mirroring the licensed dashboard's compose file's already-correct pattern —
   # a second, non-internal network dedicated solely to nginx.
   warmhawk_edge:
     name: ${EDGE_NETWORK_NAME:-warmhawk-edge}
@@ -151,8 +147,9 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       MAILBOX_CREDENTIAL_KEY: ${MAILBOX_CREDENTIAL_KEY}
       NEXTJS_CALLBACK_SECRET: ${NEXTJS_CALLBACK_SECRET}
-      # Auth bridge for warmhawk-enterprise-operator's dashboard — see .env/.env.example and
-      # lib/requireAuth.ts's header comment. Optional: blank is fine for a Tier-0-only install.
+      # Auth bridge the licensed dashboard uses to authenticate against this engine's API — see
+      # .env/.env.example and lib/requireAuth.ts's header comment. Optional: blank is fine for a
+      # Tier-0-only install.
       OPERATOR_SERVICE_TOKEN: ${OPERATOR_SERVICE_TOKEN:-}
       DASHBOARD_APP_URL: ${DASHBOARD_APP_URL:-}
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
@@ -162,8 +159,8 @@ services:
       MICROSOFT_OAUTH_CLIENT_SECRET: ${MICROSOFT_OAUTH_CLIENT_SECRET:-}
       MICROSOFT_OAUTH_REDIRECT_URI: ${MICROSOFT_OAUTH_REDIRECT_URI:-}
       # Stripe/license issuance was removed from this repo (V12 fix) — that
-      # code now lives solely in warmhawk-site, the one piece of billing
-      # infrastructure WarmHawk operates centrally. See warmhawk-site's
+      # code now lives solely in WarmHawk's billing/marketing site, the one piece of billing
+      # infrastructure WarmHawk operates centrally. See that site's own
       # docker-compose.yml / .env/.env.example for STRIPE_*/LICENSE_SIGNING_PRIVATE_KEY.
       # Native OTEL export — inert until the customer sets an endpoint (Observability section).
       OTEL_SERVICE_NAME: warmhawk-api
@@ -284,7 +281,7 @@ services:
     # Host ports are configurable (default 80/443) so scripts/install.sh can fall back to alt ports
     # when the customer's box already has something else bound to 80/443 — see that script's port
     # selection block and docs/troubleshooting.md's "Installing alongside an existing web server".
-    # Matches warmhawk-enterprise-operator/docker-compose.yml's existing NGINX_HTTP_HOST_PORT /
+    # Matches the licensed dashboard's compose file's existing NGINX_HTTP_HOST_PORT /
     # NGINX_HTTPS_HOST_PORT convention exactly, so both packages behave identically here.
     ports:
       - '${NGINX_HTTP_HOST_PORT:-80}:80'

@@ -1,19 +1,17 @@
 /**
- * Shared lead-ingest validation — ported forward from outreach-infra's `webhookLeads.ts` inline
- * validation rules (email format, blocked-domain rejection, suppression-list lookup, duplicate
- * lookup), factored into ONE function per the V12 spec so both `POST /webhooks/leads` (existing
- * ported route) and the new `POST /leads/import` CSV route share identical validation instead of
- * two independently-drifting copies. CSV injection defense (Guardrails) is folded in here too,
- * since both ingest paths accept arbitrary `customFields`.
+ * Shared lead-ingest validation rules (email format, blocked-domain rejection, suppression-list
+ * lookup, duplicate lookup), factored into ONE function per the V12 spec so both
+ * `POST /webhooks/leads` and the new `POST /leads/import` CSV route share identical validation
+ * instead of two independently-drifting copies. CSV injection defense (Guardrails) is folded in
+ * here too, since both ingest paths accept arbitrary `customFields`.
  */
 import { prisma } from '@warmhawk/db';
 import { findCsvInjectionInRow } from './csvInjection';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** Obviously-disposable/test domains rejected outright — same list ported from outreach-infra.
- *  Rebranded name only (no logic change): a real deployment may extend this via env/config in a
- *  future iteration, but the baseline list ships as a constant, matching the ported behavior. */
+/** Obviously-disposable/test domains rejected outright. A real deployment may extend this via
+ *  env/config in a future iteration, but the baseline list ships as a constant. */
 export const BLOCKED_EMAIL_DOMAINS = [
   'mailinator.com',
   'tempmail.com',

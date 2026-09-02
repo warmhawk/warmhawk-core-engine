@@ -1,9 +1,8 @@
 # Changelog
 
-All notable changes to `warmhawk-core-engine` are documented here. The dashboard
-(`warmhawk-enterprise-operator`) shows an "update available" banner by comparing its running
-version against this repo's latest GitHub release tag — keep this file current on every release,
-not just as a courtesy.
+All notable changes to `warmhawk-core-engine` are documented here. The licensed dashboard product
+shows an "update available" banner by comparing its running version against this repo's latest
+GitHub release tag — keep this file current on every release, not just as a courtesy.
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow semver.
 
@@ -36,7 +35,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
 - **Free public tool**: `GET /public/domain-check` — SPF/DKIM/DMARC lookup, no auth required.
 - **Operations**: internal-only Docker network (only nginx/certbot ports are published),
   auto-provisioned Uptime Kuma monitoring, OTEL instrumentation (inert until an OTLP endpoint is
-  configured), and an optional auth bridge (`OPERATOR_SERVICE_TOKEN`) for the separately-licensed
-  `warmhawk-enterprise-operator` dashboard.
+  configured), and an optional auth bridge (`OPERATOR_SERVICE_TOKEN`) for the separate, private
+  licensed dashboard product.
 - **v1 API surface**: all routes under `/v1`, machine-only routes (n8n callbacks) isolated under
   `/internal/*` rather than the publicly-reachable group.

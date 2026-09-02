@@ -1,8 +1,7 @@
 /**
- * WarmHawk API server bootstrap — graceful shutdown pattern ported forward from outreach-infra's
- * `apps/api/src/index.ts` (SIGINT/SIGTERM -> close server -> exit), adapted to Fastify's
- * `app.close()` (which itself drains in-flight requests before resolving, an improvement over the
- * ported original's bare `server.close()` with no draining).
+ * WarmHawk API server bootstrap — graceful shutdown pattern (SIGINT/SIGTERM -> close server ->
+ * exit), using Fastify's `app.close()`, which drains in-flight requests before resolving rather
+ * than closing the socket immediately.
  */
 import 'dotenv/config';
 import { startOtel, shutdownOtel } from './otel';

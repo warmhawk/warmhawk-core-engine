@@ -1,14 +1,10 @@
 /**
  * WarmHawk Core Engine — Fastify app assembly.
  *
- * JUDGMENT CALL (documented in this repo's build report): the porting brief assumed
- * outreach-infra's `apps/api/src/app.ts` was Fastify. Reading the actual file showed it is
- * Express (helmet/cors/morgan/express.json, Express Router mounts). This repo builds fresh on
- * Fastify per the EXPLICIT instructions elsewhere in the brief (`@fastify/rate-limit` named
- * specifically for every public-facing endpoint) — the ROUTE LOGIC is ported faithfully from the
- * Express originals; only the framework wiring (plugin registration, handler signatures) is
- * translated to Fastify's shape. `helmet()` -> `@fastify/helmet`, Express CORS -> `@fastify/cors`,
- * `express.json()` -> Fastify's built-in JSON body parser, multer -> `@fastify/multipart`.
+ * Built on Fastify per the EXPLICIT instructions elsewhere in the spec (`@fastify/rate-limit`
+ * named specifically for every public-facing endpoint): security headers via `@fastify/helmet`,
+ * CORS via `@fastify/cors`, JSON bodies via Fastify's built-in parser, and file uploads via
+ * `@fastify/multipart`.
  */
 import Fastify, { type FastifyInstance, type FastifyError } from 'fastify';
 import helmet from '@fastify/helmet';
@@ -42,11 +38,10 @@ export async function createApp(): Promise<FastifyInstance> {
     logger: process.env.NODE_ENV === 'test' ? false : { level: process.env.LOG_LEVEL || 'info' },
   });
 
-  // Security headers (Phase 1 hardening — ported: outreach-infra's `helmet()` on the Express app).
+  // Security headers (Phase 1 hardening).
   await app.register(helmet, { global: true });
 
-  // CORS — same origin-gating intent as outreach-infra's `cors({ origin: WEB_APP_URL })`; the
-  // dashboard (warmhawk-enterprise-operator) is the only expected browser-side caller.
+  // CORS — origin-gated; the licensed dashboard is the only expected browser-side caller.
   await app.register(cors, {
     origin: process.env.DASHBOARD_APP_URL || 'http://localhost:4610',
   });
@@ -61,7 +56,7 @@ export async function createApp(): Promise<FastifyInstance> {
   });
 
   // Multipart file upload — CSV import (`POST /leads/import`), memory storage, size-capped
-  // (see constants.ts MAX_CSV_FILE_BYTES), mirroring outreach-infra's multer memory-storage config.
+  // (see constants.ts MAX_CSV_FILE_BYTES).
   await app.register(multipart, {
     limits: {
       fileSize: 10 * 1024 * 1024, // MAX_CSV_FILE_BYTES — kept in sync manually; see constants.ts
@@ -115,9 +110,9 @@ export async function createApp(): Promise<FastifyInstance> {
       await v1.register(seedAccountsRoutes, { prefix: '/seed-accounts' });
       // NOTE: this repo no longer registers a Stripe webhook / license-issuance route (V12 fix —
       // that logic was built here by mistake during a parallel-agent build; Stripe/RSA license
-      // issuance now lives solely in warmhawk-site, the one piece of billing infra WarmHawk
-      // operates centrally; warmhawk-enterprise-operator is the sole license VERIFIER). Tier 0
-      // (this engine) carries no license gate at all, per the spec.
+      // issuance now lives solely on WarmHawk's billing/marketing site, the one piece of billing
+      // infra WarmHawk operates centrally; the licensed dashboard is the sole license VERIFIER).
+      // Tier 0 (this engine) carries no license gate at all, per the spec.
       await v1.register(publicDomainCheckRoutes, { prefix: '/public' });
     },
     { prefix: '/v1' },

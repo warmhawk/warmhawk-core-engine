@@ -1,7 +1,7 @@
 /**
  * Shared Prisma client singleton — imported as `@warmhawk/db` by both apps/api and apps/worker.
- * Ported pattern from outreach-infra's `packages/db` (a single `prisma` export, avoiding a new
- * PrismaClient per import in dev/hot-reload and per test file).
+ * A single `prisma` export avoids creating a new PrismaClient per import in dev/hot-reload and
+ * per test file.
  */
 import { PrismaClient } from '../generated/client';
 

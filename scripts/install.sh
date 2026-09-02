@@ -12,10 +12,10 @@
 # all vestigial leftovers from a license-issuance system that was mistakenly built into this repo
 # during an earlier parallel-agent build (see packages/db/prisma/schema.prisma's "V12 fix" note).
 # Tier 0 (this engine) carries no license gate at all; license issuance/RSA signing lives solely in
-# warmhawk-site, license VERIFICATION lives solely in warmhawk-enterprise-operator's own dashboard
-# — core-engine was never meant to own either half. `/auth/activate` was never actually implemented
-# here, so that block silently no-op'd on every real install; removed rather than built, per that
-# same design decision.
+# WarmHawk's billing/marketing site, license VERIFICATION lives solely in the licensed dashboard
+# product itself — core-engine was never meant to own either half. `/auth/activate` was never
+# actually implemented here, so that block silently no-op'd on every real install; removed rather
+# than built, per that same design decision.
 #
 # Usage:
 #   ./scripts/install.sh --domain api.yourcompany.com
@@ -43,8 +43,7 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$REPO_ROOT/.env/.env"
 NGINX_TEMPLATE="$REPO_ROOT/nginx/nginx.conf.template"
 
-# Bug fix (DooD end-to-end install run, 2026-08-25): mirrors
-# warmhawk-enterprise-operator/scripts/install.sh's enable_tls_template() — nginx.conf.template
+# Bug fix (DooD end-to-end install run, 2026-08-25): nginx.conf.template
 # ships with the `listen 443 ssl` block commented out (see that file's own header comment for why:
 # nginx validates every ssl_certificate path at config-load time, so a cert that doesn't exist yet
 # crashes the whole process, not just that server block). Only ever called after certbot has
@@ -451,6 +450,6 @@ else
 fi
 
 log "Run 'warmhawk update' (or './scripts/update.sh') any time to pull the latest release and migrate in place."
-log "Running warmhawk-enterprise-operator too? Copy this .env/.env's OPERATOR_SERVICE_TOKEN value into"
-log "  that repo's own .env/.env as CORE_ENGINE_SERVICE_TOKEN — the two packages never share a .env/.env, so"
+log "Running the licensed dashboard too? Copy this .env/.env's OPERATOR_SERVICE_TOKEN value into"
+log "  that product's own .env/.env as CORE_ENGINE_SERVICE_TOKEN — the two packages never share a .env/.env, so"
 log "  nothing does this for you automatically. Without it, the dashboard's data pages 401."

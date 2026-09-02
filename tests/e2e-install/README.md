@@ -1,15 +1,13 @@
 # Install-Flow E2E Test — release-gated, runs in an automated Docker sandbox
 
 This directory holds five fast-tier scripts — pure local Docker logic, no scratch VM or real DNS
-needed. **All five run in CI** as Woodpecker's `install-flow-fast` workflow (every push/PR, not
+needed. **All five run in CI** as an `install-flow-fast` workflow (every push/PR, not
 release-gated): `test-port-fallback.sh`, `test-idempotent-rerun.sh`, `test-restart-persistence.sh`,
-`test-upgrade-in-place.sh`, `test-warmhawk-command.sh`. They're wired via the
-`installFlowTest.scriptPaths` array in `ks-woodpecker-config`'s `src/repo-map.ts`, and a permanent
-`verify-scripts-wired` guard step runs first in that workflow to catch a script ever going un-wired
-again — it globs `tests/e2e-install/test-*.sh` on disk and fails loudly on any mismatch with the
-wired-in list. See each script's own header comment for what it covers. Everything below this
-point is about `run.sh` specifically — the one test in this directory that exercises a real
-install end to end.
+`test-upgrade-in-place.sh`, `test-warmhawk-command.sh`. A permanent `verify-scripts-wired` guard
+step runs first in that workflow to catch a script ever going un-wired again — it globs
+`tests/e2e-install/test-*.sh` on disk and fails loudly on any mismatch with the wired-in list. See
+each script's own header comment for what it covers. Everything below this point is about `run.sh`
+specifically — the one test in this directory that exercises a real install end to end.
 
 Per the Testing Strategy, this is the "actual customer path" test: run `install.sh --domain
 <test-domain>`, confirm nginx comes up TLS-terminated, and send one real test email through to a
@@ -19,8 +17,8 @@ Mailpit/MailHog catcher.
 release-gated (run before go-live and before any release touching `install.sh`/the containerization
 model), not merge-gated, and it's dual-mode:
 
-- **Automated, in CI:** the `release-e2e` Woodpecker workflow drives it entirely inside a
-  privileged `docker:26-dind` sandbox on KS-CI-Runner, against Pebble (Let's Encrypt's own ACME
+- **Automated, in CI:** the `release-e2e` workflow drives it entirely inside a
+  privileged `docker:26-dind` sandbox in CI, against Pebble (Let's Encrypt's own ACME
   *test* server) rather than the real Let's Encrypt endpoint — no scratch VM, no real public DNS,
   no host port ever published. See "How this is wired" below.
 - **Manual, pre-go-live only:** run by hand against a genuinely disposable throwaway VM with real
@@ -31,17 +29,15 @@ model), not merge-gated, and it's dual-mode:
 The only verification possible without either of the above is `bash -n run.sh` (syntax) and
 validating `docker-compose.e2e-install.yml` with `docker compose config`.
 
-## How this is wired (per `ks-woodpecker-config`'s `src/templates/self-hosted-ci.ts`)
+## How this is wired
 
-**Rebuilt 2026-08-30** — this used to run on a shared, wiped Hetzner scratch VM ("SaaS-Stage")
-reached over SSH, guarded by a cross-repo box lock, described in a now-deleted
-`release-e2e.workflow.yml.sample`. That whole mechanism is gone: no scratch VM, no box lock, no
-wipe, no teardown of shared infrastructure, nothing ever shipped over SSH.
+**Rebuilt 2026-08-30** — this used to run on a shared, wiped scratch VM reached over SSH, guarded
+by a cross-repo box lock, described in a now-deleted workflow sample file. That whole mechanism is
+gone: no scratch VM, no box lock, no wipe, no teardown of shared infrastructure, nothing ever
+shipped over SSH.
 
-The `release-e2e` Woodpecker workflow (see `buildReleaseE2eWorkflow` in `self-hosted-ci.ts`,
-configured for this repo in that project's `src/repo-map.ts`) now runs entirely inside a
-`docker:26-dind` sibling service (`privileged: true`) on KS-CI-Runner — release-tag-gated only.
-Steps, in order:
+The `release-e2e` workflow now runs entirely inside a `docker:26-dind` sibling service
+(`privileged: true`) in CI — release-tag-gated only. Steps, in order:
 
 1. **`wait-for-docker`** — poll the DinD sibling until its daemon is ready.
 2. **`bring-up-pebble`** — create a docker network, then bring up
@@ -72,10 +68,10 @@ network alias inside this one ephemeral sandbox.
 `bash tests/e2e-install/run.sh` runs as that workflow's own `run-install-flow-e2e` step, with
 `E2E_SKIP_INSTALL=true` — it never runs `install.sh` itself in this mode (the workflow's own
 `install-pass-1`/`install-pass-2` steps above already did, twice), and it never drives anything
-over SSH. `MAILPIT_HTTP_HOST`/`MAILPIT_SMTP_HOST` point at the DinD sibling's own service name. See
-`buildReleaseE2eWorkflow`'s own header comment in `self-hosted-ci.ts` for the full
+over SSH. `MAILPIT_HTTP_HOST`/`MAILPIT_SMTP_HOST` point at the DinD sibling's own service name. The
 two-Docker-engine/two-install-pass design (why TLS needs two passes, and how a step's own raw
-`curl` calls reach the inner daemon differently than `docker` CLI calls do).
+`curl` calls reach the inner daemon differently than `docker` CLI calls do) is described above in
+"How this is wired".
 
 ## Manual pre-go-live checklist
 

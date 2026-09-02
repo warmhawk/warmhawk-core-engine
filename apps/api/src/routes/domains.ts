@@ -1,6 +1,5 @@
 /**
- * Domain-authentication + blocklist health checker — ported forward from outreach-infra's
- * `apps/api/src/routes/domains.ts` (SPF/DKIM/DMARC — already built and verified there), extended
+ * Domain-authentication + blocklist health checker — SPF/DKIM/DMARC checks, extended
  * with continuous blocklist/DNSBL monitoring (V11, new). Requires auth — this is the customer's
  * own management API for their sending domains, distinct from the unauthenticated
  * `GET /public/domain-check` route (publicDomainCheck.ts) that reuses this same DNS-check logic

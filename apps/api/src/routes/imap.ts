@@ -1,7 +1,6 @@
 /**
- * IMAP search/flag endpoints — ported forward from outreach-infra's
- * `apps/api/src/routes/imap.ts` (`GET /search`, `POST /flag`, already built there for the
- * warmup network's own deliverability-confirmation emails). Extended, V11, with
+ * IMAP search/flag endpoints — `GET /search`, `POST /flag`, built for the
+ * warmup network's own deliverability-confirmation emails. Extended, V11, with
  * `POST /imap/fetch-reply` — genuinely new: fetches and parses a REPLY message body, not just
  * search-by-header/flag. Reused as the polling foundation for Reply Management & Unified Inbox
  * (see routes/replies.ts and lib/internalAi.ts's classify-reply call). `GET /search` matches by

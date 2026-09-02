@@ -1,6 +1,6 @@
 // WarmHawk — BullMQ dispatcher load test (k6). See tests/load/README.md before running this for
 // real — thresholds below are deliberately TODO placeholders, not a real number, per the V12
-// calibration rule (do not copy jitterflow's p95<10000ms verbatim; measure WarmHawk's own).
+// calibration rule (this project has no real measured baseline yet; measure WarmHawk's own).
 //
 // Two scenarios run concurrently, approximating the two traffic shapes a live multi-hundred-
 // mailbox deployment actually produces:

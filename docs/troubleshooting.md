@@ -17,7 +17,7 @@ first; `support@warmhawk.com` (Tier 1: 1-business-day / 4h-critical) if you're s
 
 Most installs land on an empty box and `install.sh` binds nginx straight to 80/443. If this server
 already runs something else on those ports — another app, a hand-rolled nginx/Apache/Caddy, or
-`warmhawk-enterprise-operator`'s own nginx — `install.sh` detects that and falls back automatically
+the licensed dashboard product's own nginx — `install.sh` detects that and falls back automatically
 instead of failing:
 
 - [x] nginx publishes alt ports instead — `8080`/`8443` by default, or whatever you pass via

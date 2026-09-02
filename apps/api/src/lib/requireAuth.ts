@@ -1,12 +1,11 @@
 /**
- * Fastify preHandler guarding management routes with a Bearer JWT — ported pattern from
- * outreach-infra's `apps/api/src/middleware/requireAuth.ts`, adapted from Express middleware
- * shape to a Fastify `onRequest`/`preHandler` hook.
+ * Fastify preHandler guarding management routes with a Bearer JWT, implemented as a Fastify
+ * `onRequest`/`preHandler` hook.
  *
  * Auth bridge fix: this JWT scheme authenticates a human against this engine's own Tier 0 `User`
  * table (see `lib/jwt.ts`'s header comment) — the right model for a "no web UI, direct API"
- * customer, but warmhawk-enterprise-operator's dashboard has no such per-human credential here at
- * all (its own login/session/2FA is a separate system, entirely local to that repo). Without this,
+ * customer, but the licensed dashboard has no such per-human credential here at
+ * all (its own login/session/2FA is a separate system, entirely its own). Without this,
  * every one of this engine's `/v1/*` management routes 401s for every dashboard request,
  * permanently. `OPERATOR_SERVICE_TOKEN` is the fix: a single long-lived shared secret (generated
  * once by `scripts/install.sh`, exactly like `NEXTJS_CALLBACK_SECRET` already is for n8n) that the

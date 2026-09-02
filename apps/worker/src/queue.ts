@@ -1,10 +1,8 @@
 /**
- * BullMQ queue configuration — ported pattern from outreach-infra's `worker/queue.ts`
- * (queue name/job name constants, Redis connection factory, mailbox reservation key), extended
- * with bounded job retention per the V12 Redis Durability section ("Bounded queue records:
- * completed/failed BullMQ job records capped by age/count, matching jitterflow's
- * `WEBHOOK_QUEUE_JOB_OPTIONS` pattern, so Redis doesn't grow unbounded under `noeviction` on a
- * customer's box with finite disk").
+ * BullMQ queue configuration — queue name/job name constants, Redis connection factory, mailbox
+ * reservation key, extended with bounded job retention per the V12 Redis Durability section
+ * ("Bounded queue records: completed/failed BullMQ job records capped by age/count, so Redis
+ * doesn't grow unbounded under `noeviction` on a customer's box with finite disk").
  */
 import IORedis from 'ioredis';
 import { Queue } from 'bullmq';
@@ -14,9 +12,8 @@ export const DISPATCH_JOB_NAME = 'dispatch';
 export const DAILY_RESET_JOB_NAME = 'daily-reset';
 
 /** Bounded queue records (V12) — completed jobs are pruned after 24h or 10,000 entries,
- *  failed jobs kept longer (7 days / 10,000) for debugging, matching jitterflow's
- *  `WEBHOOK_QUEUE_JOB_OPTIONS` shape exactly. Postgres (`ExecutionLog`) is the durable record —
- *  Redis/BullMQ job records are disposable bookkeeping, not the source of truth. */
+ *  failed jobs kept longer (7 days / 10,000) for debugging. Postgres (`ExecutionLog`) is the
+ *  durable record — Redis/BullMQ job records are disposable bookkeeping, not the source of truth. */
 export const DISPATCH_QUEUE_JOB_OPTIONS = {
   removeOnComplete: { age: 24 * 3600, count: 10_000 },
   removeOnFail: { age: 7 * 24 * 3600, count: 10_000 },

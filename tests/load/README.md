@@ -20,11 +20,10 @@ Its **thresholds are intentionally left as loud `TODO` placeholders**, not a rea
 V12 calibration rule:
 
 > "Thresholds must reflect a real measured baseline on representative hardware, not an
-> aspirational number picked in advance — jitterflow's own load-test thresholds (`p95<10000ms`)
-> are honest about current reality rather than hopeful."
+> aspirational number picked in advance."
 
 This repo has never been run against real hardware at multi-hundred-mailbox volume, so there is
-no honest baseline to encode yet. **Do not copy jitterflow's `p95<10000ms` number verbatim** —
+no honest baseline to encode yet. **The placeholder values here are not real numbers** —
 run this script against WarmHawk's own representative hardware first, record the real p95/p99,
 and set the threshold to that measured number (with a small safety margin), before this becomes a
 release gate. The script's `options.thresholds` currently sets both scenarios' `http_req_duration`
