@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# WarmHawk Core Engine — the `warmhawk` command.
+#
+# install.sh symlinks this into PATH as /usr/local/bin/warmhawk, which is what makes the
+# `warmhawk update` UX named in the spec real. scripts/update.sh's header claimed that symlink
+# already existed; nothing created it until the 2026-08-30 go-live audit (finding C3), so the
+# documented command simply wasn't there.
+#
+# This is a dispatcher, deliberately, NOT a bare symlink to update.sh. update.sh reads its first
+# positional argument as a git ref (`TARGET_REF="${1:-main}"`), so symlinking it directly would
+# make the documented `warmhawk update` try to check out a branch literally named "update" —
+# printing a confusing warning and then silently updating to whatever ref happened to be checked
+# out. Every subcommand below is a thin wrapper over a script or compose call that already exists.
+set -euo pipefail
+
+# Resolve through the /usr/local/bin symlink back to the real script inside the install directory,
+# so REPO_ROOT points at the checkout rather than /usr/local. Hand-rolled rather than `readlink -f`
+# to avoid depending on GNU coreutils specifically.
+resolve_self() {
+  local target="${BASH_SOURCE[0]}" dir
+  while [ -L "$target" ]; do
+    dir="$(cd "$(dirname "$target")" && pwd)"
+    target="$(readlink "$target")"
+    case "$target" in
+      /*) ;;
+      *) target="$dir/$target" ;;
+    esac
+  done
+  cd "$(dirname "$target")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_self)"
+REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+
+compose() {
+  docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" "$@"
+}
+
+usage() {
+  cat <<USAGE
+WarmHawk Core Engine
+
+Usage: warmhawk <command> [args]
+
+  update [ref]      Pull the latest release, run pending migrations, rolling restart.
+                    Defaults to the 'main' release line; pass a tag to pin one.
+  backup            Run the Postgres backup now, outside the nightly cron.
+  status            Show every service and its health.
+  logs [service]    Tail logs. With no service, tails everything.
+  help              This message.
+
+Installed at: ${REPO_ROOT}
+USAGE
+}
+
+case "${1:-help}" in
+  update)
+    shift
+    exec "$SCRIPT_DIR/update.sh" "$@"
+    ;;
+  backup)
+    exec "$SCRIPT_DIR/backup-postgres.sh"
+    ;;
+  status)
+    compose ps
+    ;;
+  logs)
+    shift
+    compose logs -f --tail=200 "$@"
+    ;;
+  help | --help | -h)
+    usage
+    ;;
+  *)
+    echo "warmhawk: unknown command '$1'" >&2
+    echo >&2
+    usage >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,18 @@
+{
+  "name": "@warmhawk/ops-scripts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One-shot operational provisioning scripts, run as ad-hoc Docker Compose jobs (never a long-running service) — see docker-compose.yml's `kuma-provision` service (profile: tools) and scripts/install.sh.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "provision:uptime-kuma": "tsx src/provisionUptimeKuma.ts"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.12",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.6"
+  }
+}

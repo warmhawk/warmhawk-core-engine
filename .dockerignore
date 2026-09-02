@@ -1,0 +1,19 @@
+# Every Dockerfile here uses `context: .` (repo root) — without this file, `docker build` sends
+# the ENTIRE repo as build context on every build, including every workspace's node_modules, .git
+# history, and dist output. Confirmed by hand: a `kuma-provision` build (packages/ops-scripts, a
+# few KB of source) took 2.5+ minutes just transferring context before this file existed. None of
+# these directories are ever needed inside a Dockerfile — every image does its own `npm install`
+# and `npm run db:generate`/build from source.
+node_modules
+**/node_modules
+.git
+dist
+**/dist
+.next
+**/.next
+coverage
+**/coverage
+*.log
+.env
+.env.*
+!.env.example

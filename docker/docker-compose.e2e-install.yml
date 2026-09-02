@@ -1,0 +1,60 @@
+# Test-only overlay — INSTALL-FLOW E2E ONLY (tests/e2e-install/run.sh), never used by
+# docker-compose.test.yml's integration-test flow and never shipped to a customer. Adds a Mailpit
+# SMTP catcher so run.sh can send one real test email through and assert it arrived, without
+# touching any live mail provider. Lives under docker/ alongside the base file — used as:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.e2e-install.yml up -d mailpit
+#
+# Always pass BOTH `-f` files together, base file first, exactly as docker-compose.test.yml's own
+# header documents doing for postgres/redis. Two reasons, not just one:
+#   1. Compose `ports:` CONCATENATE, never override, across `-f` files (the same V12 process
+#      lesson docker-compose.test.yml's header states) — mailpit is a brand-new service with no
+#      base-file entry to collide with, but the convention is kept identical on purpose so every
+#      compose overlay in this repo reads the same way.
+#   2. This file does NOT redeclare the top-level `networks:` stanza. `warmhawk_internal` is
+#      defined exactly once, in docker-compose.yml (`internal: true`), and Compose merges
+#      top-level `networks:` across `-f` files the same way it merges `services:` — so mailpit's
+#      `networks: [warmhawk_internal]` below only resolves when docker-compose.yml is part of the
+#      same invocation. Used alone, this file fails to find that network.
+#
+# Why mailpit ends up on the SAME docker-compose "project" as the real product stack (important —
+# see run.sh's own comments near where it calls scripts/install.sh): as long as whatever brings
+# this overlay up (ephemeral-ssh-stack, or run.sh directly) does so from the same working
+# directory scripts/install.sh itself is later invoked from, Compose's default project-name
+# derivation (sanitized basename of the current directory, absent an explicit `-p`) stays
+# identical across both invocations — so mailpit joins the exact same `warmhawk_internal` network
+# the api/worker containers join, reachable from inside them by the plain container DNS name
+# `mailpit`, not just via its host-published ports below.
+#
+# Host ports are parameterized `${VAR:-default}` per the same convention docker-compose.test.yml
+# uses. 4620/4621 sit inside the already-reserved local-dev range documented in
+# docker-compose.yml's header (4600-4649 = warmhawk-core-engine), one and two past n8n's dev
+# webhook port (4605) — no new range needed.
+#
+# Digest pinning note: every image in docker-compose.yml is pinned to a sha256 digest (V12
+# convention). This one now is too — resolved 2026-09-01 against Docker Hub's registry API and
+# cross-checked with a real `docker pull` (Docker-Content-Digest header and RepoDigests agreed).
+
+services:
+  mailpit:
+    image: axllent/mailpit:v1.20.0@sha256:6105f08377323c3e11a21b6e5e51648e33151fb4e525aab8d0961573c9e94a4d
+    restart: unless-stopped
+    environment:
+      # Mailpit's own message store is ephemeral/in-memory by default, which is exactly right for
+      # a throwaway install-flow test run — nothing here should persist past teardown.
+      MP_MAX_MESSAGES: '50'
+    ports:
+      - '${MAILPIT_SMTP_TEST_PORT:-4620}:1025' # SMTP — the test mailbox sends through this
+      - '${MAILPIT_HTTP_TEST_PORT:-4621}:8025' # Web UI + REST API — run.sh polls GET /api/v1/messages here
+    # Bug fix (release-e2e, 2026-08-28): same failure mode already fixed for nginx (2026-08-25) and
+    # certbot (2026-08-28) in docker-compose.yml -- warmhawk_internal is `internal: true`, so a
+    # container attached to ONLY that network gets its `ports:` publish silently accepted but never
+    # actually wired up (confirmed live: `docker ps` showed mailpit healthy with no host-port
+    # mapping at all, `ss -tlnp` showed nothing listening on 4620/4621, even though `docker compose
+    # config` resolved the ports correctly). warmhawk_edge is the non-internal network those two
+    # fixes added for the same reason; mailpit needs no inbound reachability FROM warmhawk_edge,
+    # just membership in a non-internal network for Docker to actually publish its ports.
+    networks: [warmhawk_internal, warmhawk_edge]
+    deploy:
+      resources:
+        limits: { cpus: '0.25', memory: 128M }
+        reservations: { cpus: '0.05', memory: 32M }

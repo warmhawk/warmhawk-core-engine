@@ -1,0 +1,24 @@
+{
+  "name": "@warmhawk/db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WarmHawk Core Engine — Prisma schema + generated client wrapper.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "prisma generate",
+    "migrate": "prisma migrate deploy",
+    "migrate:dev": "prisma migrate dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.20.0",
+    "prisma": "^5.20.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
