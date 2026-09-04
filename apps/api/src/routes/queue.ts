@@ -46,11 +46,33 @@ const MAX_LISTED_JOBS = 50;
 
 let sharedQueue: Queue | null = null;
 
+/**
+ * Builds a `redis://` connection string with the password properly percent-encoded.
+ * MUST match `apps/worker/src/queue.ts`'s copy of this same helper (same duplication rationale
+ * as this file's other constants above — no shared package between the two independently
+ * deployable apps).
+ *
+ * Bug fix (2026-09-04): `REDIS_PASSWORD` is generated via `openssl rand -base64 32`, whose
+ * alphabet includes `/` and `+`. Interpolating a password containing `/` directly into
+ * `redis://:PASSWORD@host:port` (as `docker-compose.yml`'s plain shell substitution does when
+ * building the `REDIS_URL` env var) produces a string `new URL()` throws `Invalid URL` on —
+ * confirmed live, crash-looping `apps/worker` on every boot. `encodeURIComponent()` guarantees a
+ * syntactically valid URL for ANY password. `ioredis`'s own URL parser already calls
+ * `decodeURIComponent()` on the parsed password, so this round-trips correctly.
+ */
+export function buildRedisUrl(host: string, port: number | string, password: string): string {
+  return `redis://:${encodeURIComponent(password)}@${host}:${port}`;
+}
+
 /** Lazily-constructed, process-lifetime BullMQ queue handle — read-only from this app's side
  *  (never `.add()`s a job; only `apps/worker`'s enqueuer does that). */
 function dispatchQueue(): Queue {
   if (!sharedQueue) {
-    const connection = new IORedis(process.env.REDIS_URL || 'redis://localhost:6379', {
+    const password = process.env.REDIS_PASSWORD;
+    const url = password
+      ? buildRedisUrl(process.env.REDIS_HOST || 'redis', process.env.REDIS_PORT || 6379, password)
+      : process.env.REDIS_URL || 'redis://localhost:6379';
+    const connection = new IORedis(url, {
       maxRetriesPerRequest: null,
     });
     sharedQueue = new Queue(DISPATCH_QUEUE_NAME, { connection });

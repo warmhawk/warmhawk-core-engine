@@ -150,7 +150,14 @@ services:
       NODE_ENV: production
       PORT: '4600'
       DATABASE_URL: postgresql://warmhawk:${POSTGRES_PASSWORD}@postgres:5432/warmhawk
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      # Bug fix (2026-09-04): previously a pre-built `REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379`
+      # here — plain Compose variable substitution can't URL-encode, so a password containing `/`
+      # (openssl rand -base64's alphabet) produced a string that crash-looped this service on boot.
+      # The raw password is passed separately instead; apps/api/src/routes/queue.ts builds and
+      # percent-encodes the connection string itself (see that file's buildRedisUrl).
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       N8N_BASE_URL: http://n8n:5678
       JWT_SECRET: ${JWT_SECRET}
       MAILBOX_CREDENTIAL_KEY: ${MAILBOX_CREDENTIAL_KEY}
@@ -190,7 +197,11 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://warmhawk:${POSTGRES_PASSWORD}@postgres:5432/warmhawk
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      # Bug fix (2026-09-04): see the `api` service's identical comment above — raw password
+      # passed separately; apps/worker/src/queue.ts builds and percent-encodes the URL itself.
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       N8N_BASE_URL: http://n8n:5678
       OTEL_SERVICE_NAME: warmhawk-worker
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}

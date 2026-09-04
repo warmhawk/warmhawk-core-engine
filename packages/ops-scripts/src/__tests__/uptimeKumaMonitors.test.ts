@@ -29,6 +29,17 @@ describe('buildMonitorSpecs', () => {
     expect(postgres?.databaseConnectionString).toBe('postgresql://warmhawk:pg-secret@postgres:5432/warmhawk');
     expect(redis?.databaseConnectionString).toBe('redis://:redis-secret@redis:6379');
   });
+
+  it('percent-encodes a redisPassword containing "/" so the redis connection string stays a valid URL (bug fix, 2026-09-04)', () => {
+    // Regression test for the same REDIS_PASSWORD-can-contain-"/" bug fixed in
+    // apps/worker/src/queue.ts's buildRedisUrl — this file's own redis: connection string is
+    // consumed by uptime-kuma's server-side URL parser, so it needs the identical treatment.
+    const specs = buildMonitorSpecs({ postgresPassword: 'pg-secret', redisPassword: 'ab/cd@ef' });
+    const redis = specs.find((s) => s.name.includes('redis'));
+    expect(redis?.databaseConnectionString).toBe('redis://:ab%2Fcd%40ef@redis:6379');
+    expect(() => new URL(redis!.databaseConnectionString!)).not.toThrow();
+    expect(decodeURIComponent(new URL(redis!.databaseConnectionString!).password)).toBe('ab/cd@ef');
+  });
 });
 
 describe('toAddMonitorPayload', () => {

@@ -34,7 +34,11 @@ export function buildMonitorSpecs(env: PasswordEnv): KumaMonitorSpec[] {
     {
       name: 'WarmHawk — redis',
       type: 'redis',
-      databaseConnectionString: `redis://:${env.redisPassword}@redis:6379`,
+      // Bug fix (2026-09-04): REDIS_PASSWORD can contain `/` (openssl rand -base64's alphabet),
+      // which breaks URL parsing when interpolated raw into a `redis://` connection string —
+      // both here (Kuma itself parses this string with a URL parser server-side) and in
+      // apps/worker's own connection (see apps/worker/src/queue.ts's buildRedisUrl). Encode it.
+      databaseConnectionString: `redis://:${encodeURIComponent(env.redisPassword)}@redis:6379`,
     },
   ];
 }

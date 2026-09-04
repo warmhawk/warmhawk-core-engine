@@ -62,4 +62,42 @@ describe('spintax parser/renderer', () => {
       ['John', 'Jane'],
     ]);
   });
+
+  // Regression guard for the spintax/merge-field regex collision (fixed 2026-09-04). Before the
+  // fix, a merge field's inner `{token}` (from `{{token}}`) looked exactly like the single-option
+  // no-pipe group the test above intentionally DOES resolve, and got collapsed to bare text —
+  // corrupting real send content if this function were ever called before merge fields were
+  // filled, and definitely corrupting `listSpintaxGroups`'s save-time count in
+  // `apps/api/src/routes/campaigns.ts#evaluateContentQuality`, which runs on the raw, unfilled
+  // template.
+  describe('merge-field ({{token}}) collision', () => {
+    it('renderSpintax leaves a {{mergeField}} token completely untouched', () => {
+      expect(renderSpintax('Hi {{firstName}}, thanks for stopping by')).toBe(
+        'Hi {{firstName}}, thanks for stopping by',
+      );
+    });
+
+    it('renderSpintax resolves a real spintax group next to an untouched merge field', () => {
+      const rendered = renderSpintax(
+        'Hi {{firstName}}, {great to connect|nice to meet you} re {{company}}',
+        () => 0,
+      );
+      expect(rendered).toBe('Hi {{firstName}}, great to connect re {{company}}');
+    });
+
+    it('hasSpintax still reports false for a template with only merge fields', () => {
+      expect(hasSpintax('Hi {{firstName}}, thanks for stopping by {{company}}')).toBe(false);
+    });
+
+    it('listSpintaxGroups reports zero groups for a template with only merge fields', () => {
+      expect(listSpintaxGroups('Hi {{firstName}}, thanks for stopping by {{company}}')).toEqual([]);
+    });
+
+    it('listSpintaxGroups still finds a real group alongside untouched merge fields', () => {
+      const groups = listSpintaxGroups(
+        'Hi {{firstName}}, {great to connect|nice to meet you} re {{company}}',
+      );
+      expect(groups).toEqual([['great to connect', 'nice to meet you']]);
+    });
+  });
 });

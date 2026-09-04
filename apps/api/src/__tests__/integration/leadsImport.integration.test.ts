@@ -18,6 +18,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
+import { request as httpRequest } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { createApp } from '../../app';
 import { prisma } from '@warmhawk/db';
 
@@ -50,6 +52,81 @@ function buildMultipartBody(
   };
 }
 
+/**
+ * Bug-fix regression coverage (live-stack verification, 2026-09-04) — sends the FILE part
+ * before the `campaignId` field, as a REAL two-write HTTP request against a real listening
+ * server, with a genuine async gap between the writes. This is deliberately NOT built as one
+ * `Buffer` handed to `app.inject()`: an earlier version of this test did exactly that (file part
+ * first inside one static buffer) and it passed even against the unpatched route. Root cause of
+ * that false negative: `@fastify/multipart` (busboy under the hood) only actually loses the race
+ * when the bytes for the file part and the bytes for a field declared after it arrive in
+ * SEPARATE stream `data` events — when everything lands in one chunk (which is exactly what
+ * `app.inject()` with a single Buffer payload does, and also what a small file sent as one raw
+ * curl `-F` request over loopback does), busboy parses the whole buffer synchronously — file
+ * event AND the later field event both fire — before the route's `await request.file(...)` even
+ * gets a microtask turn to read `.fields.campaignId`, so it's already populated by the time the
+ * check runs. The real, live browser bug (found through warmhawk-enterprise-operator's
+ * `import-leads-dialog.tsx`, which appends the file before campaignId) only actually manifested
+ * because the request crosses the operator's `/api/backend/*` proxy — a second hop that reads
+ * the incoming body then re-serializes a fresh outbound multipart request, reliably splitting
+ * the file part from the trailing campaignId field across separate writes/`data` events on
+ * core-engine's side. This test reproduces that same "file event, then a real async gap, then
+ * the field event" shape directly against core-engine, without needing the second repo's proxy
+ * running, by writing the two halves of the multipart body to the socket with a real `setTimeout`
+ * gap in between.
+ */
+async function postFileThenFieldOverRealSocket(opts: {
+  port: number;
+  path: string;
+  authToken: string;
+  file: { fieldName: string; filename: string; content: string };
+  fields: Record<string, string>;
+}): Promise<{ statusCode: number; body: unknown }> {
+  const boundary = `----WarmHawkTestBoundaryDelayed${Date.now()}`;
+  const filePart =
+    `--${boundary}\r\nContent-Disposition: form-data; name="${opts.file.fieldName}"; filename="${opts.file.filename}"\r\nContent-Type: text/csv\r\n\r\n${opts.file.content}\r\n`;
+  const fieldParts = Object.entries(opts.fields)
+    .map(([name, value]) => `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`)
+    .join('');
+  const closing = `--${boundary}--\r\n`;
+
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port: opts.port,
+        path: opts.path,
+        method: 'POST',
+        headers: {
+          'content-type': `multipart/form-data; boundary=${boundary}`,
+          authorization: `Bearer ${opts.authToken}`,
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          const text = Buffer.concat(chunks).toString('utf8');
+          resolve({ statusCode: res.statusCode ?? 0, body: text ? JSON.parse(text) : undefined });
+        });
+        res.on('error', reject);
+      },
+    );
+    req.on('error', reject);
+
+    // Write the file part, flush it as its own TCP write, then genuinely wait a tick (real
+    // macrotask gap, not just a microtask) before writing the campaignId field — this is what
+    // forces busboy to emit the 'file' event and hand control back to the awaiting route handler
+    // BEFORE the campaignId field has been parsed, matching what the operator's proxy re-hop
+    // does to a real browser-originated import.
+    req.write(filePart, () => {
+      setTimeout(() => {
+        req.end(fieldParts + closing);
+      }, 50);
+    });
+  });
+}
+
 describeIntegration('POST /leads/import (integration, real Postgres)', () => {
   let app: FastifyInstance;
   let campaignId: string;
@@ -59,6 +136,10 @@ describeIntegration('POST /leads/import (integration, real Postgres)', () => {
     process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-only-not-a-real-secret-value';
     app = await createApp();
     await app.ready();
+    // Real listener (not just app.ready()) — the file-before-field regression test below needs a
+    // genuine socket so it can deliver the multipart body as two separate TCP writes; see that
+    // test's own comment for why app.inject() with a single Buffer can't exercise this race.
+    await app.listen({ port: 0, host: '127.0.0.1' });
 
     const campaign = await prisma.campaign.create({
       data: { name: 'CSV Import Test Campaign', status: 'ACTIVE', aiPromptTemplate: '' },
@@ -148,6 +229,27 @@ describeIntegration('POST /leads/import (integration, real Postgres)', () => {
     const json = response.json();
     expect(json.imported).toBe(1);
     expect(json.skippedDuplicate).toBe(1);
+  });
+
+  it('imports successfully when the file part arrives in a separate TCP write before the campaignId field, matching a real browser upload through the operator proxy (regression, 2026-09-04)', async () => {
+    const csv = 'email\nbrowser-order@example.org\n';
+    const address = app.server.address() as AddressInfo;
+
+    const response = await postFileThenFieldOverRealSocket({
+      port: address.port,
+      path: '/v1/leads/import',
+      authToken,
+      file: { fieldName: 'file', filename: 'leads.csv', content: csv },
+      fields: { campaignId },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const json = response.body as { imported: number; rejected: unknown[] };
+    expect(json.imported).toBe(1);
+    expect(json.rejected).toHaveLength(0);
+
+    const leads = await prisma.lead.findMany({ where: { campaignId } });
+    expect(leads.map((l) => l.email)).toContain('browser-order@example.org');
   });
 
   it('requires authentication', async () => {
