@@ -9,6 +9,7 @@ import {
   validateProviderKey,
   personalizeContent,
   classifyReply,
+  fillMergeFields,
 } from '../../lib/aiProviderClient';
 import * as gemini from '../../lib/aiProviders/gemini';
 import * as claude from '../../lib/aiProviders/claude';
@@ -88,6 +89,37 @@ describe('personalizeContent', () => {
         leadContext: {},
       }),
     ).rejects.toThrow('boom');
+  });
+});
+
+/**
+ * `fillMergeFields` — extracted from `buildPersonalizationPrompt`'s previously-private inline loop
+ * (API-surface correction pass: `routes/internalAi.ts`'s no-AI-provider / inactive-key fallback
+ * path now reuses this exact function on `campaign.template`, instead of a second implementation —
+ * see that file's `renderFallbackTemplate`). `personalizeContent`'s own test above already covers
+ * it indirectly via the AI-prompt path; these cover it directly.
+ */
+describe('fillMergeFields', () => {
+  it('fills every matching {{field}} placeholder, case-insensitively', () => {
+    expect(fillMergeFields('Hi {{FirstName}} at {{company}}', { firstName: 'Ada', company: 'Acme' })).toBe(
+      'Hi Ada at Acme',
+    );
+  });
+
+  it('leaves a placeholder with no matching field as literal text', () => {
+    expect(fillMergeFields('Hi {{nickname}}', { firstName: 'Ada' })).toBe('Hi {{nickname}}');
+  });
+
+  it('skips null/undefined context values rather than substituting the literal word', () => {
+    expect(fillMergeFields('Hi {{firstName}}', { firstName: null })).toBe('Hi {{firstName}}');
+  });
+
+  it('tolerates whitespace inside the braces ({{ field }})', () => {
+    expect(fillMergeFields('Hi {{ firstName }}', { firstName: 'Ada' })).toBe('Hi Ada');
+  });
+
+  it('renders plain text with no placeholders unchanged', () => {
+    expect(fillMergeFields('Just checking in.', { firstName: 'Ada' })).toBe('Just checking in.');
   });
 });
 

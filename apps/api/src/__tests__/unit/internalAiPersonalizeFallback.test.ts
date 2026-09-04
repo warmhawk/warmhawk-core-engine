@@ -5,7 +5,7 @@
  * template so a send never stalls on it. Fake timers avoid actually waiting out the retry delay.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { personalizeWithFallback } from '../../routes/internalAi';
+import { personalizeWithFallback, renderFallbackTemplate } from '../../routes/internalAi';
 import * as aiProviderClient from '../../lib/aiProviderClient';
 
 vi.mock('../../lib/aiProviderClient', async () => {
@@ -69,5 +69,53 @@ describe('personalizeWithFallback', () => {
       aiPersonalizationFailed: true,
     });
     expect(aiProviderClient.personalizeContent).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Unit coverage for `renderFallbackTemplate` — the fix for the bug this whole file guards against
+ * (see the file header and internalAiPersonalize.integration.test.ts for the end-to-end version).
+ * No real DB needed here: this is pure string transformation, so it's the fast/always-runs
+ * complement to the integration test.
+ */
+describe('renderFallbackTemplate', () => {
+  it('substitutes merge fields and resolves a spintax group in one template', () => {
+    const rendered = renderFallbackTemplate(
+      'Hi {{firstName}}, {Quick question|One thing I noticed} about {{company}}.',
+      { firstName: 'Ada', company: 'Acme' },
+    );
+    expect(rendered).not.toMatch(/\{\{.*\}\}/);
+    expect(rendered).not.toMatch(/\{[^{}]*\|[^{}]*\}/);
+    expect(rendered).toContain('Hi Ada,');
+    expect(rendered).toContain('about Acme.');
+  });
+
+  it('renders merge fields BEFORE spintax — the collision this bug would reintroduce if reordered', () => {
+    // {{firstName}} is itself a balanced {...} pair one level in. If spintax ran first, its
+    // innermost-group scan would treat the inner {firstName} as a single-option (no-pipe) spintax
+    // group and collapse the whole thing to the literal text "firstName" — losing the merge field
+    // entirely before merge-field substitution ever got a chance to run. This is exactly the
+    // ordering renderFallbackTemplate's own header comment explains.
+    const rendered = renderFallbackTemplate('Hello {{firstName}}!', { firstName: 'Grace' });
+    expect(rendered).toBe('Hello Grace!');
+    expect(rendered).not.toContain('firstName');
+  });
+
+  it('renders plain text with no template syntax unchanged', () => {
+    expect(renderFallbackTemplate('Just checking in.', { firstName: 'Ada' })).toBe('Just checking in.');
+  });
+
+  it('does not throw on an unmatched merge field (no such lead field) — falls through to spintax\'s own pre-existing single-option handling', () => {
+    // fillMergeFields correctly leaves `{{nickname}}` untouched when there's no matching lead
+    // field (see aiProviderClient.test.ts's own coverage of that). What happens next is a
+    // pre-existing, out-of-scope characteristic of spintax.ts, not something this fix introduces:
+    // renderSpintax's innermost-group regex treats ANY bare `{word}` — matched merge field or
+    // not — as a single-option (no-pipe) spintax group and strips its braces, so the inner
+    // `{nickname}` one level inside `{{nickname}}` collapses to the literal word "nickname". The
+    // important thing this test guards is that rendering never throws or drops the whole
+    // placeholder silently; it does not (and, per spintax.ts's own design, cannot without changes
+    // out of scope for this bug fix) preserve the original `{{nickname}}` braces verbatim.
+    const rendered = renderFallbackTemplate('Hi {{nickname}}!', { firstName: 'Ada' });
+    expect(rendered).toBe('Hi nickname!');
   });
 });
