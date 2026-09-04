@@ -51,12 +51,13 @@ export async function personalizeWithFallback(
 }
 
 /** Renders the campaign's own literal template for the no-AI-provider / inactive-key fallback
- *  path: merge fields first, then spintax. Order matters — `{{firstName}}` is itself a balanced
- *  `{...}` pair one level in, so if spintax ran first its innermost-group scan would treat
- *  `{firstName}` as a (single-option, no-pipe) spintax group and collapse it to the literal text
- *  "firstName" before the merge-field pass ever got a chance to see `{{firstName}}`. Filling merge
- *  fields first removes every `{{...}}` pair before spintax's regex ever runs, so the two syntaxes
- *  never collide. */
+ *  path: merge fields first, then spintax. `{{firstName}}` is itself a balanced `{...}` pair one
+ *  level in (`{firstName}`) — `lib/spintax.ts`'s innermost-group regex explicitly excludes that
+ *  doubled-brace shape (see its own comment, bug fix 2026-09-04), so `renderSpintax` alone no
+ *  longer corrupts an unfilled merge field even if this ran out of order. Filling merge fields
+ *  first is kept anyway, both because it's the more obviously correct order and as defense in
+ *  depth: it removes every `{{...}}` pair before spintax's regex runs at all, rather than relying
+ *  solely on that regex's exclusion. */
 export function renderFallbackTemplate(template: string, leadContext: Record<string, unknown>): string {
   const merged = fillMergeFields(template, leadContext);
   return renderSpintax(merged);
