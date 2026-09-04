@@ -116,6 +116,53 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
     }
   });
 
+  /**
+   * Regression test for the phantom "unknown / unknown / unknown" row: the system `daily-reset`
+   * job (apps/worker/src/index.ts's repeatable cron, name `DAILY_RESET_JOB_NAME` = 'daily-reset')
+   * shares this same `warmhawk-dispatch` queue with real per-lead dispatch jobs, carries no
+   * leadId/mailboxId, and must never reach GET /status's `jobs` list — queue.ts's `SYSTEM_JOB_NAMES`
+   * filter is what's under test here. Adds a one-off job named 'daily-reset' (doesn't need to be
+   * the actual repeatable registration — job.name is all the filter keys off of) alongside a real
+   * dispatch job, both delayed long enough that the live worker never picks either up first.
+   */
+  it('excludes the system daily-reset job from the job-summary list, but keeps a real dispatch job alongside it', async () => {
+    // BullMQ rejects custom job IDs containing ":" ("Custom Id cannot contain :") — unlike the
+    // jobId format used in the test above (which BullMQ itself never validates against that rule
+    // for an auto-added job in the normal dispatch path, but a literal custom id here does hit
+    // the check), so these use "-" as the separator instead.
+    const dispatchJobId = `${leadId}-${mailboxId}-daily-reset-regression-${Date.now()}`;
+    const dailyResetJobId = `daily-reset-regression-${Date.now()}`;
+    await queue.add('dispatch', { leadId, mailboxId }, { jobId: dispatchJobId, delay: 10 * 60 * 1000 });
+    await queue.add('daily-reset', {}, { jobId: dailyResetJobId, delay: 10 * 60 * 1000 });
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/queue/status',
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(response.statusCode).toBe(200);
+      const json = response.json();
+
+      const realJob = json.jobs.find((j: { id: string }) => j.id === dispatchJobId);
+      expect(realJob).toBeTruthy();
+      expect(realJob.leadEmail).toBe(leadEmail);
+
+      const phantomJob = json.jobs.find((j: { id: string }) => j.id === dailyResetJobId);
+      expect(phantomJob).toBeUndefined();
+      // The specific regression: no row anywhere in the list renders as unknown/unknown/unknown.
+      expect(
+        json.jobs.some(
+          (j: { leadEmail: string; mailboxEmail: string; campaignName: string }) =>
+            j.leadEmail === 'unknown' && j.mailboxEmail === 'unknown' && j.campaignName === 'unknown',
+        ),
+      ).toBe(false);
+    } finally {
+      await (await queue.getJob(dispatchJobId))?.remove();
+      await (await queue.getJob(dailyResetJobId))?.remove();
+    }
+  });
+
   it('pauses and resumes the dispatch queue for real (BullMQ-backed, not cosmetic)', async () => {
     try {
       const pauseResponse = await app.inject({
