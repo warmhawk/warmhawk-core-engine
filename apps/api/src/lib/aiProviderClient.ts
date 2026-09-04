@@ -63,17 +63,27 @@ export async function validateProviderKey(provider: AiProvider, apiKey: string):
   return provider === 'GEMINI' ? validateGeminiKey(apiKey) : validateClaudeKey(apiKey);
 }
 
-/** Fills `{{fieldName}}` placeholders in `promptTemplate` from `leadContext` (same mustache-style
- *  convention `lib/mailSender.ts#resolveUnsubscribeUrl` already uses for `{{email}}`), then appends
- *  the full lead context as a JSON block so the model can use fields the customer didn't explicitly
- *  template, without inventing facts not present in it. */
-function buildPersonalizationPrompt(promptTemplate: string, leadContext: Record<string, unknown>): string {
-  let filled = promptTemplate;
+/** Fills `{{fieldName}}` placeholders in `template` from `leadContext` (same mustache-style
+ *  convention `lib/mailSender.ts#resolveUnsubscribeUrl` already uses for `{{email}}`). Exported so
+ *  the no-AI-provider / inactive-key fallback path in `routes/internalAi.ts` can apply the same
+ *  merge-field substitution to `campaign.template` directly, instead of a second implementation —
+ *  this was originally private and only reachable via `buildPersonalizationPrompt` below, which
+ *  runs solely on the AI-prompt path. */
+export function fillMergeFields(template: string, leadContext: Record<string, unknown>): string {
+  let filled = template;
   for (const [key, value] of Object.entries(leadContext)) {
     if (value === null || value === undefined) continue;
     const pattern = new RegExp(`\\{\\{\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}\\}`, 'gi');
     filled = filled.replace(pattern, String(value));
   }
+  return filled;
+}
+
+/** Fills merge fields in `promptTemplate` (via `fillMergeFields` above), then appends the full lead
+ *  context as a JSON block so the model can use fields the customer didn't explicitly template,
+ *  without inventing facts not present in it. */
+function buildPersonalizationPrompt(promptTemplate: string, leadContext: Record<string, unknown>): string {
+  const filled = fillMergeFields(promptTemplate, leadContext);
   return [
     filled,
     '',

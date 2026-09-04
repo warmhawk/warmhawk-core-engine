@@ -13,7 +13,8 @@ import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { decrypt, loadEncryptionKey } from '../lib/encryption';
-import { personalizeContent, classifyReply } from '../lib/aiProviderClient';
+import { personalizeContent, classifyReply, fillMergeFields } from '../lib/aiProviderClient';
+import { renderSpintax } from '../lib/spintax';
 import { appendEuAiDisclosureIfNeeded } from '../lib/sendCompliance';
 
 function encryptionKey() {
@@ -49,6 +50,18 @@ export async function personalizeWithFallback(
   }
 }
 
+/** Renders the campaign's own literal template for the no-AI-provider / inactive-key fallback
+ *  path: merge fields first, then spintax. Order matters — `{{firstName}}` is itself a balanced
+ *  `{...}` pair one level in, so if spintax ran first its innermost-group scan would treat
+ *  `{firstName}` as a (single-option, no-pipe) spintax group and collapse it to the literal text
+ *  "firstName" before the merge-field pass ever got a chance to see `{{firstName}}`. Filling merge
+ *  fields first removes every `{{...}}` pair before spintax's regex ever runs, so the two syntaxes
+ *  never collide. */
+export function renderFallbackTemplate(template: string, leadContext: Record<string, unknown>): string {
+  const merged = fillMergeFields(template, leadContext);
+  return renderSpintax(merged);
+}
+
 export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireCallbackSecret);
 
@@ -66,10 +79,20 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
       ]);
       if (!campaign || !lead) return reply.code(404).send({ error: 'Campaign or lead not found' });
 
+      const leadContext = {
+        firstName: lead.firstName,
+        lastName: lead.lastName,
+        company: lead.company,
+        ...(typeof lead.customFields === 'object' && lead.customFields ? lead.customFields : {}),
+      };
+      const rawTemplate = campaign.template ?? campaign.aiPromptTemplate;
+
       if (!campaign.aiProvider) {
-        // No provider configured — send the template as-is rather than failing (Phase 3 spec).
+        // No provider configured — render the template (merge fields + spintax) rather than
+        // failing, and rather than sending it back raw (Phase 3 spec: send as-is is about not
+        // failing the send, not about skipping the template's own merge/spintax syntax).
         return reply.send({
-          generatedText: campaign.template ?? campaign.aiPromptTemplate,
+          generatedText: renderFallbackTemplate(rawTemplate, leadContext),
           aiUsed: false,
         });
       }
@@ -79,25 +102,24 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
       });
       if (!providerKey || !providerKey.isActive) {
         return reply.send({
-          generatedText: campaign.template ?? campaign.aiPromptTemplate,
+          generatedText: renderFallbackTemplate(rawTemplate, leadContext),
           aiUsed: false,
         });
       }
 
       const apiKey = decrypt(providerKey.apiKeyEncrypted, encryptionKey());
-      const fallbackText = campaign.template ?? campaign.aiPromptTemplate;
+      // The AI call's own fallback (a flaky/erroring provider, handled by `personalizeWithFallback`
+      // below) must render the same way as the two no-provider branches above — a customer who
+      // configured AI but hit a transient outage still deserves merge fields + spintax instead of
+      // raw template text.
+      const fallbackText = renderFallbackTemplate(rawTemplate, leadContext);
       const { generatedText, aiUsed, aiPersonalizationFailed } = await personalizeWithFallback(
         {
           provider: campaign.aiProvider,
           apiKey,
           model: providerKey.model,
           promptTemplate: campaign.aiPromptTemplate,
-          leadContext: {
-            firstName: lead.firstName,
-            lastName: lead.lastName,
-            company: lead.company,
-            ...(typeof lead.customFields === 'object' && lead.customFields ? lead.customFields : {}),
-          },
+          leadContext,
         },
         fallbackText,
       );

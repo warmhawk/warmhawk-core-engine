@@ -28,6 +28,11 @@ import { requireAuth } from '../lib/requireAuth';
 
 // MUST match apps/worker/src/queue.ts's DISPATCH_QUEUE_NAME.
 const DISPATCH_QUEUE_NAME = 'warmhawk-dispatch';
+// MUST match apps/worker/src/queue.ts's DAILY_RESET_JOB_NAME — the repeatable system cron job that
+// shares this same queue with real per-lead dispatch jobs. It carries no leadId/mailboxId, so it
+// must never reach the dashboard's job-summary list (it would otherwise render as a phantom
+// "unknown / unknown / unknown" row). Add any other system/internal job name here too.
+const SYSTEM_JOB_NAMES = new Set(['daily-reset']);
 // MUST match apps/worker/src/computeNextSlotSeconds.ts's CADENCE_FLOOR_MS (8-minute floor).
 const CADENCE_FLOOR_SECONDS = 8 * 60;
 // The jitter band's width (computeNextSlotSeconds.ts jitters 240-480s plus ±90s noise on top of
@@ -67,7 +72,11 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
       JOB_STATES.map((state) => [state, rawCounts[state] ?? 0]),
     ) as Record<DispatchJobState, number>;
 
-    const jobs = await queue.getJobs(['waiting', 'active', 'delayed'], 0, MAX_LISTED_JOBS - 1);
+    const rawJobs = await queue.getJobs(['waiting', 'active', 'delayed'], 0, MAX_LISTED_JOBS - 1);
+    // Exclude system/internal jobs (the repeatable `daily-reset` cron) from the dashboard's job
+    // list — they carry no leadId/mailboxId and would otherwise render as a phantom
+    // "unknown / unknown / unknown" row. Filtered here, at summary-building time, not in the UI.
+    const jobs = rawJobs.filter((job) => !SYSTEM_JOB_NAMES.has(job.name));
 
     const leadIds = jobs.map((job) => job.data?.leadId).filter((id): id is string => Boolean(id));
     const mailboxIds = jobs
