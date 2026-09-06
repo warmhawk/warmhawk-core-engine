@@ -110,7 +110,13 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
       expect(response.statusCode).toBe(200);
       const json = response.json();
       expect(['PASS', 'FAIL']).toContain(json.spfStatus);
-      expect(['PASS', 'FAIL']).toContain(json.dkimStatus);
+      // 🔑 DKIM is the one check with no verdict to give here. Selectors cannot be enumerated
+      // from DNS, so with none supplied `checkDkim` guesses nine common names, and a miss means
+      // "we did not find one" — not "this domain has no DKIM". That is PENDING, and for a
+      // synthetic domain that never resolves it is PENDING every time. Allowing only PASS/FAIL
+      // encoded the very bug lib/dnsChecks.ts was changed to fix: reporting an absence nobody
+      // can prove as a failure against the domain.
+      expect(json.dkimStatus).toBe('PENDING');
       expect(['PASS', 'FAIL']).toContain(json.dmarcStatus);
       expect(json.blocklistStatus).toBeTruthy();
       expect(json.lastBlocklistCheckAt).not.toBeNull();

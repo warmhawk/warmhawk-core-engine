@@ -25,7 +25,6 @@ import { internalDomainsRoutes } from './routes/internalDomains';
 import { internalSeedPlacementRoutes } from './routes/internalSeedPlacement';
 import { internalRepliesRoutes } from './routes/internalReplies';
 import { repliesRoutes } from './routes/replies';
-import { publicDomainCheckRoutes } from './routes/publicDomainCheck';
 import { authRoutes } from './routes/auth';
 import { instanceSettingsRoutes } from './routes/instanceSettings';
 import { campaignsRoutes } from './routes/campaigns';
@@ -113,7 +112,13 @@ export async function createApp(): Promise<FastifyInstance> {
       // issuance now lives solely on WarmHawk's billing/marketing site, the one piece of billing
       // infra WarmHawk operates centrally; the licensed dashboard is the sole license VERIFIER).
       // Tier 0 (this engine) carries no license gate at all, per the spec.
-      await v1.register(publicDomainCheckRoutes, { prefix: '/public' });
+      //
+      // NOTE: there is deliberately no `/v1/public/*` group here. A `GET /public/domain-check`
+      // route once lived in this repo — WarmHawk's own free marketing tool, shipped into every
+      // self-hosted install. That put an unauthenticated, recursive-DNS endpoint on customers'
+      // servers, where a stranger abusing it got the CUSTOMER's IP throttled by Spamhaus and
+      // silently broke the domain monitoring they actually pay for. It now runs as a separate
+      // service that WarmHawk operates. Nothing unauthenticated belongs under /v1.
     },
     { prefix: '/v1' },
   );
