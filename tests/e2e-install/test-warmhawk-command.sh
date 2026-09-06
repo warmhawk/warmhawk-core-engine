@@ -63,13 +63,13 @@ docker run --rm \
     resolved="$(warmhawk help | grep "^Installed at:" | awk "{print \$3}")"
     [ "$resolved" = "/work" ] || { echo "FAIL: resolved install dir was $resolved, expected /work"; exit 1; }
 
-    # 3. The subcommand is consumed; the ref is forwarded. update.sh echoes the ref it targets, and
-    #    a git-less container makes it warn-and-continue rather than mutate anything.
+    # 3. The subcommand is consumed; the ref is forwarded. update.sh names the ref it targets before
+    #    it touches git at all, so this holds in a git-less container without it mutating anything.
     out="$(warmhawk update v9.9.9-nonexistent 2>&1 || true)"
-    if ! echo "$out" | grep -q "Fetching latest release (v9.9.9-nonexistent)"; then
+    if ! echo "$out" | grep -q "Target version: v9.9.9-nonexistent"; then
       echo "FAIL: ref not forwarded to update.sh. Got:"; echo "$out"; exit 1
     fi
-    if echo "$out" | grep -q "Fetching latest release (update)"; then
+    if echo "$out" | grep -q "Target version: update"; then
       echo "FAIL: the word update leaked through as the git ref"; exit 1
     fi
 

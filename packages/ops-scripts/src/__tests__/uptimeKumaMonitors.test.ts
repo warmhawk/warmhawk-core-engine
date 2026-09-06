@@ -26,8 +26,10 @@ describe('buildMonitorSpecs', () => {
     const specs = buildMonitorSpecs(ENV);
     const postgres = specs.find((s) => s.name.includes('postgres'));
     const redis = specs.find((s) => s.name.includes('redis'));
-    expect(postgres?.databaseConnectionString).toBe('postgresql://warmhawk:pg-secret@postgres:5432/warmhawk');
-    expect(redis?.databaseConnectionString).toBe('redis://:redis-secret@redis:6379');
+    expect(postgres?.databaseConnectionString).toBe(
+      'postgresql://warmhawk:pg-secret@warmhawk-core-engine-postgres:5432/warmhawk',
+    );
+    expect(redis?.databaseConnectionString).toBe('redis://:redis-secret@warmhawk-core-engine-redis:6379');
   });
 
   it('percent-encodes a redisPassword containing "/" so the redis connection string stays a valid URL (bug fix, 2026-09-04)', () => {
@@ -36,9 +38,45 @@ describe('buildMonitorSpecs', () => {
     // consumed by uptime-kuma's server-side URL parser, so it needs the identical treatment.
     const specs = buildMonitorSpecs({ postgresPassword: 'pg-secret', redisPassword: 'ab/cd@ef' });
     const redis = specs.find((s) => s.name.includes('redis'));
-    expect(redis?.databaseConnectionString).toBe('redis://:ab%2Fcd%40ef@redis:6379');
+    expect(redis?.databaseConnectionString).toBe('redis://:ab%2Fcd%40ef@warmhawk-core-engine-redis:6379');
     expect(() => new URL(redis!.databaseConnectionString!)).not.toThrow();
     expect(decodeURIComponent(new URL(redis!.databaseConnectionString!).password)).toBe('ab/cd@ef');
+  });
+
+  it('targets container names, never bare Compose service names (bug fix, 2026-09-06)', () => {
+    // Regression test for the alert-flapping bug: uptime-kuma is attached to the SHARED
+    // warmhawk_edge network, where a bare `nginx`/`api`/`postgres` alias can belong to another
+    // Compose project's container too. Docker DNS returns all of them round-robin, so a bare-name
+    // monitor health-checks a random stranger. Container names are unique per box.
+    const hosts = buildMonitorSpecs(ENV).map((s) =>
+      s.type === 'http' ? new URL(s.url!).hostname : new URL(s.databaseConnectionString!).hostname,
+    );
+    expect(hosts).toEqual([
+      'warmhawk-core-engine-nginx',
+      'warmhawk-core-engine-api',
+      'warmhawk-core-engine-n8n',
+      'warmhawk-core-engine-postgres',
+      'warmhawk-core-engine-redis',
+    ]);
+    for (const host of hosts) {
+      expect(host).toMatch(/^warmhawk-core-engine-/);
+    }
+  });
+
+  it('honours COMPOSE_PROJECT_NAME so two installs on one box stay distinct', () => {
+    // container_name is `${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-<service>`, so a second
+    // install under a different project name must be monitored at ITS own containers, not the
+    // first install's.
+    const specs = buildMonitorSpecs({ ...ENV, containerPrefix: 'wh-tenant-b' });
+    expect(new URL(specs[0].url!).hostname).toBe('wh-tenant-b-nginx');
+    expect(new URL(specs[3].databaseConnectionString!).hostname).toBe('wh-tenant-b-postgres');
+  });
+
+  it('falls back to the Compose default prefix when COMPOSE_PROJECT_NAME is unset or blank', () => {
+    for (const containerPrefix of [undefined, '', '   ']) {
+      const specs = buildMonitorSpecs({ ...ENV, containerPrefix });
+      expect(new URL(specs[0].url!).hostname).toBe('warmhawk-core-engine-nginx');
+    }
   });
 });
 
