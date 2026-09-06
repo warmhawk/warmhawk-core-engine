@@ -254,7 +254,18 @@ services:
     <<: *restart-policy
     volumes:
       - kuma_data:/app/data
-    networks: [warmhawk_internal]
+    # Bug fix (2026-09-06): `warmhawk_internal` alone left Kuma unable to resolve ANY external
+    # hostname, so every notification it tried to send died with `getaddrinfo ENOTFOUND` — logged
+    # only inside the container. The bundled monitoring therefore watched everything and could
+    # tell nobody, which is strictly worse than having no monitoring, because the dashboard still
+    # showed green. `internal: true` disables NAT for the network entirely — the same property
+    # that broke nginx's inbound path on 2026-08-25 (see the networks: block), here breaking the
+    # outbound one.
+    #
+    # `warmhawk_edge` is non-internal, which is the whole fix; it publishes no port for this
+    # service, so Kuma gains egress without gaining any inbound exposure. Kuma still reaches every
+    # monitored service by container name over `warmhawk_internal`.
+    networks: [warmhawk_internal, warmhawk_edge]
     deploy:
       resources:
         # Bug fix (release-e2e, 2026-08-28): 128M was too tight — Docker Compose v2 (confirmed on
