@@ -1,9 +1,12 @@
 /**
  * Domain-authentication + blocklist health checker — SPF/DKIM/DMARC checks, extended
  * with continuous blocklist/DNSBL monitoring (V11, new). Requires auth — this is the customer's
- * own management API for their sending domains, distinct from the unauthenticated
- * `GET /public/domain-check` route (publicDomainCheck.ts) that reuses this same DNS-check logic
- * against an arbitrary domain.
+ * own management API for their sending domains.
+ *
+ * Every route that reaches `lib/dnsChecks.ts` requires auth, and that is not incidental: DNS
+ * checks are outbound network calls, so an unauthenticated caller here would be spending the
+ * customer's own IP reputation against Spamhaus. If a route in this repo ever needs these checks
+ * without a session, that is the wrong repo.
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';

@@ -40,7 +40,6 @@ export const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024;
 // --- Rate limiting (Guardrails — every public-facing endpoint)
 export const RATE_LIMIT_WEBHOOK_INGEST = { max: 30, timeWindowMs: 60_000 };
 export const RATE_LIMIT_CSV_IMPORT = { max: 10, timeWindowMs: 60_000 };
-export const RATE_LIMIT_PUBLIC_DOMAIN_CHECK = { max: 20, timeWindowMs: 60_000 };
 export const RATE_LIMIT_LOGIN = { max: 10, timeWindowMs: 60_000 };
 
 // --- Bounce/complaint circuit breaker (Guardrails — Reputation protection)
