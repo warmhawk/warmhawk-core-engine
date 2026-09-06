@@ -173,7 +173,15 @@ async function main(): Promise<void> {
     }
 
     const existingNames = namesAlreadyPresent(monitorList);
-    const specs = buildMonitorSpecs({ postgresPassword, redisPassword });
+    // Monitors target `<COMPOSE_PROJECT_NAME>-<service>` container names rather than bare service
+    // names — see buildMonitorSpecs' own comment for why bare names are unsafe now that Kuma is
+    // attached to the shared `warmhawk_edge` network. Falls back to the Compose default when the
+    // var is unset, matching `${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}` in the compose file.
+    const specs = buildMonitorSpecs({
+      postgresPassword,
+      redisPassword,
+      containerPrefix: process.env.COMPOSE_PROJECT_NAME,
+    });
 
     let created = 0;
     let skipped = 0;

@@ -318,6 +318,11 @@ services:
       UPTIME_KUMA_ALERT_WEBHOOK_URL: ${UPTIME_KUMA_ALERT_WEBHOOK_URL:-}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       REDIS_PASSWORD: ${REDIS_PASSWORD}
+      # Monitors resolve their targets by `container_name` (every service above sets
+      # `<project>-<service>`), not by bare Compose service name — uptime-kuma is attached to the
+      # shared warmhawk_edge network, where a bare `nginx`/`api` alias can also belong to a
+      # different project's container. See uptimeKumaMonitors.ts's buildMonitorSpecs.
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}
     networks: [warmhawk_internal]
 
   nginx:
