@@ -105,8 +105,8 @@ log "Marker row written: ${MARKER_NOTE}"
 
 # --- 3. Run the real upgrade command, pinned to the exact commit already checked out here ------
 CURRENT_REF="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
-[ -n "$CURRENT_REF" ] || fail "git rev-parse HEAD failed — can't pin update.sh to a specific ref without silently drifting onto 'main' (its own default) instead of the commit actually under test."
-log "Running scripts/update.sh ${CURRENT_REF} (pinned — never update.sh's own 'main' default, so this test can't silently upgrade away from the commit it's supposed to be testing)..."
+[ -n "$CURRENT_REF" ] || fail "git rev-parse HEAD failed — can't pin update.sh to a specific ref without silently drifting onto 'master' (its own default) instead of the commit actually under test."
+log "Running scripts/update.sh ${CURRENT_REF} (pinned — never update.sh's own 'master' default, so this test can't silently upgrade away from the commit it's supposed to be testing)..."
 UPDATE_LOG="$(mktemp)"
 (
   cd "$REPO_ROOT"
@@ -117,6 +117,23 @@ cat "$UPDATE_LOG"
 grep -q "Running pending database migrations" "$UPDATE_LOG" || fail "update.sh's log never showed it ran migrations — see full log above."
 grep -q "Update complete" "$UPDATE_LOG" || fail "update.sh did not report completion — see full log above."
 log "Confirmed: update.sh ran migrations and reported completion."
+
+# An unresolvable ref must stop before anything is rebuilt. This used to print a warning and carry
+# on, so a customer whose upgrade never happened still saw "Update complete" and kept running the
+# old version believing it was patched.
+log "Checking that an unresolvable ref fails loudly instead of silently rebuilding the old version..."
+BOGUS_LOG="$(mktemp)"
+if ( cd "$REPO_ROOT" && ./scripts/update.sh no-such-ref-e2e-check ) > "$BOGUS_LOG" 2>&1; then
+  cat "$BOGUS_LOG" >&2
+  fail "update.sh exited 0 for a ref that does not exist — a failed upgrade must never report success."
+fi
+grep -q "Nothing was changed" "$BOGUS_LOG" \
+  || { cat "$BOGUS_LOG" >&2; fail "update.sh failed on a bad ref but never said the install was left untouched."; }
+if grep -q "Running pending database migrations" "$BOGUS_LOG"; then
+  cat "$BOGUS_LOG" >&2
+  fail "update.sh reached the migrate step despite an unresolvable ref — it must stop first."
+fi
+log "Confirmed: a bad ref stops the upgrade before any rebuild, and says so."
 
 # --- 4. Assert the upgrade cycle didn't lose data or leave the app unhealthy --------------------
 wait_for_health "after upgrade"
