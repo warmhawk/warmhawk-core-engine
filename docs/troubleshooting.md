@@ -96,7 +96,10 @@ See `docs/backup-and-restore.md`.
 | Symptom | Fix |
 |---|---|
 | Migration step fails | Nothing is torn down — previous version keeps running. Check `docker compose logs migrate`, fix, re-run `./scripts/update.sh` |
-| `git checkout` warning | You're on a modified working tree or offline — the script proceeds with what's on disk; commit/stash local changes or reconnect and re-run |
+| `git fetch failed` | The server can't reach GitHub. Nothing was changed and nothing was torn down — restore connectivity and re-run |
+| `Could not move to master — you have local changes` | Something edited tracked files in the checkout. Commit or stash them, then re-run. Nothing was changed |
+| `Could not check out '<ref>'` | You passed a version that doesn't exist. Valid refs are `master` (the default — latest release) or a release tag such as `v1.0.3` |
+| Want a specific version | `./scripts/update.sh v1.0.3` pins to that release instead of tracking the latest |
 
 ## Microsoft 365 mailbox connect
 
