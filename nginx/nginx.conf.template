@@ -25,6 +25,23 @@ server {
     listen 80;
     server_name ${WARMHAWK_DOMAIN};
 
+    # Bug fix: none of these were sent before, so every request reached the API carrying only
+    # nginx's own container address. `@fastify/rate-limit` keys on `request.ip`, which made every
+    # rate limit in the app one global bucket shared by all callers (see app.ts's `trustProxy`
+    # comment — that setting and these headers are two halves of one fix and neither works alone).
+    #
+    # $proxy_add_x_forwarded_for appends $remote_addr to any X-Forwarded-For the client sent. That
+    # a caller can therefore inject a prefix is expected and safe: app.ts trusts a fixed number of
+    # hops counted from this server backwards, so anything a client prepends is discarded.
+    #
+    # ⚠️ nginx does NOT merge proxy_set_header across levels — declaring even one inside a
+    # location REPLACES this whole set for that location. Any new location that sets its own
+    # headers must repeat these four (see /status/ below, which does).
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
     # ACME HTTP-01 challenge webroot — must stay reachable over plain HTTP even after TLS is live,
     # since certbot's renewal loop re-validates this same path.
     location /.well-known/acme-challenge/ {
@@ -95,9 +112,14 @@ server {
     # the same TLS-terminated domain without a second cert/subdomain.
     location /status/ {
         proxy_pass http://uptime-kuma:3001/;
-        proxy_set_header Host $host;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        # Repeats the server-level set above — declaring any proxy_set_header here replaces all of
+        # them for this location, so omitting these would send Kuma no client address at all.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        "upgrade";
     }
 }
 
@@ -109,6 +131,14 @@ server {
 #     ssl_certificate     /etc/letsencrypt/live/${WARMHAWK_DOMAIN}/fullchain.pem;
 #     ssl_certificate_key  /etc/letsencrypt/live/${WARMHAWK_DOMAIN}/privkey.pem;
 #     ssl_protocols TLSv1.2 TLSv1.3;
+#
+#     # Must mirror the HTTP block's set above. install.sh swaps this block in as soon as a cert
+#     # exists, so this — not the HTTP one — is what every real install actually serves; omitting
+#     # these here would quietly undo the client-IP fix the moment TLS came up.
+#     proxy_set_header Host              $host;
+#     proxy_set_header X-Real-IP         $remote_addr;
+#     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#     proxy_set_header X-Forwarded-Proto $scheme;
 #
 #     location /health {
 #         proxy_pass http://api:4600;
@@ -164,9 +194,13 @@ server {
 #
 #     location /status/ {
 #         proxy_pass http://uptime-kuma:3001/;
-#         proxy_set_header Host $host;
-#         proxy_set_header Upgrade $http_upgrade;
-#         proxy_set_header Connection "upgrade";
+#         # Repeats the server-level set — any proxy_set_header here replaces all of them.
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_set_header Upgrade           $http_upgrade;
+#         proxy_set_header Connection        "upgrade";
 #     }
 # }
 #
