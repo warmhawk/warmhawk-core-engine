@@ -73,8 +73,19 @@ volumes:
 x-restart-policy: &restart-policy
   restart: unless-stopped
 
+# Each service sets an explicit container_name so containers are `<project>-api`, not Compose's
+# default `<project>-api-1` (the `-1` is a replica index; nothing here runs more than one replica).
+#
+# Derived from COMPOSE_PROJECT_NAME, never hardcoded: container names are unique per Docker HOST,
+# so a fixed literal would make two installs on one host collide on every service. Keep the
+# fallback equal to this file's `name:` field — that field is the project name when the variable is
+# unset, and nothing enforces the pairing.
+#
+# `kuma-provision` is deliberately unnamed: it only runs via `docker compose run --rm`, where
+# Compose ignores container_name.
 services:
   postgres:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-postgres
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     <<: *restart-policy
     environment:
@@ -95,6 +106,7 @@ services:
         reservations: { cpus: '0.25', memory: 256M }
 
   redis:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-redis
     image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     <<: *restart-policy
     # Redis Durability (V12) — ops/redis.conf (AOF everysec, noeviction) mounted read-only;
@@ -123,6 +135,7 @@ services:
   # host (a resource-constrained 2vCPU/4GB box), not reproducible every run, but real: it broke
   # pipeline #90 outright. Never reproduced on a normal dev machine's spare capacity.
   migrate:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-migrate
     build: { context: .., dockerfile: docker/Dockerfile.api }
     image: docker-api:latest
     <<: *restart-policy
@@ -143,6 +156,7 @@ services:
     networks: [warmhawk_internal]
 
   api:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-api
     build: { context: .., dockerfile: docker/Dockerfile.api }
     image: docker-api:latest
     <<: *restart-policy
@@ -192,6 +206,7 @@ services:
         reservations: { cpus: '0.1', memory: 128M }
 
   worker:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-worker
     build: { context: .., dockerfile: docker/Dockerfile.worker }
     <<: *restart-policy
     environment:
@@ -217,6 +232,7 @@ services:
         reservations: { cpus: '0.1', memory: 64M }
 
   n8n:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-n8n
     image: docker.n8n.io/n8nio/n8n:1.62.1@sha256:49082daed743802dcdbb01c9a70b87d42acee1ecbca75867739dc858dacdbc2c
     <<: *restart-policy
     environment:
@@ -250,6 +266,7 @@ services:
         reservations: { cpus: '0.1', memory: 256M }
 
   uptime-kuma:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-uptime-kuma
     image: louislam/uptime-kuma:1@sha256:3d632903e6af34139a37f18055c4f1bfd9b7205ae1138f1e5e8940ddc1d176f9
     <<: *restart-policy
     volumes:
@@ -304,6 +321,7 @@ services:
     networks: [warmhawk_internal]
 
   nginx:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-nginx
     build: { context: ../nginx }
     <<: *restart-policy
     environment:
@@ -322,9 +340,10 @@ services:
     depends_on: [api]
     networks:
       warmhawk_internal: {}
-      # Alias, not container_name — this repo has no CONTAINER_PREFIX, and compose's own
-      # `<project>-nginx-1` naming varies by version, so a shared edge proxy needs a name
-      # that doesn't depend on either.
+      # Still an alias even though this service now sets container_name above: the two are
+      # independent knobs. EDGE_NGINX_ALIAS is what OTHER compose projects on a shared box resolve
+      # this container by, and it has to stay stable and separately settable even when two installs
+      # pick different project names.
       warmhawk_edge:
         aliases: ['${EDGE_NGINX_ALIAS:-warmhawk-core-engine-nginx}']
     deploy:
@@ -335,6 +354,7 @@ services:
   # Renewal loop only — the INITIAL `certbot certonly --webroot` run is driven by scripts/install.sh
   # (needs to run once, interactively-checkable, before nginx's 443 block is meaningful).
   certbot:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-certbot
     image: certbot/certbot:v2.11.0@sha256:ddf9e5d226a56e886986838fa0ebedc0237511c78664352e8d0f4346ee022cd8
     <<: *restart-policy
     entrypoint: /bin/sh
