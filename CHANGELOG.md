@@ -8,6 +8,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
 
 ## [Unreleased]
 
+### Fixed
+
+- **`warmhawk update` could report success without having updated anything.** It fetched the new
+  commits and then ran `git checkout <branch>` — which does nothing when you are already on that
+  branch — so the fetched version sat unused while the script rebuilt, re-migrated and printed
+  *"Update complete"* against the version you already had. A failed fetch or checkout was likewise
+  only a warning, so an offline server also reported success. Both now stop with an error that says
+  the install was left untouched, and the log names the versions: `Updating 007e861 -> af87f07`.
+- **`warmhawk update` defaulted to the development branch.** With no argument it tracked `main`,
+  the unreleased trunk. It now defaults to `master`, the released branch. Pass a tag
+  (`./scripts/update.sh v1.0.3`) to pin to an exact version.
+
+## [1.0.3] - 2026-09-06
+
 ### Removed
 
 - **`GET /v1/public/domain-check`** — deleted, along with its rate-limit constant. It was
