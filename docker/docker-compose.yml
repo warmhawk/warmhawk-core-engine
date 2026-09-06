@@ -73,20 +73,16 @@ volumes:
 x-restart-policy: &restart-policy
   restart: unless-stopped
 
-# Every service below sets an explicit `container_name` derived from COMPOSE_PROJECT_NAME, so a
-# container is called `warmhawk-core-engine-api` rather than Compose's default
-# `warmhawk-core-engine-api-1`. The trailing `-1` is Compose's replica index, and it reads as noise
-# on a package that never scales a service past one replica.
+# Each service sets an explicit container_name so containers are `<project>-api`, not Compose's
+# default `<project>-api-1` (the `-1` is a replica index; nothing here runs more than one replica).
 #
-# Deriving from COMPOSE_PROJECT_NAME rather than hardcoding a literal is the load-bearing part:
-# container names are unique per DOCKER HOST, not per project, so a hardcoded name would make a
-# second install on the same box collide on every service. scripts/install.sh already defaults
-# that variable to `warmhawk-core-engine` and persists it to .env/.env, which Compose reads
-# directly on every call in this repo (no `-p` flag anywhere) — so the fallback here matches the
-# installer's default and no existing install needs its .env touched.
+# Derived from COMPOSE_PROJECT_NAME, never hardcoded: container names are unique per Docker HOST,
+# so a fixed literal would make two installs on one host collide on every service. Keep the
+# fallback equal to this file's `name:` field — that field is the project name when the variable is
+# unset, and nothing enforces the pairing.
 #
-# `kuma-provision` is deliberately NOT named: it only ever runs via `docker compose run --rm`,
-# where Compose ignores container_name and warns about it.
+# `kuma-provision` is deliberately unnamed: it only runs via `docker compose run --rm`, where
+# Compose ignores container_name.
 services:
   postgres:
     container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-postgres
