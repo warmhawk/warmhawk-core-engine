@@ -175,19 +175,41 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
       },
     },
     async (request, reply) => {
-      const file = await request.file({ limits: { fileSize: MAX_CSV_FILE_BYTES } });
-      if (!file) {
-        return reply.code(422).send({ error: 'A CSV file field is required' });
+      // Bug fix (live-stack verification, 2026-09-04): this used to be `const file =
+      // await request.file(...)` followed by reading `file.fields.campaignId`. But
+      // `request.file()` resolves as soon as busboy emits its very first *file* part-event —
+      // it does not wait for the rest of the multipart stream to be parsed. The `.fields`
+      // object it hands back is the SAME object busboy keeps mutating as later parts arrive, so
+      // any field appearing AFTER the file part in the raw multipart body simply isn't there yet
+      // at the moment this code used to read it. The dashboard's import dialog builds its
+      // FormData as `formData.append("file", file); formData.append("campaignId", campaignId)`
+      // (see warmhawk-enterprise-operator's import-leads-dialog.tsx), which serializes the file
+      // part first — so every real browser-originated import hit this and got a false
+      // "campaignId field is required" 422, while an otherwise-identical curl request with
+      // `-F campaignId=... -F file=@...` (campaignId first) worked fine. Multipart part order
+      // isn't something a caller should have to get right, so this now drains the FULL stream via
+      // `request.parts()` — collecting the file and every field regardless of the order they
+      // arrived in — before deciding anything is missing.
+      let buffer: Buffer | undefined;
+      let campaignId: string | undefined;
+
+      for await (const part of request.parts({ limits: { fileSize: MAX_CSV_FILE_BYTES } })) {
+        if (part.type === 'file') {
+          if (buffer === undefined) {
+            buffer = await part.toBuffer();
+          }
+        } else if (part.fieldname === 'campaignId') {
+          campaignId = String(part.value);
+        }
       }
 
-      const campaignIdField = file.fields.campaignId;
-      const campaignId =
-        campaignIdField && 'value' in campaignIdField ? String(campaignIdField.value) : undefined;
+      if (buffer === undefined) {
+        return reply.code(422).send({ error: 'A CSV file field is required' });
+      }
       if (!campaignId) {
         return reply.code(422).send({ error: 'campaignId field is required' });
       }
 
-      const buffer = await file.toBuffer();
       if (buffer.byteLength > MAX_CSV_FILE_BYTES) {
         return reply
           .code(413)

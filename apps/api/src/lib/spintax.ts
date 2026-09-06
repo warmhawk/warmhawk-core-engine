@@ -28,7 +28,21 @@ export function renderSpintax(template: string, rng: () => number = Math.random)
   const maxIterations = template.length + 100;
   let iterations = 0;
 
-  const innermostGroupRegex = /\{([^{}]*)\}/;
+  // Bug fix (spintax/merge-field regex collision, 2026-09-04): a merge field like `{{firstName}}`
+  // is itself a balanced `{...}` pair one level in (`{firstName}`), which — with no way to tell it
+  // apart from a deliberate single-option spintax group like `{no pipe here}` (see the
+  // "round-trips" test below, which intentionally DOES resolve that case) — used to get matched
+  // and collapsed to bare "firstName" text, corrupting the merge field. The one structural
+  // difference: a merge field's inner brace is doubled on BOTH sides (`{` immediately before,
+  // `}` immediately after), whereas a real spintax group — even nested, e.g.
+  // `{Hi {John|Jane}|Hello there}` — is never doubled on both sides of the same pair at once. The
+  // lookaround below excludes exactly that doubled shape, leaving `{{...}}` untouched while every
+  // existing spintax case (including nesting and the single-option no-pipe case) still resolves
+  // exactly as before. Real per-lead sends never hit this collision anyway — see
+  // `apps/api/src/routes/internalAi.ts#renderFallbackTemplate`'s own comment on why it fills merge
+  // fields before calling this — but `listSpintaxGroups` below (the save-time content-quality
+  // count) runs on the raw, unfilled template, so it needs this same fix.
+  const innermostGroupRegex = /(?<!\{)\{([^{}]*)\}(?!\})/;
 
   while (innermostGroupRegex.test(result)) {
     if (++iterations > maxIterations) {
@@ -56,7 +70,11 @@ export function hasSpintax(template: string): boolean {
 export function listSpintaxGroups(template: string): string[][] {
   assertBalanced(template);
   const groups: string[][] = [];
-  const regex = /\{([^{}]*)\}/g;
+  // Same doubled-brace exclusion as renderSpintax's innermostGroupRegex above, so a template
+  // containing only merge fields (e.g. "Hi {{firstName}}") reports zero variation groups instead
+  // of one — this is the function `apps/api/src/routes/campaigns.ts`'s save-time
+  // `evaluateContentQuality` calls to compute `spintaxGroupCount`.
+  const regex = /(?<!\{)\{([^{}]*)\}(?!\})/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(template)) !== null) {
     groups.push(match[1].split('|'));

@@ -73,8 +73,19 @@ volumes:
 x-restart-policy: &restart-policy
   restart: unless-stopped
 
+# Each service sets an explicit container_name so containers are `<project>-api`, not Compose's
+# default `<project>-api-1` (the `-1` is a replica index; nothing here runs more than one replica).
+#
+# Derived from COMPOSE_PROJECT_NAME, never hardcoded: container names are unique per Docker HOST,
+# so a fixed literal would make two installs on one host collide on every service. Keep the
+# fallback equal to this file's `name:` field — that field is the project name when the variable is
+# unset, and nothing enforces the pairing.
+#
+# `kuma-provision` is deliberately unnamed: it only runs via `docker compose run --rm`, where
+# Compose ignores container_name.
 services:
   postgres:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-postgres
     image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     <<: *restart-policy
     environment:
@@ -95,6 +106,7 @@ services:
         reservations: { cpus: '0.25', memory: 256M }
 
   redis:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-redis
     image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
     <<: *restart-policy
     # Redis Durability (V12) — ops/redis.conf (AOF everysec, noeviction) mounted read-only;
@@ -123,6 +135,7 @@ services:
   # host (a resource-constrained 2vCPU/4GB box), not reproducible every run, but real: it broke
   # pipeline #90 outright. Never reproduced on a normal dev machine's spare capacity.
   migrate:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-migrate
     build: { context: .., dockerfile: docker/Dockerfile.api }
     image: docker-api:latest
     <<: *restart-policy
@@ -143,6 +156,7 @@ services:
     networks: [warmhawk_internal]
 
   api:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-api
     build: { context: .., dockerfile: docker/Dockerfile.api }
     image: docker-api:latest
     <<: *restart-policy
@@ -150,7 +164,14 @@ services:
       NODE_ENV: production
       PORT: '4600'
       DATABASE_URL: postgresql://warmhawk:${POSTGRES_PASSWORD}@postgres:5432/warmhawk
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      # Bug fix (2026-09-04): previously a pre-built `REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379`
+      # here — plain Compose variable substitution can't URL-encode, so a password containing `/`
+      # (openssl rand -base64's alphabet) produced a string that crash-looped this service on boot.
+      # The raw password is passed separately instead; apps/api/src/routes/queue.ts builds and
+      # percent-encodes the connection string itself (see that file's buildRedisUrl).
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       N8N_BASE_URL: http://n8n:5678
       JWT_SECRET: ${JWT_SECRET}
       MAILBOX_CREDENTIAL_KEY: ${MAILBOX_CREDENTIAL_KEY}
@@ -185,12 +206,17 @@ services:
         reservations: { cpus: '0.1', memory: 128M }
 
   worker:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-worker
     build: { context: .., dockerfile: docker/Dockerfile.worker }
     <<: *restart-policy
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://warmhawk:${POSTGRES_PASSWORD}@postgres:5432/warmhawk
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      # Bug fix (2026-09-04): see the `api` service's identical comment above — raw password
+      # passed separately; apps/worker/src/queue.ts builds and percent-encodes the URL itself.
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
       N8N_BASE_URL: http://n8n:5678
       OTEL_SERVICE_NAME: warmhawk-worker
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
@@ -206,6 +232,7 @@ services:
         reservations: { cpus: '0.1', memory: 64M }
 
   n8n:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-n8n
     image: docker.n8n.io/n8nio/n8n:1.62.1@sha256:49082daed743802dcdbb01c9a70b87d42acee1ecbca75867739dc858dacdbc2c
     <<: *restart-policy
     environment:
@@ -239,11 +266,23 @@ services:
         reservations: { cpus: '0.1', memory: 256M }
 
   uptime-kuma:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-uptime-kuma
     image: louislam/uptime-kuma:1@sha256:3d632903e6af34139a37f18055c4f1bfd9b7205ae1138f1e5e8940ddc1d176f9
     <<: *restart-policy
     volumes:
       - kuma_data:/app/data
-    networks: [warmhawk_internal]
+    # Bug fix (2026-09-06): `warmhawk_internal` alone left Kuma unable to resolve ANY external
+    # hostname, so every notification it tried to send died with `getaddrinfo ENOTFOUND` — logged
+    # only inside the container. The bundled monitoring therefore watched everything and could
+    # tell nobody, which is strictly worse than having no monitoring, because the dashboard still
+    # showed green. `internal: true` disables NAT for the network entirely — the same property
+    # that broke nginx's inbound path on 2026-08-25 (see the networks: block), here breaking the
+    # outbound one.
+    #
+    # `warmhawk_edge` is non-internal, which is the whole fix; it publishes no port for this
+    # service, so Kuma gains egress without gaining any inbound exposure. Kuma still reaches every
+    # monitored service by container name over `warmhawk_internal`.
+    networks: [warmhawk_internal, warmhawk_edge]
     deploy:
       resources:
         # Bug fix (release-e2e, 2026-08-28): 128M was too tight — Docker Compose v2 (confirmed on
@@ -282,6 +321,7 @@ services:
     networks: [warmhawk_internal]
 
   nginx:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-nginx
     build: { context: ../nginx }
     <<: *restart-policy
     environment:
@@ -300,9 +340,10 @@ services:
     depends_on: [api]
     networks:
       warmhawk_internal: {}
-      # Alias, not container_name — this repo has no CONTAINER_PREFIX, and compose's own
-      # `<project>-nginx-1` naming varies by version, so a shared edge proxy needs a name
-      # that doesn't depend on either.
+      # Still an alias even though this service now sets container_name above: the two are
+      # independent knobs. EDGE_NGINX_ALIAS is what OTHER compose projects on a shared box resolve
+      # this container by, and it has to stay stable and separately settable even when two installs
+      # pick different project names.
       warmhawk_edge:
         aliases: ['${EDGE_NGINX_ALIAS:-warmhawk-core-engine-nginx}']
     deploy:
@@ -313,6 +354,7 @@ services:
   # Renewal loop only — the INITIAL `certbot certonly --webroot` run is driven by scripts/install.sh
   # (needs to run once, interactively-checkable, before nginx's 443 block is meaningful).
   certbot:
+    container_name: ${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-certbot
     image: certbot/certbot:v2.11.0@sha256:ddf9e5d226a56e886986838fa0ebedc0237511c78664352e8d0f4346ee022cd8
     <<: *restart-policy
     entrypoint: /bin/sh

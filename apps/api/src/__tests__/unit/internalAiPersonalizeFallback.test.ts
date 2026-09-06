@@ -105,17 +105,18 @@ describe('renderFallbackTemplate', () => {
     expect(renderFallbackTemplate('Just checking in.', { firstName: 'Ada' })).toBe('Just checking in.');
   });
 
-  it('does not throw on an unmatched merge field (no such lead field) — falls through to spintax\'s own pre-existing single-option handling', () => {
+  it('does not throw on an unmatched merge field (no such lead field) — leaves it literal rather than mangling it', () => {
     // fillMergeFields correctly leaves `{{nickname}}` untouched when there's no matching lead
-    // field (see aiProviderClient.test.ts's own coverage of that). What happens next is a
-    // pre-existing, out-of-scope characteristic of spintax.ts, not something this fix introduces:
-    // renderSpintax's innermost-group regex treats ANY bare `{word}` — matched merge field or
-    // not — as a single-option (no-pipe) spintax group and strips its braces, so the inner
-    // `{nickname}` one level inside `{{nickname}}` collapses to the literal word "nickname". The
-    // important thing this test guards is that rendering never throws or drops the whole
-    // placeholder silently; it does not (and, per spintax.ts's own design, cannot without changes
-    // out of scope for this bug fix) preserve the original `{{nickname}}` braces verbatim.
+    // field (see aiProviderClient.test.ts's own coverage of that). spintax.ts's doubled-brace
+    // exclusion (added for the issues 4/5 merge-field/spintax collision fix — see its own header
+    // comment) means renderSpintax now recognizes `{{...}}` as merge-field shape and leaves it
+    // alone too, instead of the old accidental behavior of treating the inner `{nickname}` as a
+    // single-option spintax group and stripping it to the bare word "nickname". Literal
+    // `{{nickname}}` reaching the recipient is a visible, debuggable signal that the campaign
+    // references a field the lead doesn't have — standard mail-merge convention (unmatched tags
+    // stay visible rather than being silently corrupted into nonsense filler text) — and strictly
+    // better than silently sending "Hi nickname!" with no indication anything was wrong.
     const rendered = renderFallbackTemplate('Hi {{nickname}}!', { firstName: 'Ada' });
-    expect(rendered).toBe('Hi nickname!');
+    expect(rendered).toBe('Hi {{nickname}}!');
   });
 });

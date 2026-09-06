@@ -6,6 +6,46 @@ GitHub release tag — keep this file current on every release, not just as a co
 
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions follow semver.
 
+## [Unreleased]
+
+### Removed
+
+- **`GET /v1/public/domain-check`** — deleted, along with its rate-limit constant. It was
+  WarmHawk's own free marketing tool, and shipping it here put an unauthenticated,
+  recursive-DNS endpoint on every self-hosted install: a stranger abusing your server got **your**
+  IP throttled by Spamhaus, silently degrading the domain monitoring you run this engine for. It
+  now runs as a service WarmHawk operates. **No action needed** — the route required no auth and
+  stored nothing, so nothing of yours depended on it.
+- **Barracuda, SORBS and Spamhaus ZEN blocklist sources.** `dnsbl.sorbs.net` has been retired and
+  answered NXDOMAIN for every query, which the code read as *not listed* — a permanently green
+  badge that had never checked anything. The other two are IP-based zones that were being queried
+  against the domain's **A record**, i.e. its website (usually a CDN or shared host), not the
+  address its mail leaves from. Blocklist monitoring is now **Spamhaus DBL, domain-level**.
+
+### Fixed
+
+- **Blocklist checks reported every domain as listed when queried through a shared resolver.**
+  DNSBL zones answer `127.255.255.252/254/255` to mean *"this query was refused"* — malformed,
+  sent via a public resolver, or rate-limited. Those were read as listings. On any host whose
+  resolver Spamhaus refuses (most shared and cloud resolvers, including several large providers'),
+  **every domain you monitored was flagged blocklisted**. They now report `PENDING`.
+- **A domain with no A record was reported as clean** by three of the four blocklist sources
+  rather than unchecked. Removed with the A-record path.
+- **A single DNS timeout failed an entire domain refresh.** Blocklist sources are now settled
+  independently; one unreachable zone reports `PENDING` for itself alone.
+- **DKIM reported `FAIL` when none of the nine guessed selectors resolved.** Selectors cannot be
+  enumerated from DNS, so a miss means *we did not find one*, not *this domain has no DKIM*; it
+  now reports `PENDING`. An explicit selector you supply still `FAIL`s when it does not resolve.
+  The nine candidates are also queried in parallel rather than serially — previously up to nine
+  sequential round trips per domain.
+- **SPF and DMARC reported `FAIL` on resolver errors.** A SERVFAIL or timeout is not a missing
+  record; both now report `PENDING`.
+
+> **Note on `PENDING`.** It is not a new value — `DnsRecordStatus` already defined it and it is
+> already the column default, so **no migration is required**. It simply had no way of being
+> returned. Badges that previously showed a confident PASS or FAIL may now show *pending* where
+> the check genuinely could not complete.
+
 ## [1.0.0] - 2026-09-01 — Initial public release
 
 ### Added

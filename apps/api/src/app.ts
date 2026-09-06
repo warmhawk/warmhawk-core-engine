@@ -25,7 +25,6 @@ import { internalDomainsRoutes } from './routes/internalDomains';
 import { internalSeedPlacementRoutes } from './routes/internalSeedPlacement';
 import { internalRepliesRoutes } from './routes/internalReplies';
 import { repliesRoutes } from './routes/replies';
-import { publicDomainCheckRoutes } from './routes/publicDomainCheck';
 import { authRoutes } from './routes/auth';
 import { instanceSettingsRoutes } from './routes/instanceSettings';
 import { campaignsRoutes } from './routes/campaigns';
@@ -33,9 +32,60 @@ import { mailboxesRoutes } from './routes/mailboxes';
 import { queueRoutes } from './routes/queue';
 import { seedAccountsRoutes } from './routes/seedAccounts';
 
+/**
+ * How many reverse proxies sit between this app and the caller, from `TRUST_PROXY_HOPS`.
+ *
+ * Defaults to 1: the bundled nginx (docker-compose.yml) is the only thing that ever reaches
+ * `api`, which publishes no host port. A customer fronting that nginx with a CDN or a load
+ * balancer adds one hop each and must say so here.
+ *
+ * A bad value is refused at boot rather than coerced. `0` would silently reinstate the
+ * single-shared-bucket bug this exists to fix, and `NaN` is rejected deep inside proxy-addr with
+ * an error that doesn't name the environment variable that caused it.
+ */
+function trustedProxyHops(): number {
+  const raw = process.env.TRUST_PROXY_HOPS;
+  if (raw === undefined || raw.trim() === '') return 1;
+  const hops = Number(raw);
+  if (!Number.isInteger(hops) || hops < 0) {
+    throw new Error(`TRUST_PROXY_HOPS must be a non-negative integer, got: ${JSON.stringify(raw)}`);
+  }
+  return hops;
+}
+
 export async function createApp(): Promise<FastifyInstance> {
+  // Read once, before Fastify is constructed, so a bad value fails the call to createApp() rather
+  // than the first request that happens to reach the predicate below.
+  const trustedHops = trustedProxyHops();
+
   const app = Fastify({
     logger: process.env.NODE_ENV === 'test' ? false : { level: process.env.LOG_LEVEL || 'info' },
+    // Bug fix: without this, every rate limit in the app shared ONE bucket.
+    // `@fastify/rate-limit` keys on `request.ip`, and behind the bundled nginx that is always
+    // nginx's own container address — the same value for every caller on earth. So the 100/min
+    // global default below, and every per-route limit the Guardrails section names (webhook
+    // ingest, CSV import, license activation, login), were a single global allowance that one
+    // noisy caller could exhaust for everybody. That is the exact opposite of what a per-caller
+    // limit is for, and it fails silently: the limiter looks configured and does fire, just
+    // against the wrong subject.
+    //
+    // 🔴 The value is a HOP COUNT, deliberately not `true`. `trustProxy: true` trusts the whole
+    // X-Forwarded-For chain, so any caller could prepend a forged address and mint itself a
+    // fresh bucket on every request — swapping a shared-bucket bug for a limit-evasion bug. A
+    // number means "trust exactly N proxies nearest this server" and discards anything further
+    // out, so a forged prefix is ignored.
+    //
+    // This only works because nginx.conf.template actually SETS X-Forwarded-For. It did not
+    // until this same fix; with no header to read, `trustProxy` alone changes nothing. The two
+    // halves have to ship together.
+    //
+    // Spelled as a predicate rather than the plain number `trustedProxyHops()`, because Fastify's
+    // typings for this version accept only `string | boolean | string[] | TrustProxyFunction` —
+    // the numeric form works at runtime (proxy-addr supports it) but does not typecheck. This is
+    // byte-for-byte what proxy-addr compiles a number into: it walks the address chain outward
+    // from the socket (hop 0) and stops at the first hop it is not told to trust, so the returned
+    // address is the last one a trusted proxy appended.
+    trustProxy: (_address: string, hop: number) => hop < trustedHops,
   });
 
   // Security headers (Phase 1 hardening).
@@ -113,7 +163,13 @@ export async function createApp(): Promise<FastifyInstance> {
       // issuance now lives solely on WarmHawk's billing/marketing site, the one piece of billing
       // infra WarmHawk operates centrally; the licensed dashboard is the sole license VERIFIER).
       // Tier 0 (this engine) carries no license gate at all, per the spec.
-      await v1.register(publicDomainCheckRoutes, { prefix: '/public' });
+      //
+      // NOTE: there is deliberately no `/v1/public/*` group here. A `GET /public/domain-check`
+      // route once lived in this repo — WarmHawk's own free marketing tool, shipped into every
+      // self-hosted install. That put an unauthenticated, recursive-DNS endpoint on customers'
+      // servers, where a stranger abusing it got the CUSTOMER's IP throttled by Spamhaus and
+      // silently broke the domain monitoring they actually pay for. It now runs as a separate
+      // service that WarmHawk operates. Nothing unauthenticated belongs under /v1.
     },
     { prefix: '/v1' },
   );
