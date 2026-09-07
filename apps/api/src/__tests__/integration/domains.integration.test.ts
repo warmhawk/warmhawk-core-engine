@@ -135,4 +135,43 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
     const response = await app.inject({ method: 'GET', url: '/v1/domains' });
     expect(response.statusCode).toBe(401);
   });
+
+  it('deletes a domain with no mailboxes, and 404s an unknown id', async () => {
+    const domain = await prisma.domain.create({ data: { domainName: `domains-delete-test-${Date.now()}.example.com` } });
+
+    const deleted = await app.inject({
+      method: 'DELETE',
+      url: `/v1/domains/${domain.id}`,
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(deleted.statusCode).toBe(204);
+    expect(await prisma.domain.findUnique({ where: { id: domain.id } })).toBeNull();
+
+    const notFound = await app.inject({
+      method: 'DELETE',
+      url: '/v1/domains/does-not-exist',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(notFound.statusCode).toBe(404);
+  });
+
+  it('refuses to delete a domain that still has mailboxes attached', async () => {
+    const domain = await prisma.domain.create({ data: { domainName: `domains-delete-guard-test-${Date.now()}.example.com` } });
+    createdDomainIds.push(domain.id);
+    await prisma.mailbox.create({ data: { email: `guard-${Date.now()}@example.com`, domainId: domain.id } });
+
+    const response = await app.inject({
+      method: 'DELETE',
+      url: `/v1/domains/${domain.id}`,
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().error).toMatch(/mailbox/i);
+    expect(await prisma.domain.findUnique({ where: { id: domain.id } })).not.toBeNull();
+  });
+
+  it('requires authentication for delete', async () => {
+    const response = await app.inject({ method: 'DELETE', url: '/v1/domains/does-not-matter' });
+    expect(response.statusCode).toBe(401);
+  });
 });
