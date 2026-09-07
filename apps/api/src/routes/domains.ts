@@ -61,6 +61,31 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /**
+   * Domain deletion — was deliberately absent (see the dashboard's domain-row.tsx comment history)
+   * until the dashboard had a confirmation flow worth pointing it at. Mailbox.domain is
+   * `onDelete: Cascade` in the schema, so a bare delete would silently take every mailbox on the
+   * domain (and their send history) with it — guarded here with a 409 instead, same shape as the
+   * other guarded deletes in this codebase (e.g. prod-promote-lock's ownership check): refuse
+   * rather than cascade a customer's mailboxes out from under them.
+   */
+  app.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
+    const domain = await prisma.domain.findUnique({
+      where: { id: request.params.id },
+      include: { _count: { select: { mailboxes: true } } },
+    });
+    if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+
+    if (domain._count.mailboxes > 0) {
+      return reply.code(409).send({
+        error: `Can't delete ${domain.domainName} — it still has ${domain._count.mailboxes} mailbox${domain._count.mailboxes === 1 ? '' : 'es'} attached. Remove them first.`,
+      });
+    }
+
+    await prisma.domain.delete({ where: { id: domain.id } });
+    return reply.code(204).send();
+  });
+
   /** `POST /v1/domains/:domain/check` (spec) — unified SPF/DKIM/DMARC + blocklist check, keyed
    *  by the domain NAME (not the internal id, unlike this file's other routes) since that's the
    *  shape the spec names and the shape a customer thinks in. Replaces what were previously two
