@@ -72,6 +72,29 @@
         "jsonBody": "={{ { \"domainName\": $json.domainName } }}",
         "options": {}
       }
+    },
+    {
+      "id": "b7-notify-changes",
+      "name": "Notify Domain Changes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 160],
+      "notes": "Item 5, Tier-2-only alert routing — fires after every blocklist recheck so a domain whose SPF/DKIM/DMARC/blocklist status changed gets reported via `postDomainChangeAlert` (inert no-op on any install that hasn't set TIER2_ALERT_WEBHOOK_URL). `Check Blocklist`'s response body is the updated Domain row, so `$json.id` is that domain's id.",
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/domains/notify-changes",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"domainId\": $json.id } }}",
+        "options": {}
+      }
     }
   ],
   "connections": {
@@ -84,7 +107,8 @@
         [{ "node": "Check Blocklist", "type": "main", "index": 0 }]
       ]
     },
-    "Check Blocklist": { "main": [[{ "node": "Loop Domains", "type": "main", "index": 0 }]] }
+    "Check Blocklist": { "main": [[{ "node": "Notify Domain Changes", "type": "main", "index": 0 }]] },
+    "Notify Domain Changes": { "main": [[{ "node": "Loop Domains", "type": "main", "index": 0 }]] }
   },
   "settings": { "executionOrder": "v1" },
   "pinData": {}
