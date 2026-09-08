@@ -215,6 +215,41 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
     20_000,
   );
 
+  it('returns persisted LookalikeCandidate rows for a domain (Item 6) and requires auth', async () => {
+    const domainName = `domains-lookalikes-test-${Date.now()}.example.com`;
+    const domain = await prisma.domain.create({ data: { domainName } });
+    createdDomainIds.push(domain.id);
+    await prisma.lookalikeCandidate.create({
+      data: { domainId: domain.id, candidateDomain: `exmaple-${Date.now()}.com` },
+    });
+
+    const unauthed = await app.inject({
+      method: 'GET',
+      url: `/v1/domains/${domainName}/lookalikes`,
+    });
+    expect(unauthed.statusCode).toBe(401);
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v1/domains/${domainName}/lookalikes`,
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.domainName).toBe(domainName);
+    expect(json.lookalikes).toHaveLength(1);
+    expect(json.lookalikes[0]).toEqual(
+      expect.objectContaining({ candidateDomain: expect.any(String), registered: false }),
+    );
+
+    const notFound = await app.inject({
+      method: 'GET',
+      url: `/v1/domains/does-not-exist-${Date.now()}.example.com/lookalikes`,
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(notFound.statusCode).toBe(404);
+  });
+
   it('requires authentication', async () => {
     const response = await app.inject({ method: 'GET', url: '/v1/domains' });
     expect(response.statusCode).toBe(401);

@@ -12,18 +12,30 @@
  * `DomainCheckHistory` rows this file's `/check-blocklist` route (and domains.ts's
  * `/:domain/check`) write, and fires `lib/alertWebhook.ts#postDomainChangeAlert` for any field
  * that changed. See that route's own doc comment for the history-vs-history diffing rationale.
+ *
+ * Also holds `POST /scan-lookalikes` (Item 6, Tier-2-only lookalike/typosquat domain monitoring —
+ * see `LookalikeCandidate` in schema.prisma for the full feature). Tier-agnostic here by this
+ * repo's own convention (no tier concept lives in core-engine — see app.ts / domains.ts's
+ * check-history route comment); the sibling operator repo is responsible for gating who's allowed
+ * to trigger a scan.
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { checkBlocklists } from '../lib/dnsChecks';
 import { postDomainChangeAlert } from '../lib/alertWebhook';
+import { generateCandidates } from '../lib/lookalikeCandidates';
+import { checkRdapRegistration } from '../lib/rdap';
 
 interface CheckBlocklistBody {
   domainName?: string;
 }
 
 interface NotifyChangesBody {
+  domainId?: string;
+}
+
+interface ScanLookalikesBody {
   domainId?: string;
 }
 
@@ -39,9 +51,14 @@ function stringifyFieldValue(value: unknown): string {
 export async function internalDomainsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireCallbackSecret);
 
+  // `id` added alongside `domainName` (Item 6) so `n8n/workflows/lookalike-scan.json` can chain
+  // straight into `POST /scan-lookalikes` (which is keyed by domainId, not domainName — see that
+  // route below) without an extra side-effecting call just to resolve one from the other. Purely
+  // additive: `blocklist-poll.json`'s existing "Get Active Domains" node only ever reads
+  // `domainName` off each item, so this doesn't change that workflow's behavior.
   app.get('/active', async () => {
     const domains = await prisma.domain.findMany({
-      select: { domainName: true },
+      select: { id: true, domainName: true },
       orderBy: { domainName: 'asc' },
     });
     return { domains };
@@ -137,5 +154,97 @@ export async function internalDomainsRoutes(app: FastifyInstance): Promise<void>
     }
 
     return reply.send({ domainId, notified });
+  });
+
+  /**
+   * `POST /internal/domains/scan-lookalikes` (Item 6) — driven daily by
+   * `n8n/workflows/lookalike-scan.json`.
+   *
+   * First run for a domain: no `LookalikeCandidate` rows exist yet, so this generates the full
+   * candidate list via `generateCandidates()` and bulk-inserts it (`registered: false`,
+   * `firstSeenAt`/`lastCheckedAt` defaulting to now via the schema). `generateCandidates()` is
+   * pure/deterministic — regenerating it on every scan would just recreate the same rows (and,
+   * absent the `@@unique([domainId, candidateDomain])` guard, duplicate them) — so the candidate
+   * list is generated exactly once, here, and every later scan only re-checks the rows already on
+   * file.
+   *
+   * Every scan (first run and every one after): for each candidate NOT already `registered: true`,
+   * `checkRdapRegistration()` decides what happens next:
+   *   - `"registered"` — a NEW registration (this row was not registered as of the last check).
+   *     Flip `registered: true`, bump `lastCheckedAt`, and fire `postDomainChangeAlert` — this is
+   *     the actionable signal the whole feature exists for.
+   *   - `"unregistered"` — still unregistered. Bump `lastCheckedAt` only.
+   *   - `"unknown"` — RDAP gave no conclusive answer (network error, timeout, no RDAP server for
+   *     that TLD, etc.). Bump `lastCheckedAt` only — do NOT flip `registered` and do NOT alert. An
+   *     inconclusive check is not new information, and treating it as "still unregistered" would
+   *     risk exactly the false "safe" reading `lib/rdap.ts`'s own doc comment warns against.
+   *
+   * A candidate already `registered: true` from a prior scan is skipped entirely — RDAP is not
+   * even queried for it. Per the doc: a candidate that's been registered for years and never used
+   * offensively is not new information; only the unregistered -> registered transition matters.
+   */
+  app.post<{ Body: ScanLookalikesBody }>('/scan-lookalikes', async (request, reply) => {
+    const domainId = request.body?.domainId?.trim();
+    if (!domainId) {
+      return reply.code(422).send({ error: 'domainId is required' });
+    }
+    const domain = await prisma.domain.findUnique({ where: { id: domainId } });
+    if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+
+    const existingCount = await prisma.lookalikeCandidate.count({ where: { domainId } });
+    if (existingCount === 0) {
+      const generated = generateCandidates(domain.domainName);
+      if (generated.length > 0) {
+        await prisma.lookalikeCandidate.createMany({
+          data: generated.map((candidateDomain) => ({ domainId, candidateDomain })),
+          skipDuplicates: true,
+        });
+      }
+    }
+
+    const totalCandidateCount = await prisma.lookalikeCandidate.count({ where: { domainId } });
+    const candidates = await prisma.lookalikeCandidate.findMany({
+      where: { domainId, registered: false },
+    });
+
+    let checked = 0;
+    let newlyRegistered = 0;
+    for (const candidate of candidates) {
+      const result = await checkRdapRegistration(candidate.candidateDomain);
+      checked += 1;
+
+      if (result === 'registered') {
+        await prisma.lookalikeCandidate.update({
+          where: { id: candidate.id },
+          data: { registered: true, lastCheckedAt: new Date() },
+        });
+        await postDomainChangeAlert({
+          domain: domain.domainName,
+          field: 'lookalike_registered',
+          before: 'unregistered',
+          after: candidate.candidateDomain,
+        });
+        newlyRegistered += 1;
+      } else if (result === 'unregistered') {
+        await prisma.lookalikeCandidate.update({
+          where: { id: candidate.id },
+          data: { lastCheckedAt: new Date() },
+        });
+      } else {
+        // "unknown" — inconclusive RDAP check. Bump lastCheckedAt only; never flip `registered`
+        // and never alert on a non-answer.
+        await prisma.lookalikeCandidate.update({
+          where: { id: candidate.id },
+          data: { lastCheckedAt: new Date() },
+        });
+      }
+    }
+
+    return reply.send({
+      domainId,
+      candidateCount: totalCandidateCount,
+      checked,
+      newlyRegistered,
+    });
   });
 }

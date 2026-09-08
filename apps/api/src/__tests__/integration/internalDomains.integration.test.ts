@@ -35,7 +35,7 @@ describeIntegration('/internal/domains routes (integration, real Postgres)', () 
     await prisma.$disconnect();
   });
 
-  it('lists active domain names', async () => {
+  it('lists active domain names (with ids, for Item 6\'s lookalike-scan.json chaining)', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/internal/domains/active',
@@ -43,7 +43,7 @@ describeIntegration('/internal/domains routes (integration, real Postgres)', () 
     });
     expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json.domains).toContainEqual({ domainName });
+    expect(json.domains).toContainEqual({ id: domainId, domainName });
   });
 
   it('rejects a request with no callback secret', async () => {

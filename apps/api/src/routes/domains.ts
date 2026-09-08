@@ -169,6 +169,31 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /** `GET /v1/domains/:domain/lookalikes` (Item 6) — persisted `LookalikeCandidate` rows for a
+   *  domain, as generated + last checked by `POST /internal/domains/scan-lookalikes`. Keyed by
+   *  domain NAME, matching `POST /:domain/check` and `GET /:domain/check-history` above.
+   *  Intentionally not tier-gated here (see this file's `check-history` route comment, and
+   *  `LookalikeCandidate`'s doc comment in schema.prisma) — an operator-side repo is responsible
+   *  for gating who can call this. */
+  app.get<{ Params: { domain: string } }>('/:domain/lookalikes', async (request, reply) => {
+    const domainName = request.params.domain.trim().toLowerCase();
+    const domain = await prisma.domain.findUnique({ where: { domainName } });
+    if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+
+    const lookalikes = await prisma.lookalikeCandidate.findMany({
+      where: { domainId: domain.id },
+      select: {
+        id: true,
+        candidateDomain: true,
+        registered: true,
+        firstSeenAt: true,
+        lastCheckedAt: true,
+      },
+      orderBy: { candidateDomain: 'asc' },
+    });
+    return reply.send({ domainId: domain.id, domainName: domain.domainName, lookalikes });
+  });
+
   /**
    * Seed-Inbox Placement Test (Guardrails, V12, option (c)) — aggregated placement-sample results
    * for this domain's own sending mailboxes, surfaced on the domain health dashboard alongside
