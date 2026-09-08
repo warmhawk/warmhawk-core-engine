@@ -30,6 +30,19 @@ interface RdapBootstrapDocument {
   services?: Array<[tlds: string[], urls: string[]]>;
 }
 
+// A lookalike scan fans this out over dozens of candidates in one batch (see
+// `POST /internal/domains/scan-lookalikes`) — one slow-to-not-respond RDAP server for a single
+// candidate must not be able to stall the whole batch. 12s per request, same order of magnitude as
+// `aiProviders/claude.ts`'s VALIDATE_TIMEOUT_MS, applied to both the IANA bootstrap fetch and the
+// per-candidate RDAP query.
+const RDAP_TIMEOUT_MS = 12_000;
+
+function withTimeout(ms: number): { signal: AbortSignal; clear: () => void } {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
+}
+
 let bootstrapCache: Map<string, string> | null = null;
 
 function tldOf(domain: string): string {
@@ -64,8 +77,9 @@ function parseBootstrap(doc: unknown): Map<string, string> {
 async function getBootstrap(fetchImpl: typeof fetch): Promise<Map<string, string> | null> {
   if (bootstrapCache) return bootstrapCache;
 
+  const { signal, clear } = withTimeout(RDAP_TIMEOUT_MS);
   try {
-    const response = await fetchImpl('https://data.iana.org/rdap/dns.json');
+    const response = await fetchImpl('https://data.iana.org/rdap/dns.json', { signal });
     if (!response.ok) return null;
     const doc = await response.json();
     const parsed = parseBootstrap(doc);
@@ -73,6 +87,8 @@ async function getBootstrap(fetchImpl: typeof fetch): Promise<Map<string, string
     return parsed;
   } catch {
     return null;
+  } finally {
+    clear();
   }
 }
 
@@ -99,12 +115,18 @@ export async function checkRdapRegistration(
   const rdapServer = bootstrap?.get(tld);
   if (!rdapServer) return 'unknown';
 
+  const { signal, clear } = withTimeout(RDAP_TIMEOUT_MS);
   try {
-    const response = await fetchImpl(`${rdapServer}/domain/${candidateDomain.trim().toLowerCase()}`);
+    const response = await fetchImpl(
+      `${rdapServer}/domain/${candidateDomain.trim().toLowerCase()}`,
+      { signal },
+    );
     if (response.status === 404) return 'unregistered';
     if (response.status === 200) return 'registered';
     return 'unknown';
   } catch {
     return 'unknown';
+  } finally {
+    clear();
   }
 }
