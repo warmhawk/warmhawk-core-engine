@@ -168,9 +168,54 @@ model Domain {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  mailboxes Mailbox[]
+  mailboxes           Mailbox[]
+  checkHistory        DomainCheckHistory[]
+  lookalikeCandidates LookalikeCandidate[]
 
   @@map("domains")
+}
+
+/// New, Item 2 (diff-level change history for domain DNS checks) — a snapshot row written on
+/// every `POST /v1/domains/:domain/check` and every `POST /internal/domains/check-blocklist`,
+/// holding the values that were about to be overwritten (i.e. the state BEFORE that check ran),
+/// so a caller can diff "what changed this check" instead of only ever seeing the latest values.
+/// A later, separate piece of work (alert webhooks) reads this table too — not built here.
+model DomainCheckHistory {
+  id              String          @id @default(cuid())
+  domainId        String
+  domain          Domain          @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  spfStatus       DnsRecordStatus
+  dkimStatus      DnsRecordStatus
+  dmarcStatus     DnsRecordStatus
+  blocklistStatus Json?
+  checkedAt       DateTime        @default(now())
+
+  @@index([domainId, checkedAt])
+  @@map("domain_check_history")
+}
+
+/// New, Item 6 (lookalike/typosquat domain monitoring, Tier-2-only — gating happens one hop up in
+/// the sibling operator repo, per this engine's tier-agnostic-by-design convention; see
+/// `DomainCheckHistory`'s own doc comment above for the same pattern). One row per generated
+/// typosquat candidate for a given domain, persisted once on first scan (`generateCandidates()` is
+/// pure/deterministic and re-running it would just recreate the same list, so candidates are
+/// generated once and re-checked on every subsequent scan, not regenerated) and re-checked via
+/// RDAP (`lib/rdap.ts`) on a daily schedule (`n8n/workflows/lookalike-scan.json`). `registered`
+/// flips true (and fires `postDomainChangeAlert`) only on the transition from unregistered to
+/// registered — a candidate registered for years and never used offensively is not new
+/// information, so an already-`registered: true` row is skipped on later scans (RDAP not even
+/// re-queried for it).
+model LookalikeCandidate {
+  id              String   @id @default(cuid())
+  domainId        String
+  domain          Domain   @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  candidateDomain String
+  registered      Boolean  @default(false)
+  firstSeenAt     DateTime @default(now())
+  lastCheckedAt   DateTime @default(now())
+
+  @@unique([domainId, candidateDomain])
+  @@map("lookalike_candidates")
 }
 
 model Mailbox {

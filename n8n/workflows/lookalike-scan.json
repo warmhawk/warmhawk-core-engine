@@ -1,22 +1,24 @@
 {
-  "name": "WarmHawk Blocklist Poll",
+  "name": "WarmHawk Lookalike Scan",
   "nodes": [
     {
-      "id": "b1-schedule",
+      "id": "l1-schedule",
       "name": "Schedule Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
       "position": [-800, 0],
+      "notes": "Daily, not hourly like blocklist-poll — RDAP servers rate-limit harder than DNS resolution does, and lookalike registrations don't appear fast enough for hourly polling to add value.",
       "parameters": {
-        "rule": { "interval": [{ "field": "hours", "hoursInterval": 1 }] }
+        "rule": { "interval": [{ "field": "days", "daysInterval": 1 }] }
       }
     },
     {
-      "id": "b2-active-domains",
+      "id": "l2-active-domains",
       "name": "Get Active Domains",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [-560, 0],
+      "notes": "Same route blocklist-poll.json uses, now also returning `id` alongside `domainName` (Item 6) so this workflow can chain straight into `scan-lookalikes`, which is keyed by domainId.",
       "parameters": {
         "method": "GET",
         "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/domains/active",
@@ -28,7 +30,7 @@
       }
     },
     {
-      "id": "b3-split-domains",
+      "id": "l3-split-domains",
       "name": "Split Out Domains",
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
@@ -36,7 +38,7 @@
       "parameters": { "fieldToSplitOut": "domains" }
     },
     {
-      "id": "b4-loop-domains",
+      "id": "l4-loop-domains",
       "name": "Loop Domains",
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
@@ -44,45 +46,23 @@
       "parameters": { "batchSize": 1, "options": {} }
     },
     {
-      "id": "b5-poll-round-complete",
-      "name": "Blocklist Poll Round Complete",
+      "id": "l5-scan-round-complete",
+      "name": "Lookalike Scan Round Complete",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
       "position": [160, -160],
       "parameters": {}
     },
     {
-      "id": "b6-check-blocklist",
-      "name": "Check Blocklist",
+      "id": "l6-scan-lookalikes",
+      "name": "Scan Lookalikes",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [160, 160],
+      "notes": "Item 6 — POST /internal/domains/scan-lookalikes. First run for a domain generates + persists its candidate list; every run re-checks not-yet-registered candidates via RDAP and fires postDomainChangeAlert (Tier-2-only, inert no-op on any install that hasn't set TIER2_ALERT_WEBHOOK_URL) on any newly-registered one. domainId comes straight off `Get Active Domains`' own response ($json.id), not a separate lookup call.",
       "parameters": {
         "method": "POST",
-        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/domains/check-blocklist",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" },
-            { "name": "content-type", "value": "application/json" }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { \"domainName\": $json.domainName } }}",
-        "options": {}
-      }
-    },
-    {
-      "id": "b7-notify-changes",
-      "name": "Notify Domain Changes",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [400, 160],
-      "notes": "Item 5, Tier-2-only alert routing — fires after every blocklist recheck so a domain whose SPF/DKIM/DMARC/blocklist status changed gets reported via `postDomainChangeAlert` (inert no-op on any install that hasn't set TIER2_ALERT_WEBHOOK_URL). `Check Blocklist`'s response body is the updated Domain row, so `$json.id` is that domain's id.",
-      "parameters": {
-        "method": "POST",
-        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/domains/notify-changes",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/domains/scan-lookalikes",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -103,12 +83,11 @@
     "Split Out Domains": { "main": [[{ "node": "Loop Domains", "type": "main", "index": 0 }]] },
     "Loop Domains": {
       "main": [
-        [{ "node": "Blocklist Poll Round Complete", "type": "main", "index": 0 }],
-        [{ "node": "Check Blocklist", "type": "main", "index": 0 }]
+        [{ "node": "Lookalike Scan Round Complete", "type": "main", "index": 0 }],
+        [{ "node": "Scan Lookalikes", "type": "main", "index": 0 }]
       ]
     },
-    "Check Blocklist": { "main": [[{ "node": "Notify Domain Changes", "type": "main", "index": 0 }]] },
-    "Notify Domain Changes": { "main": [[{ "node": "Loop Domains", "type": "main", "index": 0 }]] }
+    "Scan Lookalikes": { "main": [[{ "node": "Loop Domains", "type": "main", "index": 0 }]] }
   },
   "settings": { "executionOrder": "v1" },
   "pinData": {}

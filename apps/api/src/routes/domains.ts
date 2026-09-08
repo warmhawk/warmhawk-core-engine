@@ -22,6 +22,13 @@ interface CheckDnsQuery {
   selector?: string;
 }
 
+interface CheckHistoryQuery {
+  limit?: string;
+}
+
+const DEFAULT_CHECK_HISTORY_LIMIT = 10;
+const MAX_CHECK_HISTORY_LIMIT = 100;
+
 export async function domainsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
@@ -61,6 +68,31 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /**
+   * Domain deletion — was deliberately absent (see the dashboard's domain-row.tsx comment history)
+   * until the dashboard had a confirmation flow worth pointing it at. Mailbox.domain is
+   * `onDelete: Cascade` in the schema, so a bare delete would silently take every mailbox on the
+   * domain (and their send history) with it — guarded here with a 409 instead, same shape as the
+   * other guarded deletes in this codebase (e.g. prod-promote-lock's ownership check): refuse
+   * rather than cascade a customer's mailboxes out from under them.
+   */
+  app.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
+    const domain = await prisma.domain.findUnique({
+      where: { id: request.params.id },
+      include: { _count: { select: { mailboxes: true } } },
+    });
+    if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+
+    if (domain._count.mailboxes > 0) {
+      return reply.code(409).send({
+        error: `Can't delete ${domain.domainName} — it still has ${domain._count.mailboxes} mailbox${domain._count.mailboxes === 1 ? '' : 'es'} attached. Remove them first.`,
+      });
+    }
+
+    await prisma.domain.delete({ where: { id: domain.id } });
+    return reply.code(204).send();
+  });
+
   /** `POST /v1/domains/:domain/check` (spec) — unified SPF/DKIM/DMARC + blocklist check, keyed
    *  by the domain NAME (not the internal id, unlike this file's other routes) since that's the
    *  shape the spec names and the shape a customer thinks in. Replaces what were previously two
@@ -81,13 +113,86 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
         checkBlocklists(domain.domainName),
       ]);
 
-      const updated = await prisma.domain.update({
-        where: { id: domain.id },
-        data: { spfStatus, dkimStatus, dmarcStatus, blocklistStatus, lastBlocklistCheckAt: new Date() },
-      });
+      // History row captures the PRE-update snapshot (`domain.*`, read above before either check
+      // ran) — the point is a diff against what this check is about to overwrite, not a copy of
+      // the new result. Written in the same transaction as the update so a diff-history reader
+      // can never observe the new domain values without the row explaining what they replaced.
+      const [, updated] = await prisma.$transaction([
+        prisma.domainCheckHistory.create({
+          data: {
+            domainId: domain.id,
+            spfStatus: domain.spfStatus,
+            dkimStatus: domain.dkimStatus,
+            dmarcStatus: domain.dmarcStatus,
+            blocklistStatus: domain.blocklistStatus ?? undefined,
+          },
+        }),
+        prisma.domain.update({
+          where: { id: domain.id },
+          data: {
+            spfStatus,
+            dkimStatus,
+            dmarcStatus,
+            blocklistStatus,
+            lastBlocklistCheckAt: new Date(),
+          },
+        }),
+      ]);
       return updated;
     },
   );
+
+  /** `GET /v1/domains/:domain/check-history` — most recent `DomainCheckHistory` snapshots for a
+   *  domain, newest first, so a caller can diff what a given check changed instead of only ever
+   *  seeing the latest values. Keyed by domain NAME, matching `POST /:domain/check` above.
+   *  Intentionally not tier-gated here (this engine has no tier concept — see app.ts); an
+   *  operator-side repo is responsible for gating who can call this. */
+  app.get<{ Params: { domain: string }; Querystring: CheckHistoryQuery }>(
+    '/:domain/check-history',
+    async (request, reply) => {
+      const domainName = request.params.domain.trim().toLowerCase();
+      const domain = await prisma.domain.findUnique({ where: { domainName } });
+      if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+
+      const requestedLimit = Number(request.query.limit);
+      const limit =
+        Number.isFinite(requestedLimit) && requestedLimit > 0
+          ? Math.min(Math.trunc(requestedLimit), MAX_CHECK_HISTORY_LIMIT)
+          : DEFAULT_CHECK_HISTORY_LIMIT;
+
+      const history = await prisma.domainCheckHistory.findMany({
+        where: { domainId: domain.id },
+        orderBy: { checkedAt: 'desc' },
+        take: limit,
+      });
+      return reply.send({ domainId: domain.id, domainName: domain.domainName, history });
+    },
+  );
+
+  /** `GET /v1/domains/:domain/lookalikes` (Item 6) — persisted `LookalikeCandidate` rows for a
+   *  domain, as generated + last checked by `POST /internal/domains/scan-lookalikes`. Keyed by
+   *  domain NAME, matching `POST /:domain/check` and `GET /:domain/check-history` above.
+   *  Intentionally not tier-gated here (see this file's `check-history` route comment, and
+   *  `LookalikeCandidate`'s doc comment in schema.prisma) — an operator-side repo is responsible
+   *  for gating who can call this. */
+  app.get<{ Params: { domain: string } }>('/:domain/lookalikes', async (request, reply) => {
+    const domainName = request.params.domain.trim().toLowerCase();
+    const domain = await prisma.domain.findUnique({ where: { domainName } });
+    if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+
+    const lookalikes = await prisma.lookalikeCandidate.findMany({
+      where: { domainId: domain.id },
+      select: {
+        id: true,
+        candidateDomain: true,
+        registered: true,
+        firstSeenAt: true,
+        lastCheckedAt: true,
+      },
+      orderBy: { candidateDomain: 'asc' },
+    });
+    return reply.send({ domainId: domain.id, domainName: domain.domainName, lookalikes });
+  });
 
   /**
    * Seed-Inbox Placement Test (Guardrails, V12, option (c)) — aggregated placement-sample results
