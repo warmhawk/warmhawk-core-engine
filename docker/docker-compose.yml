@@ -198,7 +198,19 @@ services:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
-    networks: [warmhawk_internal]
+    # Bug fix (sas-stage live-test, 2026-09-07): `warmhawk_internal` alone left `api` with no
+    # outbound route at all — `internal: true` disables NAT/masquerade for that network entirely
+    # (see the networks: block above), so DNS lookups from inside this container failed
+    # `ESERVFAIL` and any outbound `fetch` had nowhere to go. This is the exact same bug class
+    # already fixed for `nginx` (2026-08-25) and `uptime-kuma` (2026-09-06) above — `api` was just
+    # missed both times. It surfaced for real with Item 6's lookalike/typosquat RDAP scan
+    # (`apps/api/src/lib/rdap.ts`), which needs to reach `data.iana.org` and arbitrary per-TLD RDAP
+    # servers on the public internet — a check that can never succeed on any real customer install,
+    # not just this QA box, until `api` also has egress.
+    #
+    # `warmhawk_edge` is non-internal and `api` publishes no port on it, so this grants egress
+    # without adding any inbound exposure — same reasoning as nginx's and uptime-kuma's fixes above.
+    networks: [warmhawk_internal, warmhawk_edge]
     stop_grace_period: 30s
     deploy:
       resources:

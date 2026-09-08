@@ -39,9 +39,10 @@ describe('checkRdapRegistration', () => {
     const result = await checkRdapRegistration('taken-lookalike.com', fetchImpl);
 
     expect(result).toBe('registered');
-    expect(fetchImpl).toHaveBeenNthCalledWith(1, 'https://data.iana.org/rdap/dns.json');
-    expect(fetchImpl).toHaveBeenNthCalledWith(
-      2,
+    // Second arg is now an AbortSignal-carrying options object (the timeout fix) — assert the URL
+    // each call was made with rather than the exact options object.
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe('https://data.iana.org/rdap/dns.json');
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe(
       'https://rdap.example-registry.test/rdap/domain/taken-lookalike.com',
     );
   });
