@@ -131,6 +131,90 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
     20_000,
   );
 
+  it(
+    'writes a DomainCheckHistory row with the PRE-update values on each check, and exposes them via check-history',
+    async () => {
+      const domainName = `domains-check-history-test-${Date.now()}.example.com`;
+      const domain = await prisma.domain.create({ data: { domainName } });
+      createdDomainIds.push(domain.id);
+
+      // Fresh domain starts PENDING/PENDING/PENDING with no blocklistStatus — the first check's
+      // history row must capture exactly that pre-update snapshot, not the freshly-computed result.
+      const first = await app.inject({
+        method: 'POST',
+        url: `/v1/domains/${domainName}/check`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(first.statusCode).toBe(200);
+      const firstResult = first.json();
+
+      const afterFirst = await prisma.domainCheckHistory.findMany({
+        where: { domainId: domain.id },
+        orderBy: { checkedAt: 'desc' },
+      });
+      expect(afterFirst).toHaveLength(1);
+      expect(afterFirst[0].spfStatus).toBe('PENDING');
+      expect(afterFirst[0].dkimStatus).toBe('PENDING');
+      expect(afterFirst[0].dmarcStatus).toBe('PENDING');
+      expect(afterFirst[0].blocklistStatus).toBeNull();
+
+      // Second check: the history row it writes must capture what the FIRST check just wrote
+      // (the domain's state right before this second update), not the second check's own result.
+      const second = await app.inject({
+        method: 'POST',
+        url: `/v1/domains/${domainName}/check`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(second.statusCode).toBe(200);
+
+      const afterSecond = await prisma.domainCheckHistory.findMany({
+        where: { domainId: domain.id },
+        orderBy: { checkedAt: 'desc' },
+      });
+      expect(afterSecond).toHaveLength(2);
+      const [mostRecent] = afterSecond;
+      expect(mostRecent.spfStatus).toBe(firstResult.spfStatus);
+      expect(mostRecent.dkimStatus).toBe(firstResult.dkimStatus);
+      expect(mostRecent.dmarcStatus).toBe(firstResult.dmarcStatus);
+      expect(mostRecent.blocklistStatus).toEqual(firstResult.blocklistStatus);
+
+      // GET check-history — same auth gate, default limit, and an explicit limit=1.
+      const unauthed = await app.inject({
+        method: 'GET',
+        url: `/v1/domains/${domainName}/check-history`,
+      });
+      expect(unauthed.statusCode).toBe(401);
+
+      const historyResponse = await app.inject({
+        method: 'GET',
+        url: `/v1/domains/${domainName}/check-history`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(historyResponse.statusCode).toBe(200);
+      const historyJson = historyResponse.json();
+      expect(historyJson.domainName).toBe(domainName);
+      expect(historyJson.history).toHaveLength(2);
+      expect(historyJson.history[0].checkedAt >= historyJson.history[1].checkedAt).toBe(true);
+
+      const limited = await app.inject({
+        method: 'GET',
+        url: `/v1/domains/${domainName}/check-history?limit=1`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(limited.statusCode).toBe(200);
+      expect(limited.json().history).toHaveLength(1);
+      expect(limited.json().history[0].id).toBe(historyJson.history[0].id);
+
+      const notFound = await app.inject({
+        method: 'GET',
+        url: `/v1/domains/does-not-exist-${Date.now()}.example.com/check-history`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(notFound.statusCode).toBe(404);
+    },
+    20_000,
+  );
+
   it('requires authentication', async () => {
     const response = await app.inject({ method: 'GET', url: '/v1/domains' });
     expect(response.statusCode).toBe(401);

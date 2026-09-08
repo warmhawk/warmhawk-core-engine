@@ -68,6 +68,16 @@ describeIntegration('/internal/domains routes (integration, real Postgres)', () 
       // Scoped to blocklist only — SPF/DKIM/DMARC untouched by this route (still PENDING defaults).
       expect(json.spfStatus).toBe('PENDING');
 
+      // Same pre-update-snapshot DomainCheckHistory write as domains.ts's POST /:domain/check —
+      // this route only ever touches blocklistStatus, so the snapshot's spf/dkim/dmarc are still
+      // PENDING and its pre-check blocklistStatus is the null the domain was created with.
+      const history = await prisma.domainCheckHistory.findMany({ where: { domainId } });
+      expect(history).toHaveLength(1);
+      expect(history[0].spfStatus).toBe('PENDING');
+      expect(history[0].dkimStatus).toBe('PENDING');
+      expect(history[0].dmarcStatus).toBe('PENDING');
+      expect(history[0].blocklistStatus).toBeNull();
+
       const missingField = await app.inject({
         method: 'POST',
         url: '/internal/domains/check-blocklist',

@@ -37,10 +37,26 @@ export async function internalDomainsRoutes(app: FastifyInstance): Promise<void>
     if (!domain) return reply.code(404).send({ error: 'Domain not found' });
 
     const blocklistStatus = await checkBlocklists(domain.domainName);
-    const updated = await prisma.domain.update({
-      where: { id: domain.id },
-      data: { blocklistStatus, lastBlocklistCheckAt: new Date() },
-    });
+
+    // Same pre-update-snapshot pattern as `POST /v1/domains/:domain/check` (domains.ts) — the
+    // history row records the values this write is about to replace. spfStatus/dkimStatus/
+    // dmarcStatus are untouched by this route, so the snapshot's copy of them is also its final
+    // copy (no separate "new" value to diff against for those three fields from this call).
+    const [, updated] = await prisma.$transaction([
+      prisma.domainCheckHistory.create({
+        data: {
+          domainId: domain.id,
+          spfStatus: domain.spfStatus,
+          dkimStatus: domain.dkimStatus,
+          dmarcStatus: domain.dmarcStatus,
+          blocklistStatus: domain.blocklistStatus ?? undefined,
+        },
+      }),
+      prisma.domain.update({
+        where: { id: domain.id },
+        data: { blocklistStatus, lastBlocklistCheckAt: new Date() },
+      }),
+    ]);
     return updated;
   });
 }
