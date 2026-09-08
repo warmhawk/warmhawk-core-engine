@@ -89,9 +89,11 @@ export interface TierFeatures {
   /** Guided first-login onboarding checklist (connect mailbox -> import leads -> AI provider ->
    *  launch campaign). N/A for Tier 0, which has no dashboard to onboard into. */
   onboardingChecklist: boolean;
-  /** Managed deployment / DNS / dedicated IPs / white-glove migration / BYO-cert support —
-   *  Tier 2 (WarmHawk-operated) only. */
-  managedDeployment: boolean;
+  /** True only for Tier 2 — the generic client-side "is this a Tier 2 install" switch used to
+   *  gate the trust badge, certificate/compliance-report downloads, and the lookalike panel.
+   *  Renamed from `managedDeployment`: that name implied WarmHawk operates the customer's
+   *  deployment/DNS/IPs, which was never true (installs are single-tenant, customer-hosted). */
+  isTier2: boolean;
   /** 30-day money-back guarantee applies to this tier's billing. */
   moneyBackGuarantee: boolean;
   /** Support SLA metadata for this tier — see `SupportSlaMetadata` above. */
@@ -110,7 +112,7 @@ export const TIER_FEATURES: Record<Tier, TierFeatures> = {
     teamManagement: false,
     auditLog: false,
     onboardingChecklist: false,
-    managedDeployment: false,
+    isTier2: false,
     moneyBackGuarantee: false,
     supportSla: {
       channel: 'Community (GitHub Issues + Discussions)',
@@ -130,7 +132,7 @@ export const TIER_FEATURES: Record<Tier, TierFeatures> = {
     teamManagement: true,
     auditLog: false,
     onboardingChecklist: true,
-    managedDeployment: false,
+    isTier2: false,
     moneyBackGuarantee: true,
     supportSla: {
       channel: 'support@warmhawk.com (shared inbox)',
@@ -150,7 +152,7 @@ export const TIER_FEATURES: Record<Tier, TierFeatures> = {
     teamManagement: true,
     auditLog: false, // flips true once built — see Post-Launch Backlog "Audit logs"
     onboardingChecklist: true,
-    managedDeployment: true,
+    isTier2: true,
     moneyBackGuarantee: false, // custom-scoped engagement, not a self-serve subscription
     supportSla: {
       channel: 'Direct founder email thread / Slack Connect',
