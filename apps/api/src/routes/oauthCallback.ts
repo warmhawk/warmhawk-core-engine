@@ -12,10 +12,15 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
-import { buildGoogleAuthUrl, exchangeGoogleCode } from '../lib/googleOAuth';
-import { buildMicrosoftAuthUrl, exchangeMicrosoftCode } from '../lib/microsoftOAuth';
+import { buildGoogleAuthUrl, exchangeGoogleCode, isGoogleOAuthConfigured } from '../lib/googleOAuth';
+import {
+  buildMicrosoftAuthUrl,
+  exchangeMicrosoftCode,
+  isMicrosoftOAuthConfigured,
+} from '../lib/microsoftOAuth';
 import { signOAuthState, verifyOAuthState, type OAuthStatePayload } from '../lib/oauthState';
 import { encrypt, loadEncryptionKey } from '../lib/encryption';
+import { requireAuth } from '../lib/requireAuth';
 
 type DbProvider = OAuthStatePayload['provider'];
 type RouteProvider = 'google' | 'microsoft';
@@ -39,6 +44,15 @@ function redirectWithError(reply: import('fastify').FastifyReply, reason: string
 }
 
 export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
+  // Dashboard-only, authenticated — unlike /:provider/authorize and /:provider/callback below,
+  // which stay public (the provider itself calls back). Lets the Mailboxes page grey out
+  // "Connect with Google/Microsoft" instead of leaving a button live that dead-ends into
+  // `${provider}_not_configured`.
+  app.get('/status', { preHandler: requireAuth }, async () => ({
+    google: await isGoogleOAuthConfigured(),
+    microsoft: await isMicrosoftOAuthConfigured(),
+  }));
+
   app.get<{ Params: { provider: string }; Querystring: { mailboxId?: string } }>(
     '/:provider/authorize',
     async (request, reply) => {
@@ -50,7 +64,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       const state = signOAuthState({ mailboxId, provider: toDbProvider(provider) });
       let authUrl: string;
       try {
-        authUrl = provider === 'google' ? buildGoogleAuthUrl(state) : buildMicrosoftAuthUrl(state);
+        authUrl =
+          provider === 'google' ? await buildGoogleAuthUrl(state) : await buildMicrosoftAuthUrl(state);
       } catch (err) {
         // Thrown when this instance has no client id/secret configured for the provider yet
         // (blank by default in .env.example — every fresh install starts in this state). Without

@@ -14,6 +14,7 @@ import multipart from '@fastify/multipart';
 
 import { domainsRoutes } from './routes/domains';
 import { oauthCallbackRoutes } from './routes/oauthCallback';
+import { oauthClientConfigRoutes } from './routes/oauthClientConfig';
 import { imapRoutes } from './routes/imap';
 import { leadsRoutes } from './routes/leads';
 import { webhookLeadsRoutes } from './routes/webhookLeads';
@@ -146,6 +147,7 @@ export async function createApp(): Promise<FastifyInstance> {
       await v1.register(instanceSettingsRoutes, { prefix: '/instance-settings' });
       await v1.register(domainsRoutes, { prefix: '/domains' });
       await v1.register(oauthCallbackRoutes, { prefix: '/oauth' });
+      await v1.register(oauthClientConfigRoutes, { prefix: '/oauth/client-config' });
       await v1.register(leadsRoutes, { prefix: '/leads' });
       // Path-shape fix: spec names this `POST /v1/leads/webhook`, not `/webhooks/leads`. Mounted
       // as its own plugin under `/leads/webhook` (distinct from `leadsRoutes`' `/leads` prefix
