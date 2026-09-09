@@ -48,8 +48,21 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(422).send({ error: 'Unsupported provider or missing mailboxId' });
       }
       const state = signOAuthState({ mailboxId, provider: toDbProvider(provider) });
-      const authUrl =
-        provider === 'google' ? buildGoogleAuthUrl(state) : buildMicrosoftAuthUrl(state);
+      let authUrl: string;
+      try {
+        authUrl = provider === 'google' ? buildGoogleAuthUrl(state) : buildMicrosoftAuthUrl(state);
+      } catch (err) {
+        // Thrown when this instance has no client id/secret configured for the provider yet
+        // (blank by default in .env.example — every fresh install starts in this state). Without
+        // this catch, the error escaped as a raw, unbranded 500 JSON body instead of the friendly
+        // in-app toast every other failure path here already gets via redirectWithError(). The
+        // mailbox row was already created by the dashboard's POST /mailboxes just before this
+        // redirect, and never actually connects — remove it so a retry against the same email
+        // isn't blocked by Mailbox.email's unique constraint.
+        app.log.error(err, `[oauth] ${provider} is not configured on this instance`);
+        await prisma.mailbox.delete({ where: { id: mailboxId } }).catch(() => null);
+        return redirectWithError(reply, `${provider}_not_configured`);
+      }
       return reply.redirect(authUrl);
     },
   );
@@ -78,9 +91,12 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       return redirectWithError(reply, 'invalid_state');
     }
 
-    const encryptionKey = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
-
     try {
+      // Moved inside the try (was a bare call before this fix) — same unguarded-crash class as
+      // the /authorize route above: a missing MAILBOX_CREDENTIAL_KEY threw past this handler's
+      // safety net entirely instead of degrading to the friendly redirectWithError() every other
+      // failure here already gets.
+      const encryptionKey = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
       if (provider === 'google') {
         const tokens = await exchangeGoogleCode(code);
         await prisma.mailbox.update({
