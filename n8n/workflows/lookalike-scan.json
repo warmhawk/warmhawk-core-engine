@@ -1,5 +1,6 @@
 {
   "name": "WarmHawk Lookalike Scan",
+  "active": true,
   "nodes": [
     {
       "id": "l1-schedule",

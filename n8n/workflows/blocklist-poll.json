@@ -1,5 +1,6 @@
 {
   "name": "WarmHawk Blocklist Poll",
+  "active": true,
   "nodes": [
     {
       "id": "b1-schedule",
