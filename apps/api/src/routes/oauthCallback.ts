@@ -49,8 +49,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
   // "Connect with Google/Microsoft" instead of leaving a button live that dead-ends into
   // `${provider}_not_configured`.
   app.get('/status', { preHandler: requireAuth }, async () => ({
-    google: isGoogleOAuthConfigured(),
-    microsoft: isMicrosoftOAuthConfigured(),
+    google: await isGoogleOAuthConfigured(),
+    microsoft: await isMicrosoftOAuthConfigured(),
   }));
 
   app.get<{ Params: { provider: string }; Querystring: { mailboxId?: string } }>(
@@ -64,7 +64,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       const state = signOAuthState({ mailboxId, provider: toDbProvider(provider) });
       let authUrl: string;
       try {
-        authUrl = provider === 'google' ? buildGoogleAuthUrl(state) : buildMicrosoftAuthUrl(state);
+        authUrl =
+          provider === 'google' ? await buildGoogleAuthUrl(state) : await buildMicrosoftAuthUrl(state);
       } catch (err) {
         // Thrown when this instance has no client id/secret configured for the provider yet
         // (blank by default in .env.example — every fresh install starts in this state). Without
