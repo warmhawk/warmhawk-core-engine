@@ -1,5 +1,6 @@
 {
   "name": "WarmHawk Dispatch",
+  "active": true,
   "nodes": [
     {
       "id": "d1-webhook",
