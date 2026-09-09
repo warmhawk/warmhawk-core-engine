@@ -29,9 +29,9 @@ describe('tier-config constants', () => {
     expect(f.supportSla.criticalResponse).toBe('4 business hours');
   });
 
-  it('tier_2 has managed deployment and same-business-day support, no money-back guarantee', () => {
+  it('tier_2 is flagged isTier2 and gets same-business-day support, no money-back guarantee', () => {
     const f = getTierFeatures('tier_2');
-    expect(f.managedDeployment).toBe(true);
+    expect(f.isTier2).toBe(true);
     expect(f.moneyBackGuarantee).toBe(false);
     expect(f.supportSla.firstResponse).toBe('Same business day');
   });

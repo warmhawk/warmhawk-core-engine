@@ -352,6 +352,49 @@ log "Starting core services (HTTP-only, pre-TLS)..."
 docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" up -d postgres redis migrate api worker n8n uptime-kuma nginx \
   || dump_compose_logs_and_fail "core services failed to start — see logs above."
 
+# --- n8n workflow provisioning (blocklist-poll, lookalike-scan) --------------------------------
+# n8n ships blank — the bundled scheduled workflows in n8n/workflows/*.json (V11's continuous
+# blocklist/DNSBL monitoring, plus the lookalike-domain scan) are never imported or activated on
+# their own. Discovered live on a stage tenant: `lastBlocklistCheckAt` stayed NEVER forever because
+# nothing had ever imported these workflows, so the hourly schedule trigger had nothing to run.
+# Guarded by name (via `n8n list:workflow`) so re-running install.sh never creates duplicate
+# workflow entities; degrades, never aborts the install, same as kuma-provision below.
+log "Provisioning n8n workflows (blocklist-poll, lookalike-scan)..."
+EXISTING_N8N_WORKFLOWS=$(docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" exec -T n8n n8n list:workflow 2>/dev/null || true)
+N8N_IMPORT_FAILED=false
+for wf_file in "$REPO_ROOT"/n8n/workflows/*.json; do
+  wf_name=$(node -e "console.log(require('$wf_file').name)" 2>/dev/null || true)
+  if [ -z "$wf_name" ]; then
+    log "WARNING: could not read workflow name from $wf_file — skipping."
+    N8N_IMPORT_FAILED=true
+    continue
+  fi
+  if printf '%s\n' "$EXISTING_N8N_WORKFLOWS" | grep -qF "|$wf_name"; then
+    log "n8n workflow '$wf_name' already present, skipping import."
+    continue
+  fi
+  if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" cp "$wf_file" n8n:/tmp/n8n-import.json \
+    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" exec -T n8n n8n import:workflow --input=/tmp/n8n-import.json; then
+    log "Imported n8n workflow '$wf_name'."
+  else
+    log "WARNING: failed to import n8n workflow '$wf_name' — import it manually via the n8n editor."
+    N8N_IMPORT_FAILED=true
+  fi
+done
+if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" exec -T postgres \
+    psql -U warmhawk -d warmhawk -c "UPDATE workflow_entity SET active = true WHERE name IN ('WarmHawk Blocklist Poll', 'WarmHawk Lookalike Scan') AND active = false;"; then
+  docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" restart n8n \
+    || log "WARNING: n8n workflows activated in the database but the n8n container failed to restart — restart it manually to register the schedule triggers."
+else
+  log "WARNING: failed to activate n8n workflows — activate them manually in the n8n editor (Active toggle) after import."
+  N8N_IMPORT_FAILED=true
+fi
+if [ "$N8N_IMPORT_FAILED" = true ]; then
+  log "n8n workflow provisioning had at least one warning above — blocklist/lookalike monitoring may not be running yet. Safe to retry any time by re-running this script."
+else
+  log "n8n workflow provisioning complete."
+fi
+
 # --- Uptime Kuma auto-provisioning (admin account + monitors + optional alert webhook) ---------
 # Degrades, never aborts the install — this is bundled monitoring, not a guardrail the rest of the
 # stack depends on. A failure here (e.g. Kuma still starting up, or a container-runtime quirk)
