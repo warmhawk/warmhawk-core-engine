@@ -18,6 +18,7 @@
 
 import { prisma } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
+import { resolveRedirectUri } from './oauthRedirectUri';
 
 const MICROSOFT_AUTHORIZE_ENDPOINT =
   'https://login.microsoftonline.com/common/oauth2/v2.0/authorize';
@@ -45,10 +46,10 @@ interface MicrosoftOAuthCredentials {
 
 /** Mirrors `googleOAuth.ts`'s `resolveGoogleOAuthCredentials` — an in-app wizard-saved client
  *  id/secret (`OAuthClientConfig`, provider `MICROSOFT`) takes priority over
- *  MICROSOFT_OAUTH_CLIENT_ID/MICROSOFT_OAUTH_CLIENT_SECRET when present; the redirect URI stays
- *  env-only either way. */
+ *  MICROSOFT_OAUTH_CLIENT_ID/MICROSOFT_OAUTH_CLIENT_SECRET when present. Redirect URI resolution
+ *  is shared with Google — see oauthRedirectUri.ts. */
 async function resolveMicrosoftOAuthCredentials(): Promise<MicrosoftOAuthCredentials> {
-  const redirectUri = requiredEnv('MICROSOFT_OAUTH_REDIRECT_URI');
+  const redirectUri = await resolveRedirectUri('MICROSOFT');
   const dbConfig = await prisma.oAuthClientConfig.findUnique({ where: { provider: 'MICROSOFT' } });
   if (dbConfig) {
     const key = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
@@ -66,10 +67,8 @@ async function resolveMicrosoftOAuthCredentials(): Promise<MicrosoftOAuthCredent
 }
 
 /** Cheap check for the dashboard's Mailboxes page — mirrors `googleOAuth.ts`'s
- *  `isGoogleOAuthConfigured`. Configured via either the in-app wizard (DB) or env vars — the
- *  redirect URI is required either way. */
+ *  `isGoogleOAuthConfigured`, including the same "don't also gate on the redirect URI" reasoning. */
 export async function isMicrosoftOAuthConfigured(): Promise<boolean> {
-  if (!process.env.MICROSOFT_OAUTH_REDIRECT_URI) return false;
   const dbConfig = await prisma.oAuthClientConfig.findUnique({ where: { provider: 'MICROSOFT' } });
   if (dbConfig) return true;
   return Boolean(process.env.MICROSOFT_OAUTH_CLIENT_ID && process.env.MICROSOFT_OAUTH_CLIENT_SECRET);

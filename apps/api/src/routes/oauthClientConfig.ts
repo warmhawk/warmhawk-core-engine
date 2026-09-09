@@ -7,20 +7,25 @@
  * back to env vars when no row exists — see `resolveGoogleOAuthCredentials`/
  * `resolveMicrosoftOAuthCredentials`.
  *
- * The redirect URI is deliberately NOT collected here — it's tied to the instance's own domain
- * (GOOGLE_OAUTH_REDIRECT_URI/MICROSOFT_OAUTH_REDIRECT_URI, set once at install time), not a
- * per-provider-app secret. This route surfaces it read-only so the owner knows the exact value to
- * register in Google Cloud Console / the Microsoft Entra admin center before saving credentials.
+ * Redirect URI (revised 2026-09-09 — see oauthRedirectUri.ts's header comment for the full
+ * precedence): this route shows the computed default (from this instance's own domain) so the
+ * owner knows the exact value to register in Google Cloud Console / the Microsoft Entra admin
+ * center, and lets them save an explicit override for the rare non-standard-reverse-proxy case —
+ * still no `.env` edit or restart needed either way.
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma, type OAuthClientProvider } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { encrypt, decrypt, loadEncryptionKey, maskSecret } from '../lib/encryption';
+import { computeDefaultRedirectUri } from '../lib/oauthRedirectUri';
 
 interface SaveClientConfigBody {
   provider?: OAuthClientProvider;
   clientId?: string;
   clientSecret?: string;
+  /** Omit/undefined leaves the existing override untouched; '' clears it back to the computed
+   *  default; a non-empty string sets it. */
+  redirectUriOverride?: string;
 }
 
 const PROVIDERS: OAuthClientProvider[] = ['GOOGLE', 'MICROSOFT'];
@@ -44,6 +49,13 @@ function encryptionKey() {
   return loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
 }
 
+/** The value that would actually be used right now, outside of a dashboard override — env var
+ *  first (Tier 0 / ops escape hatch), else the computed default. Never throws: a route response
+ *  needs a nullable "nothing resolvable yet" state, not an exception. */
+function activeNonOverrideRedirectUri(provider: OAuthClientProvider): string | null {
+  return process.env[REDIRECT_URI_ENV_VAR[provider]] || computeDefaultRedirectUri(provider);
+}
+
 export async function oauthClientConfigRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
@@ -53,8 +65,9 @@ export async function oauthClientConfigRoutes(app: FastifyInstance): Promise<voi
     const key = encryptionKey();
 
     return PROVIDERS.map((provider) => {
-      const redirectUri = process.env[REDIRECT_URI_ENV_VAR[provider]] || null;
+      const fallbackRedirectUri = activeNonOverrideRedirectUri(provider);
       const dbRow = byProvider.get(provider);
+      const redirectUri = dbRow?.redirectUriOverride || fallbackRedirectUri;
       if (dbRow) {
         return {
           provider,
@@ -63,6 +76,8 @@ export async function oauthClientConfigRoutes(app: FastifyInstance): Promise<voi
           clientId: dbRow.clientId,
           maskedClientSecret: maskSecret(decrypt(dbRow.clientSecretEncrypted, key)),
           redirectUri,
+          redirectUriOverride: dbRow.redirectUriOverride,
+          defaultRedirectUri: fallbackRedirectUri,
           updatedAt: dbRow.updatedAt,
         };
       }
@@ -76,30 +91,43 @@ export async function oauthClientConfigRoutes(app: FastifyInstance): Promise<voi
         clientId: null,
         maskedClientSecret: null,
         redirectUri,
+        redirectUriOverride: null,
+        defaultRedirectUri: fallbackRedirectUri,
         updatedAt: null,
       };
     });
   });
 
   app.post<{ Body: SaveClientConfigBody }>('/', async (request, reply) => {
-    const { provider, clientId, clientSecret } = request.body;
+    const { provider, clientId, clientSecret, redirectUriOverride } = request.body;
     if (!provider || !PROVIDERS.includes(provider)) {
       return reply.code(422).send({ error: 'provider must be GOOGLE or MICROSOFT' });
     }
     if (!clientId?.trim() || !clientSecret?.trim()) {
       return reply.code(422).send({ error: 'clientId and clientSecret are required' });
     }
-    if (!process.env[REDIRECT_URI_ENV_VAR[provider]]) {
+
+    const trimmedOverride = redirectUriOverride?.trim();
+    const resolvedRedirectUri = trimmedOverride || activeNonOverrideRedirectUri(provider);
+    if (!resolvedRedirectUri) {
       return reply.code(422).send({
-        error: `${REDIRECT_URI_ENV_VAR[provider]} isn't set on this instance yet — set it to this instance's own domain (see the redirect URI shown in this same settings page) before saving a client id/secret.`,
+        error: `Can't resolve a redirect URI for ${provider} — this instance has no WARMHAWK_DOMAIN set and no ${REDIRECT_URI_ENV_VAR[provider]} override. Fix the install's domain configuration before saving a client id/secret.`,
       });
     }
 
     const clientSecretEncrypted = encrypt(clientSecret.trim(), encryptionKey());
+    // `redirectUriOverride === undefined` leaves an existing override untouched; '' clears it.
+    const overrideUpdate =
+      redirectUriOverride === undefined ? {} : { redirectUriOverride: trimmedOverride || null };
     const saved = await prisma.oAuthClientConfig.upsert({
       where: { provider },
-      create: { provider, clientId: clientId.trim(), clientSecretEncrypted },
-      update: { clientId: clientId.trim(), clientSecretEncrypted },
+      create: {
+        provider,
+        clientId: clientId.trim(),
+        clientSecretEncrypted,
+        redirectUriOverride: trimmedOverride || null,
+      },
+      update: { clientId: clientId.trim(), clientSecretEncrypted, ...overrideUpdate },
     });
 
     return reply.code(201).send({
@@ -108,7 +136,9 @@ export async function oauthClientConfigRoutes(app: FastifyInstance): Promise<voi
       configured: true,
       clientId: saved.clientId,
       maskedClientSecret: maskSecret(clientSecret.trim()),
-      redirectUri: process.env[REDIRECT_URI_ENV_VAR[provider]] || null,
+      redirectUri: saved.redirectUriOverride || activeNonOverrideRedirectUri(provider),
+      redirectUriOverride: saved.redirectUriOverride,
+      defaultRedirectUri: activeNonOverrideRedirectUri(provider),
       updatedAt: saved.updatedAt,
     });
   });

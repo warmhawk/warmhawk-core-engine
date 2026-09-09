@@ -181,6 +181,10 @@ services:
       # Tier-0-only install.
       OPERATOR_SERVICE_TOKEN: ${OPERATOR_SERVICE_TOKEN:-}
       DASHBOARD_APP_URL: ${DASHBOARD_APP_URL:-}
+      # Needed here (not just by the nginx service below) so oauthRedirectUri.ts can compute a
+      # mailbox-OAuth redirect URI without a dedicated GOOGLE_OAUTH_REDIRECT_URI/
+      # MICROSOFT_OAUTH_REDIRECT_URI env var — see that file's header comment.
+      WARMHAWK_DOMAIN: ${WARMHAWK_DOMAIN}
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
