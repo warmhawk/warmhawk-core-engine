@@ -12,10 +12,15 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
-import { buildGoogleAuthUrl, exchangeGoogleCode } from '../lib/googleOAuth';
-import { buildMicrosoftAuthUrl, exchangeMicrosoftCode } from '../lib/microsoftOAuth';
+import { buildGoogleAuthUrl, exchangeGoogleCode, isGoogleOAuthConfigured } from '../lib/googleOAuth';
+import {
+  buildMicrosoftAuthUrl,
+  exchangeMicrosoftCode,
+  isMicrosoftOAuthConfigured,
+} from '../lib/microsoftOAuth';
 import { signOAuthState, verifyOAuthState, type OAuthStatePayload } from '../lib/oauthState';
 import { encrypt, loadEncryptionKey } from '../lib/encryption';
+import { requireAuth } from '../lib/requireAuth';
 
 type DbProvider = OAuthStatePayload['provider'];
 type RouteProvider = 'google' | 'microsoft';
@@ -39,6 +44,15 @@ function redirectWithError(reply: import('fastify').FastifyReply, reason: string
 }
 
 export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
+  // Dashboard-only, authenticated — unlike /:provider/authorize and /:provider/callback below,
+  // which stay public (the provider itself calls back). Lets the Mailboxes page grey out
+  // "Connect with Google/Microsoft" instead of leaving a button live that dead-ends into
+  // `${provider}_not_configured`.
+  app.get('/status', { preHandler: requireAuth }, async () => ({
+    google: isGoogleOAuthConfigured(),
+    microsoft: isMicrosoftOAuthConfigured(),
+  }));
+
   app.get<{ Params: { provider: string }; Querystring: { mailboxId?: string } }>(
     '/:provider/authorize',
     async (request, reply) => {

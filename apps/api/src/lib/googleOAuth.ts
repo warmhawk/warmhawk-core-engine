@@ -20,6 +20,16 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+/** Cheap, throw-free check for the dashboard's Mailboxes page — lets it grey out "Connect with
+ *  Google" instead of leaving it clickable into the `${provider}_not_configured` dead end. */
+export function isGoogleOAuthConfigured(): boolean {
+  return Boolean(
+    process.env.GOOGLE_OAUTH_CLIENT_ID &&
+      process.env.GOOGLE_OAUTH_CLIENT_SECRET &&
+      process.env.GOOGLE_OAUTH_REDIRECT_URI,
+  );
+}
+
 export function createGoogleOAuthClient(): OAuth2Client {
   return new OAuth2Client({
     clientId: requiredEnv('GOOGLE_OAUTH_CLIENT_ID'),

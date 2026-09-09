@@ -34,6 +34,16 @@ function requiredEnv(name: string): string {
   return value;
 }
 
+/** Cheap, throw-free check for the dashboard's Mailboxes page — mirrors
+ *  `googleOAuth.ts`'s `isGoogleOAuthConfigured`. */
+export function isMicrosoftOAuthConfigured(): boolean {
+  return Boolean(
+    process.env.MICROSOFT_OAUTH_CLIENT_ID &&
+      process.env.MICROSOFT_OAUTH_CLIENT_SECRET &&
+      process.env.MICROSOFT_OAUTH_REDIRECT_URI,
+  );
+}
+
 export function buildMicrosoftAuthUrl(state: string): string {
   const clientId = requiredEnv('MICROSOFT_OAUTH_CLIENT_ID');
   const redirectUri = requiredEnv('MICROSOFT_OAUTH_REDIRECT_URI');

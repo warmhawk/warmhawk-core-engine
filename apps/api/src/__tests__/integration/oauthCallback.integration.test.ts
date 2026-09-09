@@ -26,6 +26,7 @@ const OAUTH_ENV_KEYS = [
 describeIntegration('oauth authorize route (integration, real Postgres)', () => {
   let app: FastifyInstance;
   let domainId: string;
+  let authToken: string;
   const savedOAuthEnv: Record<string, string | undefined> = {};
 
   beforeAll(async () => {
@@ -39,6 +40,13 @@ describeIntegration('oauth authorize route (integration, real Postgres)', () => 
       data: { domainName: `oauth-authorize-test-${Date.now()}.example.com` },
     });
     domainId = domain.id;
+
+    const jwt = await import('jsonwebtoken');
+    authToken = jwt.default.sign(
+      { sub: 'test-user', email: 'test@example.org', role: 'ADMIN' },
+      process.env.JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: '1h' },
+    );
   });
 
   afterAll(async () => {
@@ -100,5 +108,36 @@ describeIntegration('oauth authorize route (integration, real Postgres)', () => 
 
     const stillExists = await prisma.mailbox.findUnique({ where: { id: mailbox.id } });
     expect(stillExists).toBeNull();
+  });
+
+  it('GET /status requires authentication', async () => {
+    const response = await app.inject({ method: 'GET', url: '/v1/oauth/status' });
+    expect(response.statusCode).toBe(401);
+  });
+
+  it('GET /status reports both providers unconfigured on a fresh install', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/oauth/status',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ google: false, microsoft: false });
+  });
+
+  it('GET /status reports a provider configured once its env vars are set', async () => {
+    process.env.GOOGLE_OAUTH_CLIENT_ID = 'test-client-id';
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'test-client-secret';
+    process.env.GOOGLE_OAUTH_REDIRECT_URI = 'http://localhost:4600/v1/oauth/google/callback';
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/oauth/status',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ google: true, microsoft: false });
   });
 });
