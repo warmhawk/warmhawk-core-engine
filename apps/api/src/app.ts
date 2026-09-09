@@ -93,8 +93,21 @@ export async function createApp(): Promise<FastifyInstance> {
   await app.register(helmet, { global: true });
 
   // CORS — origin-gated; the licensed dashboard is the only expected browser-side caller.
+  const dashboardAppUrl = process.env.DASHBOARD_APP_URL;
+  if (!dashboardAppUrl && process.env.NODE_ENV === 'production') {
+    // Silent by default is what turned this into a real bug (see the human-journeys QA doc,
+    // Journey D): CORS and the OAuth-callback redirect both fall back to localhost:4610, so a
+    // customer's mailbox-connect appears to fail with "localhost refused to connect" even though
+    // the OAuth exchange already succeeded server-side. Loud-warn instead of failing the boot,
+    // since an install without a co-located dashboard has no DASHBOARD_APP_URL to give.
+    app.log.warn(
+      'DASHBOARD_APP_URL is not set. If the licensed dashboard is co-located with this instance, ' +
+        'mailbox-connect OAuth redirects and dashboard CORS requests will silently target ' +
+        'http://localhost:4610 instead. Set DASHBOARD_APP_URL to the dashboard\'s real URL in .env/.env.',
+    );
+  }
   await app.register(cors, {
-    origin: process.env.DASHBOARD_APP_URL || 'http://localhost:4610',
+    origin: dashboardAppUrl || 'http://localhost:4610',
   });
 
   // Global rate limiting default — per-route overrides below apply the specific limits named in
