@@ -13,6 +13,7 @@
 import { OAuth2Client } from 'google-auth-library';
 import { prisma } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
+import { resolveRedirectUri } from './oauthRedirectUri';
 
 export const GMAIL_OAUTH_SCOPE = 'https://mail.google.com/';
 
@@ -32,12 +33,11 @@ interface GoogleOAuthCredentials {
  * Friction-reduction (2026-09-09) — an owner's own client id/secret entered via the in-app
  * Settings wizard (`OAuthClientConfig`, provider `GOOGLE`) takes priority over
  * GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET when present, so saving it in-app works
- * without an env edit + container restart. The redirect URI stays env-only regardless — it's tied
- * to the instance's own domain (set once at install time), not a per-provider-app secret the
- * wizard collects.
+ * without an env edit + container restart. The redirect URI is resolved separately — see
+ * oauthRedirectUri.ts's header comment for its own (also DB-first) precedence.
  */
 async function resolveGoogleOAuthCredentials(): Promise<GoogleOAuthCredentials> {
-  const redirectUri = requiredEnv('GOOGLE_OAUTH_REDIRECT_URI');
+  const redirectUri = await resolveRedirectUri('GOOGLE');
   const dbConfig = await prisma.oAuthClientConfig.findUnique({ where: { provider: 'GOOGLE' } });
   if (dbConfig) {
     const key = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
@@ -56,9 +56,10 @@ async function resolveGoogleOAuthCredentials(): Promise<GoogleOAuthCredentials> 
 
 /** Cheap check for the dashboard's Mailboxes page — lets it grey out "Connect with Google"
  *  instead of leaving it clickable into the `${provider}_not_configured` dead end. Configured via
- *  either the in-app wizard (DB) or env vars — the redirect URI is required either way. */
+ *  either the in-app wizard (DB) or env vars. Doesn't also gate on the redirect URI resolving —
+ *  WARMHAWK_DOMAIN is a required install-time var on every real deployment (nginx needs it too),
+ *  so a client id/secret existing is the only genuinely variable precondition here. */
 export async function isGoogleOAuthConfigured(): Promise<boolean> {
-  if (!process.env.GOOGLE_OAUTH_REDIRECT_URI) return false;
   const dbConfig = await prisma.oAuthClientConfig.findUnique({ where: { provider: 'GOOGLE' } });
   if (dbConfig) return true;
   return Boolean(process.env.GOOGLE_OAUTH_CLIENT_ID && process.env.GOOGLE_OAUTH_CLIENT_SECRET);

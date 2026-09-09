@@ -22,6 +22,7 @@ const OAUTH_ENV_KEYS = [
   'MICROSOFT_OAUTH_CLIENT_ID',
   'MICROSOFT_OAUTH_CLIENT_SECRET',
   'MICROSOFT_OAUTH_REDIRECT_URI',
+  'WARMHAWK_DOMAIN',
 ] as const;
 
 const TEST_GOOGLE_REDIRECT_URI = 'https://instance.example.test/v1/oauth/google/callback';
@@ -101,6 +102,8 @@ describeIntegration('oauth client-config routes (integration, real Postgres)', (
         clientId: null,
         maskedClientSecret: null,
         redirectUri: TEST_GOOGLE_REDIRECT_URI,
+        redirectUriOverride: null,
+        defaultRedirectUri: TEST_GOOGLE_REDIRECT_URI,
         updatedAt: null,
       },
       {
@@ -110,9 +113,26 @@ describeIntegration('oauth client-config routes (integration, real Postgres)', (
         clientId: null,
         maskedClientSecret: null,
         redirectUri: TEST_MICROSOFT_REDIRECT_URI,
+        redirectUriOverride: null,
+        defaultRedirectUri: TEST_MICROSOFT_REDIRECT_URI,
         updatedAt: null,
       },
     ]);
+  });
+
+  it('GET / computes a default redirect URI from WARMHAWK_DOMAIN when no env var or override exists', async () => {
+    delete process.env.GOOGLE_OAUTH_REDIRECT_URI;
+    process.env.WARMHAWK_DOMAIN = 'stage-app.warmhawk.com';
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/oauth/client-config',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+
+    const googleEntry = response.json().find((r: { provider: string }) => r.provider === 'GOOGLE');
+    expect(googleEntry.redirectUri).toBe('https://stage-app.warmhawk.com/v1/oauth/google/callback');
+    expect(googleEntry.defaultRedirectUri).toBe('https://stage-app.warmhawk.com/v1/oauth/google/callback');
   });
 
   it('POST / rejects a missing clientId/clientSecret', async () => {
@@ -125,8 +145,9 @@ describeIntegration('oauth client-config routes (integration, real Postgres)', (
     expect(response.statusCode).toBe(422);
   });
 
-  it('POST / rejects when this instance has no redirect URI set for the provider yet', async () => {
+  it('POST / rejects only when NO redirect URI is resolvable at all — no override, no env var, no WARMHAWK_DOMAIN', async () => {
     delete process.env.GOOGLE_OAUTH_REDIRECT_URI;
+    delete process.env.WARMHAWK_DOMAIN;
     const response = await app.inject({
       method: 'POST',
       url: '/v1/oauth/client-config',
@@ -134,7 +155,59 @@ describeIntegration('oauth client-config routes (integration, real Postgres)', (
       payload: { provider: 'GOOGLE', clientId: 'client-123', clientSecret: 'secret-456' },
     });
     expect(response.statusCode).toBe(422);
-    expect(response.json().error).toContain('GOOGLE_OAUTH_REDIRECT_URI');
+    expect(response.json().error).toContain('WARMHAWK_DOMAIN');
+  });
+
+  it('POST / succeeds with no GOOGLE_OAUTH_REDIRECT_URI set, using the WARMHAWK_DOMAIN-computed default', async () => {
+    delete process.env.GOOGLE_OAUTH_REDIRECT_URI;
+    process.env.WARMHAWK_DOMAIN = 'stage-app.warmhawk.com';
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/oauth/client-config',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { provider: 'GOOGLE', clientId: 'client-123', clientSecret: 'secret-456' },
+    });
+    expect(response.statusCode).toBe(201);
+    const saved = response.json();
+    expect(saved.redirectUri).toBe('https://stage-app.warmhawk.com/v1/oauth/google/callback');
+    expect(saved.redirectUriOverride).toBeNull();
+  });
+
+  it('POST / saves a redirectUriOverride and it wins over both the env var and the computed default; posting an empty override clears it back to the default', async () => {
+    const withOverride = await app.inject({
+      method: 'POST',
+      url: '/v1/oauth/client-config',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: {
+        provider: 'GOOGLE',
+        clientId: 'client-123',
+        clientSecret: 'secret-456',
+        redirectUriOverride: 'https://custom-proxy.example.test/v1/oauth/google/callback',
+      },
+    });
+    expect(withOverride.statusCode).toBe(201);
+    expect(withOverride.json().redirectUri).toBe('https://custom-proxy.example.test/v1/oauth/google/callback');
+    expect(withOverride.json().redirectUriOverride).toBe(
+      'https://custom-proxy.example.test/v1/oauth/google/callback',
+    );
+
+    const getResponse = await app.inject({
+      method: 'GET',
+      url: '/v1/oauth/client-config',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    const googleEntry = getResponse.json().find((r: { provider: string }) => r.provider === 'GOOGLE');
+    expect(googleEntry.redirectUri).toBe('https://custom-proxy.example.test/v1/oauth/google/callback');
+    expect(googleEntry.defaultRedirectUri).toBe(TEST_GOOGLE_REDIRECT_URI);
+
+    const cleared = await app.inject({
+      method: 'POST',
+      url: '/v1/oauth/client-config',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { provider: 'GOOGLE', clientId: 'client-123', clientSecret: 'secret-456', redirectUriOverride: '' },
+    });
+    expect(cleared.json().redirectUri).toBe(TEST_GOOGLE_REDIRECT_URI);
+    expect(cleared.json().redirectUriOverride).toBeNull();
   });
 
   it('saves, lists (masked), and deletes a Google client config end to end', async () => {
