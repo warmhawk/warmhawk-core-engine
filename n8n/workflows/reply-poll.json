@@ -1,5 +1,6 @@
 {
   "name": "WarmHawk Reply Poll",
+  "active": true,
   "nodes": [
     {
       "id": "r1-schedule",

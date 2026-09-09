@@ -1,5 +1,6 @@
 {
   "name": "WarmHawk Seed Placement Poll",
+  "active": true,
   "nodes": [
     {
       "id": "s1-schedule",
