@@ -91,12 +91,20 @@ docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" up -d --remo
 # silently never started, with no update path that would ever fix it. Guarded by name (via
 # `n8n list:workflow`) so re-running this script never creates duplicate workflow entities;
 # degrades, never aborts the update.
+#
+# Bug fix (confirmed live on sas-stage, 2026-09-08): `n8n import:workflow --input=<single-file>`
+# throws `workflows.map is not a function` on this n8n version — reproduced even against
+# blocklist-poll.json itself, so it's not content-specific, just how this CLI parses a bare object
+# vs. an array. `--separate --input=<directory>` (n8n's own documented mode for "one workflow per
+# file in a directory") does not hit this. It has no per-name skip-existing behavior of its own, so
+# each not-yet-imported file is copied into its own single-file staging directory and imported one
+# at a time — keeping the exact same per-file guard/logging as before, just changing the CLI shape.
 log "Provisioning n8n workflows (dispatch, reply-poll, seed-placement-poll, blocklist-poll, lookalike-scan)..."
 EXISTING_N8N_WORKFLOWS=$(docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n n8n list:workflow 2>/dev/null || true)
 N8N_IMPORT_FAILED=false
 N8N_WORKFLOW_NAMES=()
 for wf_file in "$REPO_ROOT"/n8n/workflows/*.json; do
-  wf_name=$(node -e "console.log(require('$wf_file').name)" 2>/dev/null || true)
+  wf_name=$(grep -m1 '"name"' "$wf_file" | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
   if [ -z "$wf_name" ]; then
     log "WARNING: could not read workflow name from $wf_file — skipping."
     N8N_IMPORT_FAILED=true
@@ -107,8 +115,10 @@ for wf_file in "$REPO_ROOT"/n8n/workflows/*.json; do
     log "n8n workflow '$wf_name' already present, skipping import."
     continue
   fi
-  if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" cp "$wf_file" n8n:/tmp/n8n-import.json \
-    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n n8n import:workflow --input=/tmp/n8n-import.json; then
+  if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n mkdir -p /tmp/n8n-import-one \
+    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n rm -f /tmp/n8n-import-one/workflow.json \
+    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" cp "$wf_file" n8n:/tmp/n8n-import-one/workflow.json \
+    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n n8n import:workflow --separate --input=/tmp/n8n-import-one/; then
     log "Imported n8n workflow '$wf_name'."
   else
     log "WARNING: failed to import n8n workflow '$wf_name' — import it manually via the n8n editor."
