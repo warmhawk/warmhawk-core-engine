@@ -407,6 +407,30 @@ model AiProviderKey {
   @@map("ai_provider_keys")
 }
 
+enum OAuthClientProvider {
+  GOOGLE
+  MICROSOFT
+}
+
+/// Mailbox-connect friction reduction (2026-09-09) — lets an owner register their own Google/
+/// Microsoft OAuth app's client id/secret in-app instead of editing .env + restarting the stack.
+/// Mirrors AiProviderKey's shape exactly. Takes priority over the GOOGLE_OAUTH_CLIENT_ID/
+/// GOOGLE_OAUTH_CLIENT_SECRET env vars when present (see googleOAuth.ts/microsoftOAuth.ts).
+/// `redirectUriOverride` (2026-09-09 — see oauthRedirectUri.ts) lets a dashboard owner replace the
+/// redirect URI this instance computes from its own domain, for the rare non-standard-reverse-proxy
+/// case, without ever touching `.env` — `null` (the default) means "use the computed default".
+model OAuthClientConfig {
+  id                    String              @id @default(cuid())
+  provider              OAuthClientProvider @unique
+  clientId              String
+  clientSecretEncrypted String
+  redirectUriOverride   String?
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@map("oauth_client_configs")
+}
+
 /// Reply Management & Unified Inbox (V11) — genuinely new model.
 model Reply {
   id             String              @id @default(cuid())

@@ -12,10 +12,15 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
-import { buildGoogleAuthUrl, exchangeGoogleCode } from '../lib/googleOAuth';
-import { buildMicrosoftAuthUrl, exchangeMicrosoftCode } from '../lib/microsoftOAuth';
+import { buildGoogleAuthUrl, exchangeGoogleCode, isGoogleOAuthConfigured } from '../lib/googleOAuth';
+import {
+  buildMicrosoftAuthUrl,
+  exchangeMicrosoftCode,
+  isMicrosoftOAuthConfigured,
+} from '../lib/microsoftOAuth';
 import { signOAuthState, verifyOAuthState, type OAuthStatePayload } from '../lib/oauthState';
 import { encrypt, loadEncryptionKey } from '../lib/encryption';
+import { requireAuth } from '../lib/requireAuth';
 
 type DbProvider = OAuthStatePayload['provider'];
 type RouteProvider = 'google' | 'microsoft';
@@ -39,6 +44,15 @@ function redirectWithError(reply: import('fastify').FastifyReply, reason: string
 }
 
 export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
+  // Dashboard-only, authenticated — unlike /:provider/authorize and /:provider/callback below,
+  // which stay public (the provider itself calls back). Lets the Mailboxes page grey out
+  // "Connect with Google/Microsoft" instead of leaving a button live that dead-ends into
+  // `${provider}_not_configured`.
+  app.get('/status', { preHandler: requireAuth }, async () => ({
+    google: await isGoogleOAuthConfigured(),
+    microsoft: await isMicrosoftOAuthConfigured(),
+  }));
+
   app.get<{ Params: { provider: string }; Querystring: { mailboxId?: string } }>(
     '/:provider/authorize',
     async (request, reply) => {
@@ -48,8 +62,22 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(422).send({ error: 'Unsupported provider or missing mailboxId' });
       }
       const state = signOAuthState({ mailboxId, provider: toDbProvider(provider) });
-      const authUrl =
-        provider === 'google' ? buildGoogleAuthUrl(state) : buildMicrosoftAuthUrl(state);
+      let authUrl: string;
+      try {
+        authUrl =
+          provider === 'google' ? await buildGoogleAuthUrl(state) : await buildMicrosoftAuthUrl(state);
+      } catch (err) {
+        // Thrown when this instance has no client id/secret configured for the provider yet
+        // (blank by default in .env.example — every fresh install starts in this state). Without
+        // this catch, the error escaped as a raw, unbranded 500 JSON body instead of the friendly
+        // in-app toast every other failure path here already gets via redirectWithError(). The
+        // mailbox row was already created by the dashboard's POST /mailboxes just before this
+        // redirect, and never actually connects — remove it so a retry against the same email
+        // isn't blocked by Mailbox.email's unique constraint.
+        app.log.error(err, `[oauth] ${provider} is not configured on this instance`);
+        await prisma.mailbox.delete({ where: { id: mailboxId } }).catch(() => null);
+        return redirectWithError(reply, `${provider}_not_configured`);
+      }
       return reply.redirect(authUrl);
     },
   );
@@ -78,9 +106,19 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       return redirectWithError(reply, 'invalid_state');
     }
 
-    const encryptionKey = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
-
     try {
+      // Moved inside the try (was a bare call before this fix) — same unguarded-crash class as
+      // the /authorize route above: a missing MAILBOX_CREDENTIAL_KEY threw past this handler's
+      // safety net entirely instead of degrading to the friendly redirectWithError() every other
+      // failure here already gets.
+      const encryptionKey = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
+      const mailboxRecord = await prisma.mailbox.findUnique({
+        where: { id: mailboxId },
+        select: { email: true },
+      });
+      if (!mailboxRecord) {
+        return redirectWithError(reply, 'mailbox_not_found');
+      }
       if (provider === 'google') {
         const tokens = await exchangeGoogleCode(code);
         await prisma.mailbox.update({
@@ -90,6 +128,18 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             oauthRefreshTokenEncrypted: encrypt(tokens.refreshToken, encryptionKey),
             oauthConnectedAt: new Date(),
             oauthScope: tokens.scope,
+            // Both nodemailer auth branches in mailSender.ts build the SAME
+            // `createTransport({ host, port, auth })` config regardless of credential type — OAuth2
+            // mailboxes need these just as much as password mailboxes do, but the OAuth callback
+            // never set them, so every OAuth-connected mailbox on every install could never send.
+            smtpHost: 'smtp.gmail.com',
+            smtpPort: 587,
+            // Same gap on the read side: imapClient.ts's openImapClient() requires imapHost just as
+            // unconditionally as mailSender.ts requires smtpHost, so no OAuth-connected mailbox
+            // could ever have its replies polled either (imapPort needs no explicit value here —
+            // the Prisma schema already defaults it to 993, correct for both providers).
+            imapHost: 'imap.gmail.com',
+            authUsername: mailboxRecord.email,
           },
         });
       } else {
@@ -101,6 +151,10 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             oauthRefreshTokenEncrypted: encrypt(tokens.refreshToken, encryptionKey),
             oauthConnectedAt: new Date(),
             oauthScope: tokens.scope,
+            smtpHost: 'smtp.office365.com',
+            smtpPort: 587,
+            imapHost: 'outlook.office365.com',
+            authUsername: mailboxRecord.email,
           },
         });
       }
