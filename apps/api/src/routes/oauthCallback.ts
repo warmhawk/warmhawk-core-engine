@@ -112,6 +112,13 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       // safety net entirely instead of degrading to the friendly redirectWithError() every other
       // failure here already gets.
       const encryptionKey = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
+      const mailboxRecord = await prisma.mailbox.findUnique({
+        where: { id: mailboxId },
+        select: { email: true },
+      });
+      if (!mailboxRecord) {
+        return redirectWithError(reply, 'mailbox_not_found');
+      }
       if (provider === 'google') {
         const tokens = await exchangeGoogleCode(code);
         await prisma.mailbox.update({
@@ -121,6 +128,13 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             oauthRefreshTokenEncrypted: encrypt(tokens.refreshToken, encryptionKey),
             oauthConnectedAt: new Date(),
             oauthScope: tokens.scope,
+            // Both nodemailer auth branches in mailSender.ts build the SAME
+            // `createTransport({ host, port, auth })` config regardless of credential type — OAuth2
+            // mailboxes need these just as much as password mailboxes do, but the OAuth callback
+            // never set them, so every OAuth-connected mailbox on every install could never send.
+            smtpHost: 'smtp.gmail.com',
+            smtpPort: 587,
+            authUsername: mailboxRecord.email,
           },
         });
       } else {
@@ -132,6 +146,9 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             oauthRefreshTokenEncrypted: encrypt(tokens.refreshToken, encryptionKey),
             oauthConnectedAt: new Date(),
             oauthScope: tokens.scope,
+            smtpHost: 'smtp.office365.com',
+            smtpPort: 587,
+            authUsername: mailboxRecord.email,
           },
         });
       }
