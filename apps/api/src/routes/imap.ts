@@ -13,6 +13,7 @@
  * the internal Docker network.
  */
 import type { FastifyInstance } from 'fastify';
+import { simpleParser } from 'mailparser';
 import {
   openImapClient,
   listSpamFolders,
@@ -138,7 +139,15 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
             for await (const chunk of message.content) {
               chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
             }
-            content = Buffer.concat(chunks).toString('utf8');
+            // client.download() with no `part` returns the raw RFC822 source (headers, MIME
+            // boundaries, quoted-printable-encoded HTML) — not the decoded plain-text body this
+            // endpoint promises. Feeding that raw source straight to the classifier is fragile:
+            // a keyword like "interested" can straddle a quoted-printable soft line-wrap
+            // ("in=\r\nterested") and silently defeat both the regex fallback and the LLM prompt.
+            // simpleParser decodes the MIME structure properly and gives us the real text body
+            // (auto-generated from the HTML part when there's no separate text/plain part).
+            const parsed = await simpleParser(Buffer.concat(chunks));
+            content = parsed.text ?? '';
           }
         } finally {
           lock.release();
