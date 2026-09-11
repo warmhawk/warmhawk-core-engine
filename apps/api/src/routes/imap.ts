@@ -13,6 +13,8 @@
  * the internal Docker network.
  */
 import type { FastifyInstance } from 'fastify';
+import { simpleParser } from 'mailparser';
+import { htmlToText } from 'html-to-text';
 import {
   openImapClient,
   listSpamFolders,
@@ -138,7 +140,18 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
             for await (const chunk of message.content) {
               chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
             }
-            content = Buffer.concat(chunks).toString('utf8');
+            // client.download() with no `part` returns the raw RFC822 source (headers, MIME
+            // boundaries, quoted-printable-encoded HTML) — not the decoded plain-text body this
+            // endpoint promises. Feeding that raw source straight to the classifier is fragile:
+            // a keyword like "interested" can straddle a quoted-printable soft line-wrap
+            // ("in=\r\nterested") and silently defeat both the regex fallback and the LLM prompt.
+            // simpleParser decodes the MIME structure properly. It only auto-generates `.text`
+            // from `.html` when the html part is the tree root or sits alongside a text/plain
+            // sibling — an html part wrapped in multipart/mixed (as Gmail sends replies composed
+            // via its API) is neither, so `.text` comes back undefined even though `.html` is
+            // fully decoded; convert that case ourselves rather than falling back to ''.
+            const parsed = await simpleParser(Buffer.concat(chunks));
+            content = parsed.text || (parsed.html ? htmlToText(parsed.html) : '');
           }
         } finally {
           lock.release();
