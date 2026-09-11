@@ -134,6 +134,11 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             // never set them, so every OAuth-connected mailbox on every install could never send.
             smtpHost: 'smtp.gmail.com',
             smtpPort: 587,
+            // Same gap on the read side: imapClient.ts's openImapClient() requires imapHost just as
+            // unconditionally as mailSender.ts requires smtpHost, so no OAuth-connected mailbox
+            // could ever have its replies polled either (imapPort needs no explicit value here —
+            // the Prisma schema already defaults it to 993, correct for both providers).
+            imapHost: 'imap.gmail.com',
             authUsername: mailboxRecord.email,
           },
         });
@@ -148,6 +153,7 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             oauthScope: tokens.scope,
             smtpHost: 'smtp.office365.com',
             smtpPort: 587,
+            imapHost: 'outlook.office365.com',
             authUsername: mailboxRecord.email,
           },
         });
