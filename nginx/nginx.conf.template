@@ -204,9 +204,91 @@ server {
 #     }
 # }
 #
+#
+# # Port 80 once TLS is live. Plain-HTTP callers are redirected to https, EXCEPT a request a
+# # TLS-terminating proxy in front of this box already took over HTTPS (it says so with
+# # X-Forwarded-Proto: https) -- that one is served as-is. A blanket redirect here sends such a proxy
+# # 301 to the https URL it just served, which it forwards back to this port: an endless loop (hit
+# # live 2026-09-26 behind a shared edge proxy). The ACME path is never redirected; certbot's
+# # renewal loop re-validates it over plain HTTP.
 # server {
 #     listen 80;
 #     server_name ${WARMHAWK_DOMAIN};
+#
+#     set $warmhawk_redirect "https";
+#     if ($http_x_forwarded_proto = "https") { set $warmhawk_redirect ""; }
+#     if ($uri ~ "^/\.well-known/acme-challenge/") { set $warmhawk_redirect ""; }
+#     if ($warmhawk_redirect = "https") { return 301 https://$host$request_uri; }
+#
+#     # Same set as the blocks above, except the scheme: $scheme is "http" on this port, but the
+#     # only requests still reaching a location here arrived over https at the proxy.
+#     proxy_set_header Host              $host;
+#     proxy_set_header X-Real-IP         $remote_addr;
+#     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#     proxy_set_header X-Forwarded-Proto https;
+#
 #     location /.well-known/acme-challenge/ { root /var/www/certbot; }
-#     location / { return 301 https://$host$request_uri; }
+#
+#     location /health {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/leads/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/campaigns/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/mailboxes/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/domains/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/queue/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/seed-accounts/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/ai-providers/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/replies/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/oauth/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/public/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/auth/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/instance-settings/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /status/ {
+#         proxy_pass http://uptime-kuma:3001/;
+#         # Repeats the server-level set — any proxy_set_header here replaces all of them.
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto https;
+#         proxy_set_header Upgrade           $http_upgrade;
+#         proxy_set_header Connection        "upgrade";
+#     }
 # }

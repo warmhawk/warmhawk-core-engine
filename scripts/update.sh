@@ -14,12 +14,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 COMPOSE_FILE="$REPO_ROOT/docker/docker-compose.yml"
+NGINX_TEMPLATE="$REPO_ROOT/nginx/nginx.conf.template"
 
 log()  { echo "[update] $*"; }
 fail() {
   echo "[update] ERROR: $*" >&2
   echo "[update] Next step: resolve the error above, then re-run: ./scripts/update.sh" >&2
   exit 1
+}
+
+# Copy of install.sh's enable_tls_template() (see this repo's "no shared shell lib" convention).
+# install.sh turns TLS on by editing the TRACKED nginx.conf.template in place, so on every HTTPS
+# install that file is a local change. Left alone, the checkout below refuses to run the first time
+# the template changes upstream -- the customer is stuck on "you have local changes" for an edit
+# they never made. So the flip is undone before moving and redone on whatever version lands.
+enable_tls_template() {
+  grep -q "Enabled by scripts/install.sh" "$NGINX_TEMPLATE" 2>/dev/null || return 0
+  awk '
+    index($0, "Enabled by scripts/install.sh") > 0 { found=1; next }
+    found { line=$0; sub(/^# ?/, "", line); print line; next }
+  ' "$NGINX_TEMPLATE" > "$NGINX_TEMPLATE.new"
+  mv "$NGINX_TEMPLATE.new" "$NGINX_TEMPLATE"
+  log "Re-enabled the TLS server block in nginx.conf.template."
 }
 
 [ -f "$REPO_ROOT/.env/.env" ] || fail "No .env/.env found — this instance was never installed. Run scripts/install.sh first."
@@ -33,10 +49,29 @@ TARGET_REF="${1:-master}"
 log "Target version: ${TARGET_REF}"
 BEFORE="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
-# An install created by copying a local directory has no remote. That is a supported way to run this
-# engine, so it updates from the working tree as-is rather than failing.
+# The marker line is gone once install.sh has enabled TLS.
+TLS_ENABLED=false
+grep -q "Enabled by scripts/install.sh" "$NGINX_TEMPLATE" 2>/dev/null || TLS_ENABLED=true
+
+# An install created by copying a local directory has no remote. WARMHAWK_CORE_REPO_URL (the same
+# variable the one-line installer clones from) links it to the repository in place, so it can take
+# updates from then on. `checkout -f` below then overwrites the copied files with the fetched ones;
+# .env/.env is untracked and ignored, so the install's secrets are never touched.
+FORCE_CHECKOUT=()
+if ! git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1 && [ -n "${WARMHAWK_CORE_REPO_URL:-}" ]; then
+  log "No git remote configured — linking this install to ${WARMHAWK_CORE_REPO_URL}."
+  [ -d "$REPO_ROOT/.git" ] || git -C "$REPO_ROOT" init -q \
+    || fail "git init failed in ${REPO_ROOT}. Nothing was changed."
+  git -C "$REPO_ROOT" remote add origin "$WARMHAWK_CORE_REPO_URL" \
+    || fail "Could not add ${WARMHAWK_CORE_REPO_URL} as the git remote. Nothing was changed."
+  FORCE_CHECKOUT=(-f)
+fi
+
+# Otherwise an install with no remote is still a supported way to run this engine, so it updates
+# from the working tree as-is rather than failing.
 if ! git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
   log "No git remote configured — updating from the working tree as-is."
+  log "  To take released updates from now on, run once: WARMHAWK_CORE_REPO_URL=https://github.com/warmhawk/warmhawk-core-engine.git warmhawk update"
 else
   log "Fetching ${TARGET_REF}..."
   # Fatal, not a warning. This script exists to move the install forward; carrying on after a failed
@@ -50,17 +85,32 @@ else
     git -C "$REPO_ROOT" fetch origin "${TARGET_REF}:refs/remotes/origin/${TARGET_REF}" >/dev/null 2>&1 || true
   fi
 
+  # Undo install.sh's TLS edit so it is not mistaken for a customer change (see enable_tls_template).
+  # A freshly linked install has no HEAD to restore from; its checkout is forced anyway.
+  if [ "$TLS_ENABLED" = true ] && [ "${#FORCE_CHECKOUT[@]}" -eq 0 ]; then
+    git -C "$REPO_ROOT" checkout -- nginx/nginx.conf.template 2>/dev/null || true
+  fi
+
+  CHECKOUT_OK=true
   if git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/remotes/origin/${TARGET_REF}" >/dev/null; then
     # `checkout <branch>` alone is a no-op when already on it: the fetched commits sit in
     # origin/<branch> and the build below would rebuild the version already installed. Point the
     # branch at what was just fetched. This refuses to run rather than discard local edits.
-    git -C "$REPO_ROOT" checkout -B "$TARGET_REF" "origin/${TARGET_REF}" 2>/dev/null \
-      || fail "Could not move to ${TARGET_REF} — you have local changes to tracked files. Commit or stash them, then re-run. Nothing was changed."
+    git -C "$REPO_ROOT" checkout "${FORCE_CHECKOUT[@]+"${FORCE_CHECKOUT[@]}"}" -B "$TARGET_REF" "origin/${TARGET_REF}" 2>/dev/null \
+      || CHECKOUT_OK=branch
   else
     # Not a branch — a tag or a commit, which needs no fast-forward.
-    git -C "$REPO_ROOT" checkout "$TARGET_REF" 2>/dev/null \
-      || fail "Could not check out '${TARGET_REF}' — no such branch, tag or commit. Nothing was changed."
+    git -C "$REPO_ROOT" checkout "${FORCE_CHECKOUT[@]+"${FORCE_CHECKOUT[@]}"}" "$TARGET_REF" 2>/dev/null \
+      || CHECKOUT_OK=ref
   fi
+
+  # Runs whether or not the checkout worked, so a failed update leaves TLS exactly as it found it.
+  [ "$TLS_ENABLED" = true ] && enable_tls_template
+
+  [ "$CHECKOUT_OK" = branch ] \
+    && fail "Could not move to ${TARGET_REF} — you have local changes to tracked files. Commit or stash them, then re-run. Nothing was changed."
+  [ "$CHECKOUT_OK" = ref ] \
+    && fail "Could not check out '${TARGET_REF}' — no such branch, tag or commit. Nothing was changed."
 fi
 
 AFTER="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
