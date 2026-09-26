@@ -38,6 +38,11 @@ enable_tls_template() {
   log "Re-enabled the TLS server block in nginx.conf.template."
 }
 
+# The install dir can be owned by a different user than the one running this (copied in, or cloned
+# before `sudo warmhawk update`). Git then refuses it as "dubious ownership". This script only ever
+# touches its own install, so trust exactly that one directory.
+git() { command git -c safe.directory="$REPO_ROOT" "$@"; }
+
 [ -f "$REPO_ROOT/.env/.env" ] || fail "No .env/.env found — this instance was never installed. Run scripts/install.sh first."
 
 # `master` is the released branch. It is deliberately not `main`: that is the development trunk, so
