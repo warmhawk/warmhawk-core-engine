@@ -36,6 +36,9 @@
 #   ./scripts/install.sh --domain e2e.internal --acme-server https://pebble:14000/dir --acme-ca-bundle /pebble.minica.pem
 #     # --acme-ca-bundle makes certbot trust a private ACME server's own certificate (Pebble's own
 #     # API is HTTPS-only with a throwaway root) — never meaningful outside a test CA like this.
+#   ./scripts/install.sh --domain api.yourcompany.com --dashboard-url https://dashboard.yourcompany.com
+#     # the licensed dashboard's URL, saved as DASHBOARD_APP_URL. warmhawk.com/install passes it
+#     # whenever it also installs the dashboard; without it, mailbox OAuth lands on localhost:4610.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,6 +76,7 @@ HTTPS_PORT_FLAG=""
 LETSENCRYPT_STAGING=false
 ACME_SERVER=""
 ACME_CA_BUNDLE=""
+DASHBOARD_URL_FLAG=""
 
 log()  { echo "[install] $*"; }
 fail() {
@@ -104,6 +108,7 @@ while [ $# -gt 0 ]; do
     --letsencrypt-staging) LETSENCRYPT_STAGING=true; shift ;;
     --acme-server) ACME_SERVER="$2"; shift 2 ;;
     --acme-ca-bundle) ACME_CA_BUNDLE="$2"; shift 2 ;;
+    --dashboard-url) DASHBOARD_URL_FLAG="$2"; shift 2 ;;
     *) fail "Unknown argument: $1" ;;
   esac
 done
@@ -145,6 +150,8 @@ if [ -f "$ENV_FILE" ]; then
   log ".env/.env already exists — re-run detected, reusing existing secrets where present."
   set -a; source "$ENV_FILE"; set +a
 fi
+# The flag wins over a saved value, so re-running with a new dashboard URL moves it.
+[ -n "$DASHBOARD_URL_FLAG" ] && DASHBOARD_APP_URL="${DASHBOARD_URL_FLAG%/}"
 
 # --- --retry-tls short-circuit: only redo the certbot step, nothing else -----------------------
 if [ "$RETRY_TLS" = true ]; then
@@ -341,6 +348,8 @@ UPTIME_KUMA_PASSWORD=$UPTIME_KUMA_PASSWORD
 # Optional — set this to a webhook URL (Slack/Discord/PagerDuty/etc.) to receive Uptime Kuma
 # down/up alerts. Leave blank to run dashboard-only monitoring with no external alerting.
 UPTIME_KUMA_ALERT_WEBHOOK_URL=${UPTIME_KUMA_ALERT_WEBHOOK_URL:-}
+# The licensed dashboard's URL (--dashboard-url). Blank when no dashboard runs against this instance.
+DASHBOARD_APP_URL=${DASHBOARD_APP_URL:-}
 EDGE_NETWORK_NAME=$EDGE_NETWORK_NAME
 EDGE_NGINX_ALIAS=$EDGE_NGINX_ALIAS
 COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
