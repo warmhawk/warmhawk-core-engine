@@ -21,6 +21,7 @@ import { prisma } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { mintGoogleAccessToken } from './googleOAuth';
 import { mintMicrosoftAccessToken } from './microsoftOAuth';
+import { createGraphTransport } from './microsoftGraphTransport';
 import { assertCanSpamCompliant, buildRfc8058Headers, appendEuAiDisclosureIfNeeded } from './sendCompliance';
 import { getActiveSeedBccEmails } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
@@ -275,27 +276,33 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
   const key = encryptionKey();
 
-  let auth:
-    | { type: 'OAuth2'; user: string; accessToken: string }
-    | { user: string; pass: string };
+  let transporter: nodemailer.Transporter;
 
-  if (mailbox.oauthRefreshTokenEncrypted) {
+  if (mailbox.oauthRefreshTokenEncrypted && mailbox.provider === 'MICROSOFT_365') {
+    // Microsoft 365 sends through Graph, not SMTP — see microsoftGraphTransport.ts for why.
     const refreshToken = decrypt(mailbox.oauthRefreshTokenEncrypted, key);
-    const accessToken =
-      mailbox.provider === 'MICROSOFT_365'
-        ? await mintMicrosoftAccessToken(refreshToken)
-        : await mintGoogleAccessToken(refreshToken);
-    auth = { type: 'OAuth2', user: mailbox.authUsername, accessToken };
+    const accessToken = await mintMicrosoftAccessToken(refreshToken, mailbox.email, 'graph');
+    transporter = nodemailer.createTransport(createGraphTransport(accessToken));
   } else {
-    auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted as string, key) };
-  }
+    let auth:
+      | { type: 'OAuth2'; user: string; accessToken: string }
+      | { user: string; pass: string };
 
-  const transporter = nodemailer.createTransport({
-    host: mailbox.smtpHost,
-    port: mailbox.smtpPort,
-    secure: mailbox.smtpPort === 465,
-    auth,
-  });
+    if (mailbox.oauthRefreshTokenEncrypted) {
+      const refreshToken = decrypt(mailbox.oauthRefreshTokenEncrypted, key);
+      const accessToken = await mintGoogleAccessToken(refreshToken);
+      auth = { type: 'OAuth2', user: mailbox.authUsername, accessToken };
+    } else {
+      auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted as string, key) };
+    }
+
+    transporter = nodemailer.createTransport({
+      host: mailbox.smtpHost,
+      port: mailbox.smtpPort,
+      secure: mailbox.smtpPort === 465,
+      auth,
+    });
+  }
 
   const headers: Record<string, string> = {};
   if (listUnsubscribeHeader) headers['List-Unsubscribe'] = listUnsubscribeHeader;
