@@ -10,6 +10,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import type { FastifyInstance } from 'fastify';
 import { createApp } from '../../app';
 import { prisma } from '@warmhawk/db';
+import { signOAuthState } from '../../lib/oauthState';
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
@@ -139,5 +140,70 @@ describeIntegration('oauth authorize route (integration, real Postgres)', () => 
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({ google: true, microsoft: false });
+  });
+
+  it('sends Microsoft sign-in to the mailbox\'s own tenant with a login hint, never /common', async () => {
+    process.env.MICROSOFT_OAUTH_CLIENT_ID = 'test-client-id';
+    process.env.MICROSOFT_OAUTH_CLIENT_SECRET = 'test-client-secret';
+    process.env.MICROSOFT_OAUTH_REDIRECT_URI = 'http://localhost:4600/v1/oauth/microsoft/callback';
+    const email = `tenant-${Date.now()}@contoso.example.com`;
+    const mailbox = await prisma.mailbox.create({ data: { email, domainId } });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v1/oauth/microsoft/authorize?mailboxId=${mailbox.id}`,
+    });
+
+    expect(response.statusCode).toBe(302);
+    const location = new URL(response.headers.location as string);
+    // A single-tenant app registration (Entra's default) is rejected by /common with AADSTS50194.
+    expect(location.pathname).toBe('/contoso.example.com/oauth2/v2.0/authorize');
+    expect(location.searchParams.get('login_hint')).toBe(email);
+
+    await prisma.mailbox.delete({ where: { id: mailbox.id } }).catch(() => null);
+  });
+
+  it('a provider-rejected connect removes the never-connected mailbox and passes the reason through', async () => {
+    const mailbox = await prisma.mailbox.create({
+      data: { email: `rejected-${Date.now()}@example.com`, domainId },
+    });
+    const state = signOAuthState({ mailboxId: mailbox.id, provider: 'MICROSOFT_365' });
+    const description =
+      "AADSTS50194: Application 'abc'(WarmHawk) is not configured as a multi-tenant application. Usage of the /common endpoint is not supported. Trace ID: 123";
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v1/oauth/microsoft/callback?${new URLSearchParams({ error: 'invalid_request', error_description: description, state })}`,
+    });
+
+    expect(response.statusCode).toBe(302);
+    const location = new URL(response.headers.location as string, 'http://localhost');
+    expect(location.searchParams.get('oauth_error')).toBe('microsoft_rejected');
+    expect(location.searchParams.get('oauth_detail')).toBe(
+      "AADSTS50194: Application 'abc'(WarmHawk) is not configured as a multi-tenant application.",
+    );
+    expect(await prisma.mailbox.findUnique({ where: { id: mailbox.id } })).toBeNull();
+  });
+
+  it('a declined consent reports "denied" and never removes a mailbox that already has a credential', async () => {
+    const mailbox = await prisma.mailbox.create({
+      data: {
+        email: `reconnect-${Date.now()}@example.com`,
+        domainId,
+        oauthRefreshTokenEncrypted: 'already-connected',
+      },
+    });
+    const state = signOAuthState({ mailboxId: mailbox.id, provider: 'MICROSOFT_365' });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v1/oauth/microsoft/callback?${new URLSearchParams({ error: 'access_denied', state })}`,
+    });
+
+    const location = new URL(response.headers.location as string, 'http://localhost');
+    expect(location.searchParams.get('oauth_error')).toBe('microsoft_denied');
+    expect(await prisma.mailbox.findUnique({ where: { id: mailbox.id } })).not.toBeNull();
+
+    await prisma.mailbox.delete({ where: { id: mailbox.id } }).catch(() => null);
   });
 });

@@ -29,7 +29,7 @@ export async function openImapClient(mailboxId: string): Promise<ImapFlow> {
     const refreshToken = decrypt(mailbox.oauthRefreshTokenEncrypted, key);
     const accessToken =
       mailbox.provider === 'MICROSOFT_365'
-        ? await mintMicrosoftAccessToken(refreshToken)
+        ? await mintMicrosoftAccessToken(refreshToken, mailbox.email, 'imap')
         : await mintGoogleAccessToken(refreshToken);
     auth = { user: mailbox.authUsername, accessToken };
   } else if (mailbox.authPasswordEncrypted) {

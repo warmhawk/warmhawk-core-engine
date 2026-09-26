@@ -37,10 +37,32 @@ function dashboardUrl(): string {
   return process.env.DASHBOARD_APP_URL || 'http://localhost:4610';
 }
 
-function redirectWithError(reply: import('fastify').FastifyReply, reason: string) {
+function redirectWithError(reply: import('fastify').FastifyReply, reason: string, detail?: string) {
   const url = new URL('/dashboard/mailboxes', dashboardUrl());
   url.searchParams.set('oauth_error', reason);
+  if (detail) url.searchParams.set('oauth_detail', detail);
   return reply.redirect(url.toString());
+}
+
+/** The provider's own explanation, trimmed to its first sentence — e.g. Microsoft's
+ *  "AADSTS50194: Application '…' is not configured as a multi-tenant application." is exactly what
+ *  the admin fixing the app registration needs, while the trace/correlation ids that follow it are
+ *  noise in a toast. */
+function providerErrorDetail(description: string | undefined): string | undefined {
+  const firstSentence = description?.split(/(?<=\.)\s/)[0]?.trim();
+  return firstSentence ? firstSentence.slice(0, 300) : undefined;
+}
+
+/** The dashboard's POST /mailboxes creates the row before the consent round trip. When that round
+ *  trip fails, a row that never got a credential is removed — otherwise it lingers as a
+ *  credential-less "WARMUP" mailbox that looks connected and blocks a retry on Mailbox.email's
+ *  unique constraint. A mailbox that already holds a credential (a reconnect) is left alone. */
+async function removeIfNeverConnected(mailboxId: string): Promise<void> {
+  await prisma.mailbox
+    .deleteMany({
+      where: { id: mailboxId, oauthRefreshTokenEncrypted: null, authPasswordEncrypted: null },
+    })
+    .catch(() => null);
 }
 
 export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
@@ -61,11 +83,18 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       if (!isSupportedProvider(provider) || !mailboxId) {
         return reply.code(422).send({ error: 'Unsupported provider or missing mailboxId' });
       }
+      const mailbox = await prisma.mailbox.findUnique({
+        where: { id: mailboxId },
+        select: { email: true },
+      });
+      if (!mailbox) return redirectWithError(reply, 'mailbox_not_found');
       const state = signOAuthState({ mailboxId, provider: toDbProvider(provider) });
       let authUrl: string;
       try {
         authUrl =
-          provider === 'google' ? await buildGoogleAuthUrl(state) : await buildMicrosoftAuthUrl(state);
+          provider === 'google'
+            ? await buildGoogleAuthUrl(state)
+            : await buildMicrosoftAuthUrl(state, mailbox.email);
       } catch (err) {
         // Thrown when this instance has no client id/secret configured for the provider yet
         // (blank by default in .env.example — every fresh install starts in this state). Without
@@ -84,16 +113,29 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
 
   app.get<{
     Params: { provider: string };
-    Querystring: { code?: string; state?: string; error?: string };
+    Querystring: { code?: string; state?: string; error?: string; error_description?: string };
   }>('/:provider/callback', async (request, reply) => {
     const { provider } = request.params;
-    const { code, state, error } = request.query;
+    const { code, state, error, error_description: errorDescription } = request.query;
 
     if (!isSupportedProvider(provider)) {
       return reply.code(404).send({ error: 'Unsupported provider' });
     }
     if (error) {
-      return redirectWithError(reply, `${provider}_denied`);
+      // Only a signed state identifies a mailbox this flow created — never delete on an unsigned id.
+      let failedMailboxId: string | undefined;
+      try {
+        if (state) ({ mailboxId: failedMailboxId } = verifyOAuthState(state));
+      } catch {
+        failedMailboxId = undefined;
+      }
+      if (failedMailboxId) await removeIfNeverConnected(failedMailboxId);
+      // `access_denied` is the user declining consent. Anything else is the provider rejecting the
+      // request itself (app registration, tenant policy) — reporting that as "denied" sent admins
+      // looking at the wrong thing.
+      return error === 'access_denied'
+        ? redirectWithError(reply, `${provider}_denied`)
+        : redirectWithError(reply, `${provider}_rejected`, providerErrorDetail(errorDescription));
     }
     if (!code || !state) {
       return redirectWithError(reply, 'missing_code_or_state');
@@ -143,7 +185,7 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       } else {
-        const tokens = await exchangeMicrosoftCode(code);
+        const tokens = await exchangeMicrosoftCode(code, mailboxRecord.email);
         await prisma.mailbox.update({
           where: { id: mailboxId },
           data: {
@@ -160,6 +202,7 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       }
     } catch (err) {
       app.log.error(err, `[oauth] token exchange failed for provider=${provider}`);
+      await removeIfNeverConnected(mailboxId);
       return redirectWithError(reply, 'token_exchange_failed');
     }
 

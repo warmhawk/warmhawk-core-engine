@@ -7,7 +7,15 @@
  * (no external SDK dependency, since `@azure/msal-node` would be the only reason to add one and
  * this repo's scope is one token exchange + one refresh call, both plain HTTPS POSTs).
  *
- * Requests `Mail.Send` + `IMAP.AccessAsUser.All` (delegated) scopes, per the spec.
+ * Consents to Graph `Mail.Send` + `IMAP.AccessAsUser.All` (delegated). Sending goes through Graph
+ * (`microsoftGraphTransport.ts`), not SMTP: SMTP AUTH is off by default on new Microsoft 365
+ * tenants, so an SMTP-based send failed with `535 5.7.3` for any customer who hadn't had their IT
+ * admin re-enable it per mailbox. Graph needs no tenant setting. IMAP stays on outlook.office.com.
+ *
+ * Every call goes to the mailbox's own tenant (`/{email-domain}/`), never `/common`. Entra's
+ * default for a new app registration is "single tenant", and `/common` rejects those outright
+ * (AADSTS50194) — so the app a customer registers by following the defaults could never connect.
+ * A domain-addressed tenant endpoint works for single- and multi-tenant apps alike.
  *
  * IMPORTANT — this requires a Microsoft Entra app registration, an EXTERNAL dependency this repo
  * cannot create or verify on its own (blocked on a real Azure/Entra tenant + admin consent flow).
@@ -20,17 +28,36 @@ import { prisma } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { resolveRedirectUri } from './oauthRedirectUri';
 
-const MICROSOFT_AUTHORIZE_ENDPOINT =
-  'https://login.microsoftonline.com/common/oauth2/v2.0/authorize';
-const MICROSOFT_TOKEN_ENDPOINT = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
+/** The tenant a mailbox signs in to, addressed by its email domain — Entra resolves any verified
+ *  domain to its tenant, so no tenant id has to be collected from the customer. */
+function tenantFor(email: string): string {
+  const domain = email.split('@')[1]?.trim().toLowerCase();
+  if (!domain) throw new Error(`Cannot derive a Microsoft tenant from "${email}"`);
+  return encodeURIComponent(domain);
+}
+
+function authorizeEndpoint(email: string): string {
+  return `https://login.microsoftonline.com/${tenantFor(email)}/oauth2/v2.0/authorize`;
+}
+
+function tokenEndpoint(email: string): string {
+  return `https://login.microsoftonline.com/${tenantFor(email)}/oauth2/v2.0/token`;
+}
+
+const GRAPH_MAIL_SEND_SCOPE = 'https://graph.microsoft.com/Mail.Send';
+const IMAP_SCOPE = 'https://outlook.office.com/IMAP.AccessAsUser.All';
 
 /** Delegated scopes requested at consent time — `offline_access` is required to receive a
- *  refresh_token, matching Google's `access_type=offline` equivalent. */
-export const MICROSOFT_OAUTH_SCOPES = [
-  'offline_access',
-  'https://outlook.office.com/Mail.Send',
-  'https://outlook.office.com/IMAP.AccessAsUser.All',
-];
+ *  refresh_token, matching Google's `access_type=offline` equivalent. Consent may span both
+ *  resources, but a token request may name only one, hence `scopeFor` below. */
+export const MICROSOFT_OAUTH_SCOPES = ['offline_access', GRAPH_MAIL_SEND_SCOPE, IMAP_SCOPE];
+
+/** Which resource an access token is minted for: `graph` to send, `imap` to read replies. */
+export type MicrosoftTokenResource = 'graph' | 'imap';
+
+function scopeFor(resource: MicrosoftTokenResource): string {
+  return ['offline_access', resource === 'graph' ? GRAPH_MAIL_SEND_SCOPE : IMAP_SCOPE].join(' ');
+}
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -74,7 +101,7 @@ export async function isMicrosoftOAuthConfigured(): Promise<boolean> {
   return Boolean(process.env.MICROSOFT_OAUTH_CLIENT_ID && process.env.MICROSOFT_OAUTH_CLIENT_SECRET);
 }
 
-export async function buildMicrosoftAuthUrl(state: string): Promise<string> {
+export async function buildMicrosoftAuthUrl(state: string, email: string): Promise<string> {
   const { clientId, redirectUri } = await resolveMicrosoftOAuthCredentials();
   const params = new URLSearchParams({
     client_id: clientId,
@@ -82,9 +109,12 @@ export async function buildMicrosoftAuthUrl(state: string): Promise<string> {
     redirect_uri: redirectUri,
     response_mode: 'query',
     scope: MICROSOFT_OAUTH_SCOPES.join(' '),
+    // Preselects the mailbox being connected, so a browser signed in to several Microsoft
+    // accounts doesn't consent with the wrong one.
+    login_hint: email,
     state,
   });
-  return `${MICROSOFT_AUTHORIZE_ENDPOINT}?${params.toString()}`;
+  return `${authorizeEndpoint(email)}?${params.toString()}`;
 }
 
 export interface ExchangedMicrosoftTokens {
@@ -101,6 +131,7 @@ export type FetchLike = typeof fetch;
 
 export async function exchangeMicrosoftCode(
   code: string,
+  email: string,
   fetchImpl: FetchLike = fetch,
 ): Promise<ExchangedMicrosoftTokens> {
   const { clientId, clientSecret, redirectUri } = await resolveMicrosoftOAuthCredentials();
@@ -111,10 +142,10 @@ export async function exchangeMicrosoftCode(
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
-    scope: MICROSOFT_OAUTH_SCOPES.join(' '),
+    scope: scopeFor('imap'),
   });
 
-  const response = await fetchImpl(MICROSOFT_TOKEN_ENDPOINT, {
+  const response = await fetchImpl(tokenEndpoint(email), {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
@@ -146,9 +177,11 @@ export async function exchangeMicrosoftCode(
 }
 
 /** Mints a fresh access token from a stored refresh token — same "reconnect this mailbox on
- *  expiry" UX contract as `mintGoogleAccessToken`. */
+ *  expiry" UX contract as `mintGoogleAccessToken`. One refresh token serves both resources. */
 export async function mintMicrosoftAccessToken(
   refreshToken: string,
+  email: string,
+  resource: MicrosoftTokenResource,
   fetchImpl: FetchLike = fetch,
 ): Promise<string> {
   const { clientId, clientSecret } = await resolveMicrosoftOAuthCredentials();
@@ -158,10 +191,10 @@ export async function mintMicrosoftAccessToken(
     client_secret: clientSecret,
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
-    scope: MICROSOFT_OAUTH_SCOPES.join(' '),
+    scope: scopeFor(resource),
   });
 
-  const response = await fetchImpl(MICROSOFT_TOKEN_ENDPOINT, {
+  const response = await fetchImpl(tokenEndpoint(email), {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
