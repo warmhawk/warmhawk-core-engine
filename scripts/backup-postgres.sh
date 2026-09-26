@@ -26,7 +26,12 @@ fi
 BACKUP_LOCAL_PATH="${BACKUP_LOCAL_PATH:-/var/backups/warmhawk}"
 BACKUP_RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-14}"
 BACKUP_RCLONE_REMOTE="${BACKUP_RCLONE_REMOTE:-}"
-POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-$(basename "$REPO_ROOT")-postgres-1}"
+# docker-compose.yml's postgres service sets an explicit container_name
+# (${COMPOSE_PROJECT_NAME:-warmhawk-core-engine}-postgres) — Compose never
+# appends a numeric suffix to an explicit container_name, unlike its default
+# <project>-<service>-<n> naming, so guessing a "-1" suffix here never
+# matches. Every default install hits this.
+POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-${COMPOSE_PROJECT_NAME:-$(basename "$REPO_ROOT")}-postgres}"
 POSTGRES_USER="${POSTGRES_USER:-warmhawk}"
 POSTGRES_DB="${POSTGRES_DB:-warmhawk}"
 

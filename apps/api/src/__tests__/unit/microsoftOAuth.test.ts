@@ -1,4 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+// resolveMicrosoftOAuthCredentials() checks for an in-app-wizard-saved OAuthClientConfig row
+// before falling back to env vars (friction-reduction, 2026-09-09) — mocked here so this stays a
+// real unit test (no live DB), consistent with this repo's "mock/stub the actual provider call,
+// don't make a real one" convention. Resolves null (no DB override) so every test below still
+// exercises the env-var fallback path it was originally written for.
+vi.mock('@warmhawk/db', () => ({
+  prisma: { oAuthClientConfig: { findUnique: vi.fn().mockResolvedValue(null) } },
+}));
+
 import {
   buildMicrosoftAuthUrl,
   exchangeMicrosoftCode,
@@ -21,8 +31,8 @@ describe('Microsoft 365 OAuth (token exchange/refresh — HTTP boundary mocked, 
     process.env.MICROSOFT_OAUTH_REDIRECT_URI = 'https://app.example.com/oauth/microsoft/callback';
   });
 
-  it('buildMicrosoftAuthUrl includes required scopes and state', () => {
-    const url = buildMicrosoftAuthUrl('state-123');
+  it('buildMicrosoftAuthUrl includes required scopes and state', async () => {
+    const url = await buildMicrosoftAuthUrl('state-123');
     expect(url).toContain('https://login.microsoftonline.com/common/oauth2/v2.0/authorize');
     expect(url).toContain('state=state-123');
     for (const scope of MICROSOFT_OAUTH_SCOPES) {

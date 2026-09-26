@@ -16,6 +16,10 @@
  * repo's build report for the explicit "blocked, external" note.
  */
 
+import { prisma } from '@warmhawk/db';
+import { decrypt, loadEncryptionKey } from './encryption';
+import { resolveRedirectUri } from './oauthRedirectUri';
+
 const MICROSOFT_AUTHORIZE_ENDPOINT =
   'https://login.microsoftonline.com/common/oauth2/v2.0/authorize';
 const MICROSOFT_TOKEN_ENDPOINT = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
@@ -34,9 +38,44 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-export function buildMicrosoftAuthUrl(state: string): string {
-  const clientId = requiredEnv('MICROSOFT_OAUTH_CLIENT_ID');
-  const redirectUri = requiredEnv('MICROSOFT_OAUTH_REDIRECT_URI');
+interface MicrosoftOAuthCredentials {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+}
+
+/** Mirrors `googleOAuth.ts`'s `resolveGoogleOAuthCredentials` — an in-app wizard-saved client
+ *  id/secret (`OAuthClientConfig`, provider `MICROSOFT`) takes priority over
+ *  MICROSOFT_OAUTH_CLIENT_ID/MICROSOFT_OAUTH_CLIENT_SECRET when present. Redirect URI resolution
+ *  is shared with Google — see oauthRedirectUri.ts. */
+async function resolveMicrosoftOAuthCredentials(): Promise<MicrosoftOAuthCredentials> {
+  const redirectUri = await resolveRedirectUri('MICROSOFT');
+  const dbConfig = await prisma.oAuthClientConfig.findUnique({ where: { provider: 'MICROSOFT' } });
+  if (dbConfig) {
+    const key = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
+    return {
+      clientId: dbConfig.clientId,
+      clientSecret: decrypt(dbConfig.clientSecretEncrypted, key),
+      redirectUri,
+    };
+  }
+  return {
+    clientId: requiredEnv('MICROSOFT_OAUTH_CLIENT_ID'),
+    clientSecret: requiredEnv('MICROSOFT_OAUTH_CLIENT_SECRET'),
+    redirectUri,
+  };
+}
+
+/** Cheap check for the dashboard's Mailboxes page — mirrors `googleOAuth.ts`'s
+ *  `isGoogleOAuthConfigured`, including the same "don't also gate on the redirect URI" reasoning. */
+export async function isMicrosoftOAuthConfigured(): Promise<boolean> {
+  const dbConfig = await prisma.oAuthClientConfig.findUnique({ where: { provider: 'MICROSOFT' } });
+  if (dbConfig) return true;
+  return Boolean(process.env.MICROSOFT_OAUTH_CLIENT_ID && process.env.MICROSOFT_OAUTH_CLIENT_SECRET);
+}
+
+export async function buildMicrosoftAuthUrl(state: string): Promise<string> {
+  const { clientId, redirectUri } = await resolveMicrosoftOAuthCredentials();
   const params = new URLSearchParams({
     client_id: clientId,
     response_type: 'code',
@@ -64,9 +103,7 @@ export async function exchangeMicrosoftCode(
   code: string,
   fetchImpl: FetchLike = fetch,
 ): Promise<ExchangedMicrosoftTokens> {
-  const clientId = requiredEnv('MICROSOFT_OAUTH_CLIENT_ID');
-  const clientSecret = requiredEnv('MICROSOFT_OAUTH_CLIENT_SECRET');
-  const redirectUri = requiredEnv('MICROSOFT_OAUTH_REDIRECT_URI');
+  const { clientId, clientSecret, redirectUri } = await resolveMicrosoftOAuthCredentials();
 
   const body = new URLSearchParams({
     client_id: clientId,
@@ -114,8 +151,7 @@ export async function mintMicrosoftAccessToken(
   refreshToken: string,
   fetchImpl: FetchLike = fetch,
 ): Promise<string> {
-  const clientId = requiredEnv('MICROSOFT_OAUTH_CLIENT_ID');
-  const clientSecret = requiredEnv('MICROSOFT_OAUTH_CLIENT_SECRET');
+  const { clientId, clientSecret } = await resolveMicrosoftOAuthCredentials();
 
   const body = new URLSearchParams({
     client_id: clientId,
