@@ -147,6 +147,14 @@ docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" up -d --remo
 # `n8n list:workflow`) so re-running this script never creates duplicate workflow entities;
 # degrades, never aborts the update.
 #
+# A workflow that is already there is re-imported when its bundled file changed since the last
+# run, not skipped: skipping by name alone meant no release could ever ship a workflow fix to an
+# existing install (found 2026-09-27 — v1.4.0's dispatch.json never reached a single updated
+# instance). The hash of each file as last imported lives in .env/n8n-workflows.sha256 (untracked,
+# like .env/.env). The re-import carries the existing workflow's id, which `n8n import:workflow`
+# upserts in place, so the webhook path and execution history stay put. An install from before
+# the state file existed has no recorded hashes, so its first update re-imports every workflow once.
+#
 # Bug fix (confirmed live on sas-stage, 2026-09-08): `n8n import:workflow --input=<single-file>`
 # throws `workflows.map is not a function` on this n8n version — reproduced even against
 # blocklist-poll.json itself, so it's not content-specific, just how this CLI parses a bare object
@@ -154,10 +162,30 @@ docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" up -d --remo
 # file in a directory") does not hit this. It has no per-name skip-existing behavior of its own, so
 # each not-yet-imported file is copied into its own single-file staging directory and imported one
 # at a time — keeping the exact same per-file guard/logging as before, just changing the CLI shape.
+N8N_STATE_FILE="$REPO_ROOT/.env/n8n-workflows.sha256"
+file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
 log "Provisioning n8n workflows (dispatch, reply-poll, seed-placement-poll, blocklist-poll, lookalike-scan, warmup-tick)..."
-EXISTING_N8N_WORKFLOWS=$(docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n n8n list:workflow 2>/dev/null || true)
+# n8n runs its own DB setup when its container (re)starts; an import or list issued before that
+# finishes fails with nothing but "User settings loaded" (seen 2026-09-27 on a fresh install, where
+# the first workflow in the loop never imported). Wait for its own health endpoint first.
+N8N_READY=false
+for _ in $(seq 1 60); do
+  if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n wget -qO- http://127.0.0.1:5678/healthz >/dev/null 2>&1; then N8N_READY=true; break; fi
+  sleep 2
+done
+[ "$N8N_READY" = true ] || log "WARNING: n8n did not report healthy within 2 minutes — trying the import anyway."
 N8N_IMPORT_FAILED=false
+N8N_LIST_OK=true
+EXISTING_N8N_WORKFLOWS=$(docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n n8n list:workflow 2>/dev/null) || N8N_LIST_OK=false
+if [ "$N8N_LIST_OK" = false ]; then
+  # Without the list, every existing workflow looks absent and would be imported a second time.
+  log "WARNING: could not list the existing n8n workflows — skipping the import so nothing is duplicated."
+  N8N_IMPORT_FAILED=true
+fi
 N8N_WORKFLOW_NAMES=()
+N8N_NEW_STATE=""
 for wf_file in "$REPO_ROOT"/n8n/workflows/*.json; do
   wf_name=$(grep -m1 '"name"' "$wf_file" | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
   if [ -z "$wf_name" ]; then
@@ -166,20 +194,44 @@ for wf_file in "$REPO_ROOT"/n8n/workflows/*.json; do
     continue
   fi
   N8N_WORKFLOW_NAMES+=("$wf_name")
-  if printf '%s\n' "$EXISTING_N8N_WORKFLOWS" | grep -qF "|$wf_name"; then
-    log "n8n workflow '$wf_name' already present, skipping import."
+  wf_key=$(basename "$wf_file")
+  wf_hash=$(file_sha256 "$wf_file")
+  recorded_hash=$(awk -v f="$wf_key" '$2 == f { print $1; exit }' "$N8N_STATE_FILE" 2>/dev/null || true)
+  if [ "$N8N_LIST_OK" = false ]; then
+    if [ -n "$recorded_hash" ]; then N8N_NEW_STATE+="$recorded_hash $wf_key"$'\n'; fi
     continue
   fi
+  existing_id=$(printf '%s\n' "$EXISTING_N8N_WORKFLOWS" | awk -F'|' -v n="$wf_name" '$2 == n { print $1; exit }')
+  if [ -n "$existing_id" ] && [ "$recorded_hash" = "$wf_hash" ]; then
+    log "n8n workflow '$wf_name' is up to date."
+    N8N_NEW_STATE+="$wf_hash $wf_key"$'\n'
+    continue
+  fi
+  # `compose cp` lands the file root-owned while n8n runs as `node`, so it's staged outside the
+  # import directory and node writes the file that actually gets imported — carrying the existing
+  # workflow's id when there is one, which makes the import update that workflow in place.
   if docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n mkdir -p /tmp/n8n-import-one \
     && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n rm -f /tmp/n8n-import-one/workflow.json \
-    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" cp "$wf_file" n8n:/tmp/n8n-import-one/workflow.json \
+    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" cp "$wf_file" n8n:/tmp/n8n-import-src.json \
+    && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n node -e \
+      'const fs=require("fs"),w=JSON.parse(fs.readFileSync("/tmp/n8n-import-src.json","utf8"));if(process.argv[1])w.id=process.argv[1];fs.writeFileSync("/tmp/n8n-import-one/workflow.json",JSON.stringify(w));' \
+      "$existing_id" \
     && docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" exec -T n8n n8n import:workflow --separate --input=/tmp/n8n-import-one/; then
-    log "Imported n8n workflow '$wf_name'."
+    if [ -n "$existing_id" ]; then
+      log "Updated n8n workflow '$wf_name' to this release's version."
+    else
+      log "Imported n8n workflow '$wf_name'."
+    fi
+    N8N_NEW_STATE+="$wf_hash $wf_key"$'\n'
   else
     log "WARNING: failed to import n8n workflow '$wf_name' — import it manually via the n8n editor."
     N8N_IMPORT_FAILED=true
+    # Keep the old hash (if any), so the next update tries this file again.
+    if [ -n "$recorded_hash" ]; then N8N_NEW_STATE+="$recorded_hash $wf_key"$'\n'; fi
   fi
 done
+printf '%s' "$N8N_NEW_STATE" > "$N8N_STATE_FILE" \
+  || log "WARNING: could not write $N8N_STATE_FILE — the next update will re-import every n8n workflow."
 if [ "${#N8N_WORKFLOW_NAMES[@]}" -eq 0 ]; then
   log "WARNING: no n8n workflow names resolved — skipping activation."
   N8N_IMPORT_FAILED=true
