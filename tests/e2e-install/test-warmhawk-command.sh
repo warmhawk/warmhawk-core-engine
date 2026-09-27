@@ -116,6 +116,8 @@ echo "$out" | grep -q "STEPS-OF: new from=$OLD to=$NEW" \
   || { echo "FAIL: the old update.sh ran its own steps instead of handing over. Got:"; echo "$out"; exit 1; }
 [ "$(echo "$out" | grep -c "Target version:")" = 1 ] \
   || { echo "FAIL: the hand-over repeated the fetch/checkout. Got:"; echo "$out"; exit 1; }
+echo "$out" | grep -q "Continuing with the update steps of the version just checked out" \
+  || { echo "FAIL: the new update.sh did not say it took over. Got:"; echo "$out"; exit 1; }
 
 out="$(timeout 30 bash /inst/scripts/update.sh master 2>&1)" || { echo "FAIL: re-run exited non-zero (a hand-over loop?):"; echo "$out"; exit 1; }
 echo "$out" | grep -q "STEPS-OF: new from=$NEW to=$NEW" \

@@ -54,7 +54,11 @@ TARGET_REF="${1:-master}"
 HANDED_OVER_FROM="${WARMHAWK_UPDATE_HANDED_OVER_FROM:-}"
 # Logged before anything else touches git, so the ref this run targets is always visible — including
 # on a host with no git and in the "no remote" path below.
-[ -n "$HANDED_OVER_FROM" ] || log "Target version: ${TARGET_REF}"
+if [ -n "$HANDED_OVER_FROM" ]; then
+  log "Continuing with the update steps of the version just checked out."
+else
+  log "Target version: ${TARGET_REF}"
+fi
 BEFORE="${HANDED_OVER_FROM:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 # The marker line is gone once install.sh has enabled TLS.
