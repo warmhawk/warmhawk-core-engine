@@ -79,4 +79,47 @@ docker run --rm \
     fi
   ' || fail "dispatcher assertions failed (see output above)."
 
+# --- 5. update.sh hands over to the version it just checked out ----------------------------------
+# bash keeps executing the copy of update.sh it started with after `git checkout` replaces the file,
+# so without the hand-over every fix to update.sh's own steps landed one update late (v1.4.1's n8n
+# re-import, 2026-09-27). A local "origin" gets two commits whose update.sh differ only in a marker
+# printed right after the checkout block, and exit there so no docker is needed. An install on the
+# first commit must print the second commit's marker, exactly once, and a re-run must not loop.
+log "Checking update.sh hands over to the checked-out version..."
+docker run --rm -i \
+  -v "$REPO_ROOT:/src:ro" \
+  bash:5 bash -euo pipefail -s <<'INNER' || fail "update.sh hand-over assertions failed (see output above)."
+apk add --no-cache git >/dev/null
+export GIT_AUTHOR_NAME=e2e GIT_AUTHOR_EMAIL=e2e@acme.example GIT_COMMITTER_NAME=e2e GIT_COMMITTER_EMAIL=e2e@acme.example
+mark() {
+  sed -i "/^AFTER=\"\\\$(git -C/a echo \"STEPS-OF: $1 from=\$BEFORE to=\$AFTER\"; exit 0" /origin/scripts/update.sh
+  grep -q "STEPS-OF: $1" /origin/scripts/update.sh || { echo "FAIL: could not plant the marker in update.sh"; exit 1; }
+}
+
+mkdir -p /origin/scripts
+cp /src/scripts/update.sh /origin/scripts/
+git -C /origin init -q -b master
+mark old
+git -C /origin add -A && git -C /origin commit -qm old
+OLD="$(git -C /origin rev-parse --short HEAD)"
+
+git clone -q /origin /inst
+mkdir -p /inst/.env && : > /inst/.env/.env
+
+cp /src/scripts/update.sh /origin/scripts/update.sh
+mark new
+git -C /origin commit -qam new
+NEW="$(git -C /origin rev-parse --short HEAD)"
+
+out="$(timeout 30 bash /inst/scripts/update.sh master 2>&1)" || { echo "FAIL: update exited non-zero:"; echo "$out"; exit 1; }
+echo "$out" | grep -q "STEPS-OF: new from=$OLD to=$NEW" \
+  || { echo "FAIL: the old update.sh ran its own steps instead of handing over. Got:"; echo "$out"; exit 1; }
+[ "$(echo "$out" | grep -c "Target version:")" = 1 ] \
+  || { echo "FAIL: the hand-over repeated the fetch/checkout. Got:"; echo "$out"; exit 1; }
+
+out="$(timeout 30 bash /inst/scripts/update.sh master 2>&1)" || { echo "FAIL: re-run exited non-zero (a hand-over loop?):"; echo "$out"; exit 1; }
+echo "$out" | grep -q "STEPS-OF: new from=$NEW to=$NEW" \
+  || { echo "FAIL: an up-to-date re-run did not run its own steps once. Got:"; echo "$out"; exit 1; }
+INNER
+
 log "PASSED."
