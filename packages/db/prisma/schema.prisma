@@ -273,6 +273,13 @@ model Mailbox {
   oauthRefreshTokenEncrypted String?
   oauthConnectedAt          DateTime?
   oauthScope                String?
+  /// Which OAuth client minted the refresh token: the instance's own app (BYO) or WarmHawk
+  /// Connect. A refresh has to go back to the same client, so this decides where every access
+  /// token comes from.
+  oauthVia                  OAuthVia @default(BYO)
+  /// The WarmHawk Connect client id at connect time. Microsoft refreshes need it, and keeping it
+  /// per mailbox means a later client rotation doesn't strand mailboxes connected before it.
+  oauthClientId             String?
 
   // Cadence enforcement — last successful send timestamp, read by computeNextSlotSeconds.ts.
   lastSentAt DateTime?
@@ -470,6 +477,13 @@ enum OAuthClientProvider {
   MICROSOFT
 }
 
+/// WarmHawk Connect (09-27-26): BYO = the instance's own OAuth app (OAuthClientConfig or env);
+/// CONNECT = WarmHawk's shared app, reached through the relay on warmhawk.com.
+enum OAuthVia {
+  BYO
+  CONNECT
+}
+
 /// Mailbox-connect friction reduction (2026-09-09) — lets an owner register their own Google/
 /// Microsoft OAuth app's client id/secret in-app instead of editing .env + restarting the stack.
 /// Mirrors AiProviderKey's shape exactly. Takes priority over the GOOGLE_OAUTH_CLIENT_ID/
@@ -524,6 +538,11 @@ model Reply {
 model InstanceSettings {
   id                     String   @id @default("default")
   physicalMailingAddress String?
+  /// WarmHawk Connect: the operator's license token (AES-256-GCM, like mailbox credentials) and the
+  /// relay it talks to. Pushed by the operator via PUT /v1/instance-settings/connect-license and
+  /// never returned by any GET.
+  connectLicenseEncrypted String?
+  connectRelayBaseUrl     String?
   updatedAt              DateTime @updatedAt
 
   @@map("instance_settings")

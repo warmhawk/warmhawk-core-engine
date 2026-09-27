@@ -329,6 +329,11 @@ describeIntegration('oauth client-config routes (integration, real Postgres)', (
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ google: true, microsoft: false });
+    expect(response.json()).toEqual({
+      google: true,
+      microsoft: false,
+      via: { google: 'BYO', microsoft: null },
+      connectClientIds: { google: null, microsoft: null },
+    });
   });
 });

@@ -21,8 +21,7 @@
 import nodemailer from 'nodemailer';
 import { prisma, type AiWriteOutcome } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
-import { mintGoogleAccessToken } from './googleOAuth';
-import { mintMicrosoftAccessToken } from './microsoftOAuth';
+import { mintMailboxAccessToken } from './mailboxAccessToken';
 import { createGraphTransport } from './microsoftGraphTransport';
 import {
   assertCanSpamCompliant,
@@ -321,8 +320,10 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
   if (mailbox.oauthRefreshTokenEncrypted && mailbox.provider === 'MICROSOFT_365') {
     // Microsoft 365 sends through Graph, not SMTP — see microsoftGraphTransport.ts for why.
-    const refreshToken = decrypt(mailbox.oauthRefreshTokenEncrypted, key);
-    const accessToken = await mintMicrosoftAccessToken(refreshToken, mailbox.email, 'graph');
+    const accessToken = await mintMailboxAccessToken(
+      { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
+      'send',
+    );
     transporter = nodemailer.createTransport(createGraphTransport(accessToken));
   } else {
     let auth:
@@ -330,8 +331,10 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
       | { user: string; pass: string };
 
     if (mailbox.oauthRefreshTokenEncrypted) {
-      const refreshToken = decrypt(mailbox.oauthRefreshTokenEncrypted, key);
-      const accessToken = await mintGoogleAccessToken(refreshToken);
+      const accessToken = await mintMailboxAccessToken(
+        { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
+        'send',
+      );
       auth = { type: 'OAuth2', user: mailbox.authUsername, accessToken };
     } else {
       auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted as string, key) };
