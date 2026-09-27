@@ -49,10 +49,13 @@ git() { command git -c safe.directory="$REPO_ROOT" "$@"; }
 # defaulting to it upgraded every install to unreleased code. Pass a tag (`./scripts/update.sh
 # v1.0.3`) to pin to an exact version instead.
 TARGET_REF="${1:-master}"
+# Set when the copy of this script that did the fetch/checkout hands over to the one it checked out
+# (see below) — carries the version it started from, so the fetch/checkout isn't repeated.
+HANDED_OVER_FROM="${WARMHAWK_UPDATE_HANDED_OVER_FROM:-}"
 # Logged before anything else touches git, so the ref this run targets is always visible — including
 # on a host with no git and in the "no remote" path below.
-log "Target version: ${TARGET_REF}"
-BEFORE="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+[ -n "$HANDED_OVER_FROM" ] || log "Target version: ${TARGET_REF}"
+BEFORE="${HANDED_OVER_FROM:-$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 # The marker line is gone once install.sh has enabled TLS.
 TLS_ENABLED=false
@@ -74,7 +77,9 @@ fi
 
 # Otherwise an install with no remote is still a supported way to run this engine, so it updates
 # from the working tree as-is rather than failing.
-if ! git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
+if [ -n "$HANDED_OVER_FROM" ]; then
+  : # The previous copy of this script already fetched and checked out the target.
+elif ! git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
   log "No git remote configured — updating from the working tree as-is."
   log "  To take released updates from now on, run once: WARMHAWK_CORE_REPO_URL=https://github.com/warmhawk/warmhawk-core-engine.git warmhawk update"
 else
@@ -116,6 +121,14 @@ else
     && fail "Could not move to ${TARGET_REF} — you have local changes to tracked files. Commit or stash them, then re-run. Nothing was changed."
   [ "$CHECKOUT_OK" = ref ] \
     && fail "Could not check out '${TARGET_REF}' — no such branch, tag or commit. Nothing was changed."
+
+  # bash keeps running the copy of this script it started with, even after the checkout above
+  # replaced the file — so everything below ran the OLD release's steps, and a fix to them only
+  # took effect one update later (v1.4.1's n8n re-import skipped on the box's first update to it,
+  # 2026-09-27). Hand over to the version just checked out; it skips straight past this block.
+  if [ "$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)" != "$BEFORE" ]; then
+    WARMHAWK_UPDATE_HANDED_OVER_FROM="$BEFORE" exec bash "$SCRIPT_DIR/update.sh" "$TARGET_REF"
+  fi
 fi
 
 AFTER="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
