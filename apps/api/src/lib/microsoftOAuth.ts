@@ -24,6 +24,7 @@
  * repo's build report for the explicit "blocked, external" note.
  */
 
+import { createHash, randomBytes } from 'node:crypto';
 import { prisma } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { resolveRedirectUri } from './oauthRedirectUri';
@@ -209,4 +210,147 @@ export async function mintMicrosoftAccessToken(
     throw new Error('Microsoft token refresh did not return an access_token');
   }
   return json.access_token;
+}
+
+// ---------------------------------------------------------------------------------------------
+// WarmHawk Connect (09-27-26) — WarmHawk's shared Microsoft app, a public client with PKCE. The
+// relay on warmhawk.com only signs the authorize URL and bounces the code back; the code is
+// useless without the PKCE verifier, which never leaves this install unencrypted. So the
+// exchange and every refresh go straight from here to Microsoft, with no client secret, and no
+// Microsoft token ever reaches warmhawk.com. Design: 09-26-26-warmhawk-connect.html Section 4.
+// ---------------------------------------------------------------------------------------------
+
+const GRAPH_USER_READ_SCOPE = 'https://graph.microsoft.com/User.Read';
+
+/** The relay's authorize URL uses `/organizations` (work and school accounts only), so the code
+ *  is redeemed there too. Refreshes can go to the mailbox's own tenant like BYO does. */
+const CONNECT_TOKEN_ENDPOINT = 'https://login.microsoftonline.com/organizations/oauth2/v2.0/token';
+
+export interface PkcePair {
+  verifier: string;
+  challenge: string;
+}
+
+export function createPkcePair(): PkcePair {
+  const verifier = randomBytes(32).toString('base64url');
+  const challenge = createHash('sha256').update(verifier).digest('base64url');
+  return { verifier, challenge };
+}
+
+/** A Microsoft token-endpoint refusal, keeping its `error` and AADSTS text so the callback can
+ *  tell "an admin has to approve this app" apart from everything else. */
+export class MicrosoftTokenError extends Error {
+  constructor(
+    readonly error: string,
+    readonly description: string,
+  ) {
+    super(`Microsoft token endpoint: ${error} ${description}`.trim());
+    this.name = 'MicrosoftTokenError';
+  }
+}
+
+async function microsoftTokenRequest(
+  endpoint: string,
+  body: URLSearchParams,
+  fetchImpl: FetchLike,
+): Promise<{ access_token?: string; refresh_token?: string; expires_in?: number; scope?: string }> {
+  const response = await fetchImpl(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+  const json = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new MicrosoftTokenError(
+      typeof json.error === 'string' ? json.error : `http_${response.status}`,
+      typeof json.error_description === 'string' ? json.error_description : '',
+    );
+  }
+  return json as { access_token?: string; refresh_token?: string; expires_in?: number; scope?: string };
+}
+
+export async function exchangeMicrosoftCodeConnect(
+  input: { code: string; codeVerifier: string; clientId: string; redirectUri: string },
+  fetchImpl: FetchLike = fetch,
+): Promise<ExchangedMicrosoftTokens> {
+  const json = await microsoftTokenRequest(
+    CONNECT_TOKEN_ENDPOINT,
+    new URLSearchParams({
+      client_id: input.clientId,
+      grant_type: 'authorization_code',
+      code: input.code,
+      redirect_uri: input.redirectUri,
+      code_verifier: input.codeVerifier,
+      // Graph resource: Mail.Send to send, User.Read for the account check right after.
+      scope: ['offline_access', GRAPH_MAIL_SEND_SCOPE, GRAPH_USER_READ_SCOPE].join(' '),
+    }),
+    fetchImpl,
+  );
+  if (!json.refresh_token || !json.access_token) {
+    throw new MicrosoftTokenError('missing_tokens', 'No refresh_token/access_token returned');
+  }
+  return {
+    refreshToken: json.refresh_token,
+    accessToken: json.access_token,
+    expiresInSeconds: json.expires_in ?? 3600,
+    scope: json.scope ?? null,
+  };
+}
+
+export interface RefreshedMicrosoftToken {
+  accessToken: string;
+  expiresInSeconds: number;
+  /** Microsoft rotates refresh tokens; the caller stores this one when it comes back. */
+  refreshToken: string | null;
+}
+
+export async function refreshMicrosoftConnectToken(
+  input: { refreshToken: string; email: string; resource: MicrosoftTokenResource; clientId: string },
+  fetchImpl: FetchLike = fetch,
+): Promise<RefreshedMicrosoftToken> {
+  const json = await microsoftTokenRequest(
+    tokenEndpoint(input.email),
+    new URLSearchParams({
+      client_id: input.clientId,
+      grant_type: 'refresh_token',
+      refresh_token: input.refreshToken,
+      scope: scopeFor(input.resource),
+    }),
+    fetchImpl,
+  );
+  if (!json.access_token) {
+    throw new MicrosoftTokenError('missing_tokens', 'No access_token returned');
+  }
+  return {
+    accessToken: json.access_token,
+    expiresInSeconds: json.expires_in ?? 3600,
+    refreshToken: json.refresh_token ?? null,
+  };
+}
+
+/** Every address the signed-in Microsoft account can send as, lowercased: `mail`,
+ *  `userPrincipalName` and each `smtp:` proxy address. On 09-26 the UPN and the primary SMTP
+ *  address differed on a real tenant, so checking only one of them rejects real owners. */
+export async function fetchMicrosoftSignedInAddresses(
+  graphAccessToken: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<string[]> {
+  const response = await fetchImpl(
+    'https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,proxyAddresses',
+    { headers: { authorization: `Bearer ${graphAccessToken}` } },
+  );
+  if (!response.ok) throw new Error(`Graph /me responded with ${response.status}`);
+  const me = (await response.json()) as {
+    mail?: string | null;
+    userPrincipalName?: string | null;
+    proxyAddresses?: string[] | null;
+  };
+  const addresses = [
+    me.mail,
+    me.userPrincipalName,
+    ...(me.proxyAddresses ?? [])
+      .filter((entry) => /^smtp:/i.test(entry))
+      .map((entry) => entry.slice('smtp:'.length)),
+  ];
+  return [...new Set(addresses.filter((a): a is string => Boolean(a)).map((a) => a.toLowerCase()))];
 }

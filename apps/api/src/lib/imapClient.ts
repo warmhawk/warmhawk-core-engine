@@ -1,14 +1,13 @@
 /**
  * IMAP client factory. OAuth-connected mailboxes (Google or Microsoft) authenticate via XOAUTH2
- * using a freshly-minted access token; SMTP/IMAP-password mailboxes use the stored (encrypted)
+ * using an access token from mintMailboxAccessToken; SMTP/IMAP-password mailboxes use the stored (encrypted)
  * password. Both paths decrypt server-side only, in this process, and never write plaintext
  * credentials to a log.
  */
 import { ImapFlow } from 'imapflow';
 import { prisma } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
-import { mintGoogleAccessToken } from './googleOAuth';
-import { mintMicrosoftAccessToken } from './microsoftOAuth';
+import { mintMailboxAccessToken } from './mailboxAccessToken';
 
 function encryptionKey() {
   return loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
@@ -26,11 +25,10 @@ export async function openImapClient(mailboxId: string): Promise<ImapFlow> {
   let auth: { user: string; accessToken?: string; pass?: string } | null = null;
 
   if (mailbox.oauthRefreshTokenEncrypted) {
-    const refreshToken = decrypt(mailbox.oauthRefreshTokenEncrypted, key);
-    const accessToken =
-      mailbox.provider === 'MICROSOFT_365'
-        ? await mintMicrosoftAccessToken(refreshToken, mailbox.email, 'imap')
-        : await mintGoogleAccessToken(refreshToken);
+    const accessToken = await mintMailboxAccessToken(
+      { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
+      'imap',
+    );
     auth = { user: mailbox.authUsername, accessToken };
   } else if (mailbox.authPasswordEncrypted) {
     auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted, key) };
