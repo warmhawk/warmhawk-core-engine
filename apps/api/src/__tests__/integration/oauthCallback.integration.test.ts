@@ -124,7 +124,12 @@ describeIntegration('oauth authorize route (integration, real Postgres)', () => 
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ google: false, microsoft: false });
+    expect(response.json()).toEqual({
+      google: false,
+      microsoft: false,
+      via: { google: null, microsoft: null },
+      connectClientIds: { google: null, microsoft: null },
+    });
   });
 
   it('GET /status reports a provider configured once its env vars are set', async () => {
@@ -139,7 +144,12 @@ describeIntegration('oauth authorize route (integration, real Postgres)', () => 
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ google: true, microsoft: false });
+    expect(response.json()).toEqual({
+      google: true,
+      microsoft: false,
+      via: { google: 'BYO', microsoft: null },
+      connectClientIds: { google: null, microsoft: null },
+    });
   });
 
   it('sends Microsoft sign-in to the mailbox\'s own tenant with a login hint, never /common', async () => {
