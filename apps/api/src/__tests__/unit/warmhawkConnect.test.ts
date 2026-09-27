@@ -64,7 +64,7 @@ describe('WarmHawk Connect (install side)', () => {
 
   beforeEach(async () => {
     process.env.MAILBOX_CREDENTIAL_KEY = KEY_B64;
-    process.env.JWT_SECRET = 'test-jwt-secret-0123456789abcdef';
+    process.env.JWT_SECRET = 'test-only-not-a-real-secret-value';
     process.env.OPERATOR_SERVICE_TOKEN = 'operator-token';
     process.env.WARMHAWK_DOMAIN = 'warmhawk.acme.example';
     process.env.DASHBOARD_APP_URL = 'https://dash.acme.example';
