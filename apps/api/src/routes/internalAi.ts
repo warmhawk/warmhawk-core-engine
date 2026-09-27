@@ -13,135 +13,55 @@ import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { decrypt, loadEncryptionKey } from '../lib/encryption';
-import { personalizeContent, classifyReply, fillMergeFields } from '../lib/aiProviderClient';
-import { renderSpintax } from '../lib/spintax';
-import { appendEuAiDisclosureIfNeeded } from '../lib/sendCompliance';
+import { classifyReply } from '../lib/aiProviderClient';
+import { composeCampaignEmail, resolveSenderName } from '../lib/composeCampaignEmail';
+
+// Moved to `lib/composeCampaignEmail.ts` so the dashboard preview shares them; re-exported for the
+// existing callers and tests that import them from here.
+export { personalizeWithFallback, renderFallbackTemplate } from '../lib/composeCampaignEmail';
 
 function encryptionKey() {
   return loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
 }
 
-const PERSONALIZATION_RETRY_DELAY_MS = 1_500;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** Retry-once-then-fall-back policy (resolved when real AI calls were wired in): a flaky provider
- *  must never stall a send. One retry after a short delay absorbs a transient blip; a second
- *  failure falls back to the campaign's own template so the send still goes out, un-personalized,
- *  rather than the queue stalling on it. `aiPersonalizationFailed: true` on the response is the
- *  visible flag callers (and, eventually, the dashboard) can key off of. */
-export async function personalizeWithFallback(
-  request: Parameters<typeof personalizeContent>[0],
-  fallbackText: string,
-): Promise<{ generatedText: string; aiUsed: boolean; aiPersonalizationFailed: boolean }> {
-  try {
-    const { generatedText } = await personalizeContent(request);
-    return { generatedText, aiUsed: true, aiPersonalizationFailed: false };
-  } catch {
-    await sleep(PERSONALIZATION_RETRY_DELAY_MS);
-    try {
-      const { generatedText } = await personalizeContent(request);
-      return { generatedText, aiUsed: true, aiPersonalizationFailed: false };
-    } catch {
-      return { generatedText: fallbackText, aiUsed: false, aiPersonalizationFailed: true };
-    }
-  }
-}
-
-/** Renders the campaign's own literal template for the no-AI-provider / inactive-key fallback
- *  path: merge fields first, then spintax. `{{firstName}}` is itself a balanced `{...}` pair one
- *  level in (`{firstName}`) — `lib/spintax.ts`'s innermost-group regex explicitly excludes that
- *  doubled-brace shape (see its own comment, bug fix 2026-09-04), so `renderSpintax` alone no
- *  longer corrupts an unfilled merge field even if this ran out of order. Filling merge fields
- *  first is kept anyway, both because it's the more obviously correct order and as defense in
- *  depth: it removes every `{{...}}` pair before spintax's regex runs at all, rather than relying
- *  solely on that regex's exclusion. */
-export function renderFallbackTemplate(template: string, leadContext: Record<string, unknown>): string {
-  const merged = fillMergeFields(template, leadContext);
-  return renderSpintax(merged);
-}
-
 export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireCallbackSecret);
 
-  app.post<{ Body: { campaignId?: string; leadId?: string } }>(
+  app.post<{ Body: { campaignId?: string; leadId?: string; mailboxId?: string } }>(
     '/personalize',
     async (request, reply) => {
-      const { campaignId, leadId } = request.body;
+      const { campaignId, leadId, mailboxId } = request.body;
       if (!campaignId || !leadId) {
         return reply.code(422).send({ error: 'campaignId and leadId are required' });
       }
 
-      const [campaign, lead] = await Promise.all([
+      const [campaign, lead, mailbox] = await Promise.all([
         prisma.campaign.findUnique({ where: { id: campaignId } }),
         prisma.lead.findUnique({ where: { id: leadId } }),
+        // `mailboxId` is optional so a dispatch workflow from before it was sent still works; with
+        // none, `{{senderName}}` is simply left for the model / template to do without.
+        mailboxId
+          ? prisma.mailbox.findUnique({ where: { id: mailboxId }, select: { email: true, senderName: true } })
+          : null,
       ]);
       if (!campaign || !lead) return reply.code(404).send({ error: 'Campaign or lead not found' });
 
-      const leadContext = {
-        firstName: lead.firstName,
-        lastName: lead.lastName,
-        company: lead.company,
-        ...(typeof lead.customFields === 'object' && lead.customFields ? lead.customFields : {}),
-      };
-      const rawTemplate = campaign.template ?? campaign.aiPromptTemplate;
-
-      if (!campaign.aiProvider) {
-        // No provider configured — render the template (merge fields + spintax) rather than
-        // failing, and rather than sending it back raw (Phase 3 spec: send as-is is about not
-        // failing the send, not about skipping the template's own merge/spintax syntax).
-        return reply.send({
-          generatedText: renderFallbackTemplate(rawTemplate, leadContext),
-          aiUsed: false,
-        });
-      }
-
-      const providerKey = await prisma.aiProviderKey.findUnique({
-        where: { provider: campaign.aiProvider },
-      });
-      if (!providerKey || !providerKey.isActive) {
-        return reply.send({
-          generatedText: renderFallbackTemplate(rawTemplate, leadContext),
-          aiUsed: false,
-        });
-      }
-
-      const apiKey = decrypt(providerKey.apiKeyEncrypted, encryptionKey());
-      // The AI call's own fallback (a flaky/erroring provider, handled by `personalizeWithFallback`
-      // below) must render the same way as the two no-provider branches above — a customer who
-      // configured AI but hit a transient outage still deserves merge fields + spintax instead of
-      // raw template text.
-      const fallbackText = renderFallbackTemplate(rawTemplate, leadContext);
-      const { generatedText, aiUsed, aiPersonalizationFailed } = await personalizeWithFallback(
-        {
-          provider: campaign.aiProvider,
-          apiKey,
-          model: providerKey.model,
-          promptTemplate: campaign.aiPromptTemplate,
-          leadContext,
-        },
-        fallbackText,
-      );
-
-      // The EU AI-disclosure marker only applies to actual AI-generated content — a fallback send
-      // uses the plain template, so there's nothing to disclose.
-      const { body, disclosureAppended } = aiUsed
-        ? appendEuAiDisclosureIfNeeded(generatedText, true, {
-            email: lead.email,
-            countryCode:
-              typeof lead.customFields === 'object' && lead.customFields
-                ? ((lead.customFields as Record<string, unknown>).countryCode as string | undefined)
-                : undefined,
-          })
-        : { body: generatedText, disclosureAppended: false };
+      // No provider, an inactive key, and a provider that fails twice all send the campaign's own
+      // email rendered (merge fields + spintax) — never raw template text, never a stalled send.
+      // The EU AI-disclosure marker is appended only to actual AI-written copy.
+      const composed = await composeCampaignEmail({ campaign, lead, senderName: resolveSenderName(mailbox) });
 
       return reply.send({
-        generatedText: body,
-        aiUsed,
-        aiPersonalizationFailed,
-        euAiDisclosureAppended: disclosureAppended,
+        // `generatedText` keeps the old single-string shape (subject line, newline, body) for a
+        // dispatch workflow that still splits on the first newline itself.
+        generatedText: `${composed.subject}\n${composed.body}`,
+        subject: composed.subject,
+        body: composed.body,
+        aiUsed: composed.aiOutcome === 'AI_WRITTEN',
+        aiPersonalizationFailed: composed.aiOutcome === 'AI_FALLBACK',
+        aiOutcome: composed.aiOutcome,
+        aiFallbackReason: composed.aiFallbackReason,
+        euAiDisclosureAppended: composed.euAiDisclosureAppended,
       });
     },
   );

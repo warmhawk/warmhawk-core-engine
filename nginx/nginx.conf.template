@@ -108,6 +108,10 @@ server {
         proxy_pass http://api:4600;
     }
 
+    location /v1/warmup/ {
+        proxy_pass http://api:4600;
+    }
+
     # Bundled Uptime Kuma dashboard, served under its own path so a customer can reach it through
     # the same TLS-terminated domain without a second cert/subdomain.
     location /status/ {
@@ -189,6 +193,10 @@ server {
 #     }
 #
 #     location /v1/instance-settings/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/warmup/ {
 #         proxy_pass http://api:4600;
 #     }
 #
@@ -278,6 +286,10 @@ server {
 #     }
 #
 #     location /v1/instance-settings/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/warmup/ {
 #         proxy_pass http://api:4600;
 #     }
 #

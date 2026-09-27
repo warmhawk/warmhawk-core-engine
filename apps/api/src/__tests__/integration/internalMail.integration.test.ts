@@ -24,13 +24,17 @@ const CALLBACK_SECRET = process.env.NEXTJS_CALLBACK_SECRET || 'test-only-callbac
 interface FakeSmtpServer {
   port: number;
   close: () => Promise<void>;
+  /** Raw DATA of every message received, oldest first — for asserting on sent headers. */
+  messages: string[];
 }
 
 function startFakeSmtpServer(): Promise<FakeSmtpServer> {
+  const messages: string[] = [];
   return new Promise((resolve) => {
     const server = net.createServer((socket) => {
       let buffer = '';
       let inData = false;
+      let dataLines: string[] = [];
       socket.write('220 fake-smtp.test ESMTP\r\n');
       socket.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
@@ -40,8 +44,11 @@ function startFakeSmtpServer(): Promise<FakeSmtpServer> {
           buffer = buffer.slice(idx + 2);
 
           if (inData) {
+            if (line !== '.') dataLines.push(line);
             if (line === '.') {
               inData = false;
+              messages.push(dataLines.join('\n'));
+              dataLines = [];
               socket.write('250 2.0.0 OK: queued as fake-message-id\r\n');
             }
             continue;
@@ -72,9 +79,17 @@ function startFakeSmtpServer(): Promise<FakeSmtpServer> {
     server.listen(0, '127.0.0.1', () => {
       const address = server.address();
       const port = address && typeof address === 'object' ? address.port : 0;
-      resolve({ port, close: () => new Promise((res) => server.close(() => res())) });
+      resolve({ port, messages, close: () => new Promise((res) => server.close(() => res())) });
     });
   });
+}
+
+/** The text part of a raw message: nodemailer quoted-printable-encodes lines over 76 chars. */
+function textOf(raw: string): string {
+  const body = raw.slice(raw.indexOf('\n\n') + 2);
+  return /quoted-printable/i.test(raw)
+    ? body.replace(/=\n/g, '').replace(/=([0-9A-F]{2})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    : body;
 }
 
 describeIntegration('/internal/mail routes (integration, real Postgres + real SMTP peer)', () => {
@@ -165,8 +180,10 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     expect(json.messageId).toBeTruthy();
     expect(json.euAiDisclosureAppended).toBe(false);
     expect(json.seedBccCount).toBe(0);
-    // Non-campaign send: no CAN-SPAM headers attached.
+    // Non-campaign send: no CAN-SPAM headers attached, and no footer in the body.
     expect(json.listUnsubscribeHeader).toBeUndefined();
+    expect(json.canSpamFooterAppended).toBe(false);
+    expect(textOf(fakeSmtp.messages.at(-1) as string).trim()).toBe('Hi there');
   });
 
   it('sends a real campaign email end-to-end: RFC 8058 headers attached, lead marked CONTACTED, ExecutionLog SENT recorded', async () => {
@@ -201,10 +218,130 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     expect(log?.providerMessageId).toBeTruthy();
     expect(log?.n8nExecutionId).toBe('test-exec-1');
     // Privacy fix (Guardrails): only length metadata is persisted, never the actual content.
-    expect(log?.payloadSent).toEqual({ subjectLength: 'Campaign Subject'.length, bodyLength: 'Campaign body'.length });
+    // The CAN-SPAM footer is part of what went out, so it counts toward the length.
+    const sentBody = `Campaign body\n\n--\n123 Test St, Testville\nUnsubscribe: https://example.org/unsub?email=${encodeURIComponent(leadEmail)}`;
+    expect(log?.payloadSent).toEqual({ subjectLength: 'Campaign Subject'.length, bodyLength: sentBody.length });
+    expect(json.canSpamFooterAppended).toBe(true);
+    expect(textOf(fakeSmtp.messages.at(-1) as string).trim()).toBe(sentBody);
 
     const updatedMailbox = await prisma.mailbox.findUniqueOrThrow({ where: { id: mailboxId } });
     expect(updatedMailbox.sentToday).toBeGreaterThanOrEqual(1);
+  });
+
+  it('sends From the mailbox sender name and records who wrote the copy on the ExecutionLog', async () => {
+    await prisma.mailbox.update({ where: { id: mailboxId }, data: { senderName: 'Sam Patel' } });
+    const lead = await prisma.lead.create({
+      data: { campaignId, email: `ai-outcome-${Date.now()}@acme.example`, status: 'UNTOUCHED' },
+    });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/mail/send',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+        payload: {
+          mailboxId,
+          to: lead.email,
+          subject: 'Outcome Subject',
+          body: 'Outcome body',
+          campaignId,
+          leadId: lead.id,
+          aiOutcome: 'AI_FALLBACK',
+          aiFallbackReason: 'model_unavailable',
+        },
+      });
+      expect(response.statusCode).toBe(200);
+
+      const log = await prisma.executionLog.findFirstOrThrow({ where: { leadId: lead.id, status: 'SENT' } });
+      expect(log.aiOutcome).toBe('AI_FALLBACK');
+      expect(log.aiFallbackReason).toBe('model_unavailable');
+      expect(fakeSmtp.messages.at(-1)).toMatch(new RegExp(`^From: "?Sam Patel"? <${mailboxEmail}>$`, 'm'));
+    } finally {
+      await prisma.mailbox.update({ where: { id: mailboxId }, data: { senderName: null } });
+    }
+  });
+
+  it('adds the EU AI disclosure by the reported outcome, not by whether the campaign has a provider', async () => {
+    const send = async (aiOutcome: string) => {
+      const lead = await prisma.lead.create({
+        data: { campaignId, email: `eu-${aiOutcome}-${Date.now()}@acme.example`, status: 'UNTOUCHED' },
+      });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/mail/send',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+        payload: { mailboxId, to: lead.email, subject: 'EU', body: 'EU body', campaignId, leadId: lead.id, countryCode: 'DE', aiOutcome },
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json().euAiDisclosureAppended;
+    };
+    expect(await send('AI_WRITTEN')).toBe(true);
+    expect(await send('AI_FALLBACK')).toBe(false);
+    expect(await send('NOT_A_REAL_OUTCOME')).toBe(false);
+  });
+
+  it('does not repeat an address or unsubscribe link the email already carries', async () => {
+    const lead = await prisma.lead.create({
+      data: { campaignId, email: `footer-dedupe-${Date.now()}@acme.example`, status: 'UNTOUCHED' },
+    });
+    const unsubscribeUrl = `https://example.org/unsub?email=${encodeURIComponent(lead.email)}`;
+    const send = (body: string, leadId: string, to: string) =>
+      app.inject({
+        method: 'POST',
+        url: '/internal/mail/send',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+        payload: { mailboxId, to, subject: 'Dedupe', body, campaignId, leadId },
+      });
+
+    const signedOff = await send('Thanks,\nSam\n123 Test St,\nTestville', lead.id, lead.email);
+    expect(signedOff.json().canSpamFooterAppended).toBe(true);
+    const sent = textOf(fakeSmtp.messages.at(-1) as string);
+    expect(sent.match(/123 Test St/g)).toHaveLength(1);
+    expect(sent.trim().endsWith(`--\nUnsubscribe: ${unsubscribeUrl}`)).toBe(true);
+
+    const lead2 = await prisma.lead.create({
+      data: { campaignId, email: `footer-both-${Date.now()}@acme.example`, status: 'UNTOUCHED' },
+    });
+    const both = `Hi\n123 Test St, Testville\nOpt out: https://example.org/unsub?email=${encodeURIComponent(lead2.email)}`;
+    const complete = await send(both, lead2.id, lead2.email);
+    expect(complete.json().canSpamFooterAppended).toBe(false);
+    expect(textOf(fakeSmtp.messages.at(-1) as string).trim()).toBe(both);
+  });
+
+  it('puts the footer after the EU AI disclosure on an AI-written EU send', async () => {
+    const lead = await prisma.lead.create({
+      data: { campaignId, email: `footer-eu-${Date.now()}@acme.de`, status: 'UNTOUCHED' },
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/internal/mail/send',
+      headers: { 'x-callback-secret': CALLBACK_SECRET },
+      payload: { mailboxId, to: lead.email, subject: 'EU', body: 'Hallo', campaignId, leadId: lead.id, aiOutcome: 'AI_WRITTEN' },
+    });
+    expect(response.json()).toMatchObject({ euAiDisclosureAppended: true, canSpamFooterAppended: true });
+    const sent = textOf(fakeSmtp.messages.at(-1) as string);
+    expect(sent.indexOf('EU AI Act Article 50')).toBeLessThan(sent.indexOf('123 Test St'));
+  });
+
+  it('refuses a campaign send with no instance mailing address, and never reaches SMTP', async () => {
+    const lead = await prisma.lead.create({
+      data: { campaignId, email: `no-address-${Date.now()}@acme.example`, status: 'UNTOUCHED' },
+    });
+    const received = fakeSmtp.messages.length;
+    await prisma.instanceSettings.delete({ where: { id: 'default' } });
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/mail/send',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+        payload: { mailboxId, to: lead.email, subject: 'x', body: 'y', campaignId, leadId: lead.id },
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.json().error).toMatch(/physical mailing address/i);
+      expect(fakeSmtp.messages.length).toBe(received);
+      expect((await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } })).status).toBe('UNTOUCHED');
+    } finally {
+      await prisma.instanceSettings.create({ data: { id: 'default', physicalMailingAddress: '123 Test St, Testville' } });
+    }
   });
 
   it('refuses a campaign send missing CAN-SPAM compliance (no unsubscribe template)', async () => {

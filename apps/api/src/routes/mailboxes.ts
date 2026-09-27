@@ -21,6 +21,22 @@ interface CreateMailboxBody {
   imapPort?: number;
   authUsername?: string;
   authPassword?: string; // plaintext in transit over TLS only — encrypted immediately below
+  senderName?: string | null;
+}
+
+const SENDER_NAME_MAX = 80;
+
+/** The From display name. Blank clears it (back to the address's local part); a CR/LF would let
+ *  a caller inject extra headers into every send, so those are refused outright. */
+function parseSenderName(value: unknown): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (value === null) return { ok: true, value: null };
+  if (typeof value !== 'string') return { ok: false, error: 'senderName must be a string' };
+  if (/[\r\n]/.test(value)) return { ok: false, error: 'senderName must be a single line' };
+  const trimmed = value.trim();
+  if (trimmed.length > SENDER_NAME_MAX) {
+    return { ok: false, error: `senderName must be ${SENDER_NAME_MAX} characters or fewer` };
+  }
+  return { ok: true, value: trimmed || null };
 }
 
 function encryptionKey() {
@@ -43,6 +59,8 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
     if (!body.email?.trim() || !body.domainId) {
       return reply.code(422).send({ error: 'email and domainId are required' });
     }
+    const senderName = body.senderName === undefined ? { ok: true as const, value: null } : parseSenderName(body.senderName);
+    if (!senderName.ok) return reply.code(422).send({ error: senderName.error });
 
     const authPasswordEncrypted = body.authPassword
       ? encrypt(body.authPassword, encryptionKey())
@@ -60,6 +78,7 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
         imapPort: body.imapPort,
         authUsername: body.authUsername,
         authPasswordEncrypted,
+        senderName: senderName.value,
       },
     });
     // Never echo the encrypted credential back, even to the authenticated caller who just set it.
@@ -69,7 +88,7 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
 
   app.patch<{
     Params: { id: string };
-    Body: { status?: MailboxStatus; dailyCap?: number; warmupEnabled?: boolean };
+    Body: { status?: MailboxStatus; dailyCap?: number; warmupEnabled?: boolean; senderName?: string | null };
   }>(
     '/:id',
     async (request, reply) => {
@@ -78,8 +97,9 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
       // Fastify JSON schema on this route), so any authenticated caller could PATCH fields well
       // outside this route's intended "status/dailyCap only" contract: `provider`,
       // `oauthConnectedAt`, `oauthRefreshTokenEncrypted`, even `authPasswordEncrypted`. Whitelist
-      // exactly the fields this route is meant to expose (status, dailyCap, warmupEnabled).
-      const data: { status?: MailboxStatus; dailyCap?: number; warmupEnabled?: boolean } = {};
+      // exactly the fields this route is meant to expose (status, dailyCap, warmupEnabled,
+      // senderName).
+      const data: { status?: MailboxStatus; dailyCap?: number; warmupEnabled?: boolean; senderName?: string | null } = {};
       if (request.body.status !== undefined) data.status = request.body.status;
       if (request.body.dailyCap !== undefined) data.dailyCap = request.body.dailyCap;
       if (request.body.warmupEnabled !== undefined) {
@@ -87,6 +107,11 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
           return reply.code(400).send({ error: 'warmupEnabled must be true or false' });
         }
         data.warmupEnabled = request.body.warmupEnabled;
+      }
+      if (request.body.senderName !== undefined) {
+        const senderName = parseSenderName(request.body.senderName);
+        if (!senderName.ok) return reply.code(422).send({ error: senderName.error });
+        data.senderName = senderName.value;
       }
 
       const updated = await prisma.mailbox
