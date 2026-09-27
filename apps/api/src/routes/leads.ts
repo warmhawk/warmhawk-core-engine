@@ -11,8 +11,9 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { parse } from 'csv-parse/sync';
-import { prisma, Prisma } from '@warmhawk/db';
+import { prisma, Prisma, type LeadStatus } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
+import { parseChoice, parsePage, wantsPage, type PageQuery } from '../lib/pagination';
 import {
   validateLeadFields,
   isEmailSuppressed,
@@ -67,8 +68,41 @@ export function parseLeadsCsv(csvBuffer: Buffer, campaignId: string): RawLeadInp
   });
 }
 
-interface ListLeadsQuery {
+interface ListLeadsQuery extends PageQuery {
   campaignId?: string;
+  status?: string;
+  q?: string;
+  sort?: string;
+  dir?: string;
+}
+
+const LEAD_STATUSES = [
+  'UNTOUCHED',
+  'QUEUED',
+  'CONTACTED',
+  'OPENED',
+  'REPLIED',
+  'BOUNCED',
+  'FAILED',
+  'SUPPRESSED',
+] as const satisfies readonly LeadStatus[];
+
+const LEAD_SORTS = ['name', 'email', 'company', 'campaign', 'status', 'added'] as const;
+type LeadSort = (typeof LEAD_SORTS)[number];
+
+/** `status` sorts in pipeline order because the Postgres enum is declared in that order. The
+ *  trailing `id` keeps page boundaries stable when many rows share a value. */
+function leadOrderBy(sort: LeadSort, dir: Prisma.SortOrder): Prisma.LeadOrderByWithRelationInput[] {
+  const nulls = { sort: dir, nulls: 'last' as const };
+  const primary: Prisma.LeadOrderByWithRelationInput[] = {
+    name: [{ firstName: nulls }, { lastName: nulls }],
+    email: [{ email: dir }],
+    company: [{ company: nulls }],
+    campaign: [{ campaign: { name: dir } }],
+    status: [{ status: dir }],
+    added: [{ createdAt: dir }],
+  }[sort];
+  return [...primary, { id: dir }];
 }
 
 interface CreateLeadBody {
@@ -94,19 +128,65 @@ function anonymizedEmail(leadId: string): string {
 export async function leadsRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
-  /** NEW, additive — the licensed dashboard's Leads page (`GET /leads`) and its
-   *  import-dialog revalidation call both already assumed this route; it did not exist. Returns
-   *  an envelope (not a bare array, unlike domains/campaigns/mailboxes) so the dashboard can show
-   *  a total count without a second round trip — matches the shape the dashboard was already
-   *  built against. */
-  app.get<{ Querystring: ListLeadsQuery }>('/', async (request) => {
+  /** The dashboard's Leads page. With `?page`/`?pageSize` it returns one page, filtered and
+   *  sorted in the database (`status`, `campaignId`, `q` over email/name/company, `sort`+`dir`),
+   *  plus `statusCounts` across every lead for the status chips. Without them it returns every
+   *  lead, as it did before paging, for dashboards that predate it. */
+  app.get<{ Querystring: ListLeadsQuery }>('/', async (request, reply) => {
     const { campaignId } = request.query;
-    const where = campaignId ? { campaignId } : {};
-    const [leads, total] = await Promise.all([
-      prisma.lead.findMany({ where, orderBy: { createdAt: 'desc' } }),
+    if (!wantsPage(request.query)) {
+      const where = campaignId ? { campaignId } : {};
+      const [leads, total] = await Promise.all([
+        prisma.lead.findMany({ where, orderBy: { createdAt: 'desc' } }),
+        prisma.lead.count({ where }),
+      ]);
+      return { leads, total };
+    }
+
+    const page = parsePage(request.query);
+    if (!page.ok) return reply.code(400).send({ error: page.error });
+    const status = parseChoice(request.query.status, LEAD_STATUSES, 'status');
+    if (!status.ok) return reply.code(400).send({ error: status.error });
+    const sort = parseChoice(request.query.sort, LEAD_SORTS, 'sort');
+    if (!sort.ok) return reply.code(400).send({ error: sort.error });
+    const dir = parseChoice(request.query.dir, ['asc', 'desc'] as const, 'dir');
+    if (!dir.ok) return reply.code(400).send({ error: dir.error });
+
+    const q = request.query.q?.trim();
+    const where: Prisma.LeadWhereInput = {
+      ...(campaignId ? { campaignId } : {}),
+      ...(status.value ? { status: status.value } : {}),
+      ...(q
+        ? {
+            OR: [
+              { email: { contains: q, mode: 'insensitive' } },
+              { firstName: { contains: q, mode: 'insensitive' } },
+              { lastName: { contains: q, mode: 'insensitive' } },
+              { company: { contains: q, mode: 'insensitive' } },
+            ],
+          }
+        : {}),
+    };
+
+    const [leads, total, byStatus] = await Promise.all([
+      prisma.lead.findMany({
+        where,
+        orderBy: leadOrderBy(sort.value ?? 'added', dir.value ?? (sort.value ? 'asc' : 'desc')),
+        skip: page.value.skip,
+        take: page.value.take,
+      }),
       prisma.lead.count({ where }),
+      prisma.lead.groupBy({
+        by: ['status'],
+        where: campaignId ? { campaignId } : {},
+        _count: { _all: true },
+      }),
     ]);
-    return { leads, total };
+
+    const statusCounts = Object.fromEntries(LEAD_STATUSES.map((s) => [s, 0])) as Record<LeadStatus, number>;
+    for (const row of byStatus) statusCounts[row.status] = row._count._all;
+
+    return { leads, total, page: page.value.page, pageSize: page.value.pageSize, statusCounts };
   });
 
   /** `POST /v1/leads` (spec) — single-lead create, the one authenticated-dashboard entry point

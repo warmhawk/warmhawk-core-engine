@@ -67,7 +67,10 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send(safe);
   });
 
-  app.patch<{ Params: { id: string }; Body: { status?: MailboxStatus; dailyCap?: number } }>(
+  app.patch<{
+    Params: { id: string };
+    Body: { status?: MailboxStatus; dailyCap?: number; warmupEnabled?: boolean };
+  }>(
     '/:id',
     async (request, reply) => {
       // Bug fix: `data: request.body as never` passed the raw request body straight to Prisma —
@@ -75,10 +78,16 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
       // Fastify JSON schema on this route), so any authenticated caller could PATCH fields well
       // outside this route's intended "status/dailyCap only" contract: `provider`,
       // `oauthConnectedAt`, `oauthRefreshTokenEncrypted`, even `authPasswordEncrypted`. Whitelist
-      // exactly the two fields this route is meant to expose.
-      const data: { status?: MailboxStatus; dailyCap?: number } = {};
+      // exactly the fields this route is meant to expose (status, dailyCap, warmupEnabled).
+      const data: { status?: MailboxStatus; dailyCap?: number; warmupEnabled?: boolean } = {};
       if (request.body.status !== undefined) data.status = request.body.status;
       if (request.body.dailyCap !== undefined) data.dailyCap = request.body.dailyCap;
+      if (request.body.warmupEnabled !== undefined) {
+        if (typeof request.body.warmupEnabled !== 'boolean') {
+          return reply.code(400).send({ error: 'warmupEnabled must be true or false' });
+        }
+        data.warmupEnabled = request.body.warmupEnabled;
+      }
 
       const updated = await prisma.mailbox
         .update({ where: { id: request.params.id }, data })

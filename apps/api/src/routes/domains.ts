@@ -197,9 +197,10 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
   /**
    * Seed-Inbox Placement Test (Guardrails, V12, option (c)) — aggregated placement-sample results
    * for this domain's own sending mailboxes, surfaced on the domain health dashboard alongside
-   * SPF/DKIM/DMARC and blocklist status. A domain has no direct FK to a campaign, so the join
-   * path is: this domain's mailboxes -> ExecutionLog rows they actually sent (status SENT) ->
-   * those sends' distinct campaignIds -> SeedPlacementResult rows for those campaigns.
+   * SPF/DKIM/DMARC and blocklist status. Each sampled copy records the mailbox that sent it, and
+   * only copies the check has found (or given up on) count. Rows from before 2026-09-27 have no
+   * mailbox — they recorded whatever email a seed received last, not the campaign copy — so they
+   * are left out rather than reported.
    *
    * The response is deliberately, explicitly labeled "placement sampling across N seed inboxes" —
    * per the spec, this must never be marketed or displayed as full inbox-placement testing, the
@@ -209,22 +210,18 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
     const domain = await prisma.domain.findUnique({ where: { id: request.params.id } });
     if (!domain) return reply.code(404).send({ error: 'Domain not found' });
 
-    const sentLogs = await prisma.executionLog.findMany({
-      where: { status: 'SENT', campaignId: { not: null }, mailbox: { domainId: domain.id } },
-      select: { campaignId: true },
-      distinct: ['campaignId'],
-    });
-    const campaignIds = sentLogs
-      .map((log) => log.campaignId)
-      .filter((id): id is string => Boolean(id));
-
-    const results = campaignIds.length
-      ? await prisma.seedPlacementResult.findMany({
-          where: { campaignId: { in: campaignIds } },
-          include: { seedAccount: true, campaign: true },
-          orderBy: { checkedAt: 'desc' },
-        })
-      : [];
+    // Counted in the database; only the 50 newest rows are loaded, for the results list.
+    const where = { checkedAt: { not: null }, mailbox: { domainId: domain.id } };
+    const [folderCounts, seedCounts, results] = await Promise.all([
+      prisma.seedPlacementResult.groupBy({ by: ['folder'], where, _count: { _all: true } }),
+      prisma.seedPlacementResult.groupBy({ by: ['seedAccountId'], where }),
+      prisma.seedPlacementResult.findMany({
+        where,
+        include: { seedAccount: true, campaign: true },
+        orderBy: { checkedAt: 'desc' },
+        take: 50,
+      }),
+    ]);
 
     const byFolder: Record<'INBOX' | 'SPAM' | 'PROMOTIONS' | 'UNCLASSIFIED', number> = {
       INBOX: 0,
@@ -232,12 +229,12 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       PROMOTIONS: 0,
       UNCLASSIFIED: 0,
     };
-    for (const result of results) {
-      byFolder[result.folder] += 1;
+    for (const row of folderCounts) {
+      byFolder[row.folder] = row._count._all;
     }
 
-    const sampledSeedAccountIds = new Set(results.map((r) => r.seedAccountId));
-    const totalChecks = results.length;
+    const sampledSeedAccountIds = new Set(seedCounts.map((r) => r.seedAccountId));
+    const totalChecks = Object.values(byFolder).reduce((sum, n) => sum + n, 0);
     const inboxPlacementRate = totalChecks > 0 ? byFolder.INBOX / totalChecks : null;
 
     return reply.send({
@@ -249,7 +246,7 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       byFolder,
       inboxPlacementRate,
       mostRecentCheckAt: results[0]?.checkedAt ?? null,
-      results: results.slice(0, 50).map((result) => ({
+      results: results.map((result) => ({
         id: result.id,
         campaignId: result.campaignId,
         campaignName: result.campaign.name,

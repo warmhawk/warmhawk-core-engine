@@ -1,0 +1,53 @@
+{
+  "name": "WarmHawk Warmup Tick",
+  "active": true,
+  "nodes": [
+    {
+      "id": "w1-schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-600, 0],
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 10 }] }
+      }
+    },
+    {
+      "id": "w2-tick",
+      "name": "Run Warmup Tick",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-360, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/warmup/tick",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {} }}",
+        "options": { "timeout": 540000 }
+      }
+    },
+    {
+      "id": "w3-log-summary",
+      "name": "Log Tick Summary",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [-120, 0],
+      "notes": "Terminal node - the response ({sent, failed, checked, rescued, missing, graduated, demoted}) is visible in this execution's data. GET /v1/warmup is the dashboard-facing read path.",
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": { "main": [[{ "node": "Run Warmup Tick", "type": "main", "index": 0 }]] },
+    "Run Warmup Tick": { "main": [[{ "node": "Log Tick Summary", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

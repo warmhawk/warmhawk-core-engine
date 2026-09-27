@@ -1,144 +1,122 @@
 /**
- * Seed-Inbox Placement Test (Guardrails, V12) — the actual IMAP polling job. Reuses the IMAP
- * client pattern already proven in `imapClient.ts` (ImapFlow, folder listing, mailbox locking,
- * timeout-guarded search), pointed at a `SeedAccount`'s own inbox instead of a sending `Mailbox`'s.
+ * Seed-Inbox Placement Test (Guardrails, V12) — checks where each sampled campaign copy landed.
  *
- * A seed account exists ONLY to receive BCC'd copies of real sends (per Guardrails — "BCC a
- * handful of owned seed accounts on a real send"), so — mirroring the same dedicated-purpose
- * assumption `imapClient.ts`'s reply-poll logic already makes about a mailbox's inbox — "the most
- * recent message to arrive in any folder since the campaign's send window" is treated as that
- * campaign's BCC copy. This is a real, complete implementation; it produces real data only once a
- * customer/founder has configured real seed accounts, which is expected (see this repo's build
- * report).
+ * The send path (`mailSender.ts`) BCCs the active seed inboxes on a sample of campaign sends and
+ * writes one pending `SeedPlacementResult` per seed copy, carrying the send's Message-ID. This
+ * job finds that exact email in the seed inbox — INBOX first, then the spam folders — with the
+ * same IMAP reader the warmup engine uses, falling back to sender + subject hash when a provider
+ * rewrote the Message-ID. Matching the exact email matters because seed inboxes also receive
+ * warmup emails: "whatever arrived last" would report warmup mail as campaign placement.
+ *
+ * Campaign copies are only looked at, never marked read or moved — this measures placement, it
+ * doesn't try to improve it. Runs inside every warmup tick (every 10 minutes) and from
+ * `POST /internal/seed-placement/poll`.
  */
-import { ImapFlow } from 'imapflow';
 import { prisma, type SeedPlacementFolder } from '@warmhawk/db';
-import { decryptSeedImapConfig } from './seedAccounts';
-import { classifyFolder } from './seedPlacement';
+import { openInboxReader, type InboxReader, type PartnerRef } from './warmup/placement';
+import { CHECK_AFTER_MS, CHECK_GIVE_UP_MS, UNCHECKED_AFTER_MS } from './warmup/policy';
 
-const POLL_TIMEOUT_MS = 15_000;
-const DEFAULT_LOOKBACK_HOURS = 24;
+/** Max sampled copies checked per run — keeps one tick well inside n8n's HTTP timeout. */
+const CHECK_BATCH = 100;
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_resolve, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
-    ),
-  ]);
+export interface SeedPlacementDeps {
+  now: () => Date;
+  openReader: (partner: PartnerRef) => Promise<InboxReader>;
 }
 
-async function openSeedImapClient(seedAccountId: string): Promise<ImapFlow> {
-  const seedAccount = await prisma.seedAccount.findUnique({ where: { id: seedAccountId } });
-  if (!seedAccount) throw new Error('Seed account not found');
-
-  const config = decryptSeedImapConfig(seedAccount.imapConfigEncrypted);
-  const client = new ImapFlow({
-    host: config.host,
-    port: config.port,
-    secure: config.port !== 143,
-    auth: { user: config.username, pass: config.password },
-    logger: false,
-  });
-  await client.connect();
-  return client;
-}
-
-/** Checks one seed account's mailbox for the most recent message to arrive in any folder since
- *  `sinceDate`, returning the classified folder it landed in — or `UNCLASSIFIED` if nothing has
- *  arrived there yet within the window (a real, honest outcome: "checked, not found yet", not an
- *  error). INBOX is checked first (the common case, cheapest to confirm), then the known
- *  spam/promotions candidates, then every other folder the account has. */
-export async function pollSeedAccountFolder(
-  seedAccountId: string,
-  sinceDate: Date,
-): Promise<SeedPlacementFolder> {
-  const client = await openSeedImapClient(seedAccountId);
-  try {
-    const allFolders = await withTimeout(client.list(), POLL_TIMEOUT_MS, 'IMAP folder list');
-    const orderedPaths = [
-      'INBOX',
-      ...allFolders.map((f) => f.path).filter((path) => path.toUpperCase() !== 'INBOX'),
-    ];
-
-    let latestFoundPath: string | null = null;
-    let latestFoundUid = -Infinity;
-
-    for (const folderPath of orderedPaths) {
-      let lock;
-      try {
-        lock = await client.getMailboxLock(folderPath);
-      } catch {
-        continue; // folder not selectable (e.g. a parent-only node) — skip it
-      }
-      try {
-        const uids = await withTimeout(
-          client.search({ since: sinceDate }, { uid: true }),
-          POLL_TIMEOUT_MS,
-          `IMAP search (${folderPath})`,
-        );
-        if (uids && uids.length > 0) {
-          const maxUid = Math.max(...uids);
-          if (maxUid > latestFoundUid) {
-            latestFoundUid = maxUid;
-            latestFoundPath = folderPath;
-          }
-        }
-      } finally {
-        lock.release();
-      }
-    }
-
-    return latestFoundPath ? classifyFolder(latestFoundPath) : 'UNCLASSIFIED';
-  } finally {
-    await client.logout().catch(() => client.close());
-  }
-}
+export const defaultSeedPlacementDeps: SeedPlacementDeps = {
+  now: () => new Date(),
+  openReader: openInboxReader,
+};
 
 export interface SeedPlacementPollSummary {
-  campaignsChecked: number;
-  seedAccountsChecked: number;
-  resultsRecorded: number;
+  /** Copies given a final folder this run (found, or not found after 2 hours). */
+  seedChecked: number;
+  /** Copies dropped because their seed inbox couldn't be read for 6 hours — never counted. */
+  seedDropped: number;
 }
 
-/**
- * One full poll tick: finds every campaign with a real send (`ExecutionLog.status = 'SENT'`)
- * within the lookback window, checks every active seed account's placement for it, and records a
- * `SeedPlacementResult` row per (campaign, seed account) pair — called by the n8n
- * `seed-placement-poll` scheduled workflow via `POST /internal/seed-placement/poll`.
- */
-export async function runSeedPlacementPollTick(
-  lookbackHours: number = DEFAULT_LOOKBACK_HOURS,
+export async function checkSampledPlacements(
+  deps: SeedPlacementDeps = defaultSeedPlacementDeps,
 ): Promise<SeedPlacementPollSummary> {
-  const since = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
-
-  const recentSentLogs = await prisma.executionLog.findMany({
-    where: { status: 'SENT', createdAt: { gte: since }, campaignId: { not: null } },
-    select: { campaignId: true },
-    distinct: ['campaignId'],
+  const now = deps.now();
+  const pending = await prisma.seedPlacementResult.findMany({
+    where: {
+      checkedAt: null,
+      mailboxId: { not: null },
+      sentAt: { lte: new Date(now.getTime() - CHECK_AFTER_MS) },
+    },
+    orderBy: { sentAt: 'asc' },
+    take: CHECK_BATCH,
+    include: { mailbox: { select: { email: true } } },
   });
-  const campaignIds = recentSentLogs
-    .map((log) => log.campaignId)
-    .filter((id): id is string => Boolean(id));
 
-  const seedAccounts = await prisma.seedAccount.findMany({ where: { isActive: true } });
+  const bySeed = new Map<string, typeof pending>();
+  for (const row of pending) {
+    const rows = bySeed.get(row.seedAccountId) ?? [];
+    rows.push(row);
+    bySeed.set(row.seedAccountId, rows);
+  }
 
-  let resultsRecorded = 0;
-  for (const campaignId of campaignIds) {
-    for (const seedAccount of seedAccounts) {
-      const folder = await pollSeedAccountFolder(seedAccount.id, since).catch(
-        () => 'UNCLASSIFIED' as SeedPlacementFolder,
-      );
-      await prisma.seedPlacementResult.create({
-        data: { campaignId, seedAccountId: seedAccount.id, folder },
-      });
-      resultsRecorded += 1;
+  let seedChecked = 0;
+  let seedDropped = 0;
+
+  for (const [seedAccountId, rows] of bySeed) {
+    let reader: InboxReader | null = null;
+    try {
+      reader = await deps.openReader({ kind: 'seed', id: seedAccountId });
+    } catch {
+      reader = null;
+    }
+
+    try {
+      for (const row of rows) {
+        const age = now.getTime() - (row.sentAt ?? now).getTime();
+        let found;
+        try {
+          found = reader
+            ? await reader.find({
+                messageId: row.messageId,
+                subject: null,
+                subjectSha256: row.subjectSha256,
+                fromEmail: row.mailbox?.email ?? '',
+                sentAt: row.sentAt ?? now,
+              })
+            : undefined;
+        } catch {
+          found = undefined;
+        }
+
+        if (found === undefined) {
+          // Couldn't read the seed inbox. Not a placement result, so it never counts.
+          if (age >= UNCHECKED_AFTER_MS) {
+            await prisma.seedPlacementResult.delete({ where: { id: row.id } });
+            seedDropped += 1;
+          }
+          continue;
+        }
+
+        let folder: SeedPlacementFolder;
+        if (found) folder = found.inSpam ? 'SPAM' : 'INBOX';
+        else if (age >= CHECK_GIVE_UP_MS) folder = 'UNCLASSIFIED';
+        else continue;
+
+        await prisma.seedPlacementResult.update({
+          where: { id: row.id },
+          data: { folder, checkedAt: now },
+        });
+        seedChecked += 1;
+      }
+    } finally {
+      if (reader) await reader.close().catch(() => undefined);
     }
   }
 
-  return {
-    campaignsChecked: campaignIds.length,
-    seedAccountsChecked: seedAccounts.length,
-    resultsRecorded,
-  };
+  return { seedChecked, seedDropped };
+}
+
+/** `POST /internal/seed-placement/poll` entry point, kept for the n8n `seed-placement-poll`
+ *  workflow already installed on existing instances. */
+export async function runSeedPlacementPollTick(): Promise<SeedPlacementPollSummary> {
+  return checkSampledPlacements();
 }
