@@ -32,6 +32,11 @@ every step is a real HTTP call to this API.
   `SeedAccount`'s IMAP folder placement for every recently-sent campaign and records a
   `SeedPlacementResult` row per (campaign, seed account) pair. Aggregated results are read via
   `GET /domains/:id/placement-sample`, not by this workflow.
+- **`warmup-tick.json`** — schedule-triggered every 10 minutes, calls `POST /internal/warmup/tick`
+  (`lib/warmup/engine.ts`): checks where recent warmup emails landed over IMAP (rescuing any found
+  in spam), graduates or demotes mailboxes on their 7-day inbox rate, then sends each due mailbox's
+  next warmup email to a partner (another mailbox or an active seed account). The dashboard reads
+  the results via `GET /v1/warmup`.
 - **`blocklist-poll.json`** *(new, Infra pass)* — schedule-triggered every 1 hour, calls the new
   `GET /internal/domains/active` (every registered domain name), loops each one, and calls the new
   `POST /internal/domains/check-blocklist` (runs `lib/dnsChecks.ts`'s real `checkBlocklists`

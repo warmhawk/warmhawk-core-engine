@@ -128,6 +128,18 @@ enum SeedPlacementFolder {
   UNCLASSIFIED
 }
 
+/// Where one warmup email landed (`WarmupMessage.placement`). PENDING = sent, not checked yet.
+/// INBOX/SPAM/MISSING feed the 7-day health score; UNCHECKED (the recipient's IMAP could not be
+/// read for hours — not the sender's fault) and FAILED (the send itself failed) are left out of it.
+enum WarmupPlacement {
+  PENDING
+  INBOX
+  SPAM
+  MISSING
+  UNCHECKED
+  FAILED
+}
+
 // ---------------------------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------------------------
@@ -244,8 +256,13 @@ model Mailbox {
   // Cadence enforcement — last successful send timestamp, read by computeNextSlotSeconds.ts.
   lastSentAt DateTime?
 
-  // Warmup tracking — null = not yet started.
-  warmupStartedAt DateTime?
+  // Warmup tracking — null = not yet started. The warmup engine (apps/api/src/lib/warmup/) sets
+  // warmupStartedAt on a mailbox's first warmup send, and warmupGraduatedAt when it promotes the
+  // mailbox WARMUP -> ACTIVE on measured inbox placement. warmupEnabled is the customer's per-mailbox
+  // pause switch.
+  warmupStartedAt   DateTime?
+  warmupGraduatedAt DateTime?
+  warmupEnabled     Boolean   @default(true)
 
   // Reputation protection — bounce/complaint circuit breaker (Guardrails).
   rollingBounceRate Float   @default(0)
@@ -256,6 +273,10 @@ model Mailbox {
 
   executionLogs ExecutionLog[]
   replies       Reply[]
+
+  seedPlacements         SeedPlacementResult[]
+  warmupMessagesSent     WarmupMessage[] @relation("WarmupSender")
+  warmupMessagesReceived WarmupMessage[] @relation("WarmupRecipient")
 
   @@index([domainId])
   @@index([status])
@@ -496,26 +517,66 @@ model SeedAccount {
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
-  placements SeedPlacementResult[]
+  placements     SeedPlacementResult[]
+  warmupMessages WarmupMessage[]
 
   @@index([isActive])
   @@map("seed_accounts")
 }
 
-/// One placement-sampling data point: where a single seed account's BCC'd copy of a given
-/// campaign's send landed, as of one polling check. Multiple rows accumulate per
-/// (campaignId, seedAccountId) over time by design — placement can shift between checks, and the
-/// history itself is part of the signal `GET /domains/:id/placement-sample` aggregates.
+/// One placement-sampling data point: where a single seed account's BCC'd copy of one sampled
+/// campaign send landed. The send path writes the row with `checkedAt` null; the warmup tick then
+/// finds that exact email in the seed inbox by Message-ID and fills in `folder` + `checkedAt`.
+/// Rows with a null `mailboxId` predate Message-ID matching (they recorded whatever arrived last
+/// in the seed inbox) and are left out of the domain aggregate.
 model SeedPlacementResult {
   id            String              @id @default(cuid())
   campaignId    String
   campaign      Campaign            @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   seedAccountId String
   seedAccount   SeedAccount         @relation(fields: [seedAccountId], references: [id], onDelete: Cascade)
+  mailboxId     String?
+  mailbox       Mailbox?            @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  messageId     String?
+  /// SHA-256 of the subject, for the fallback match when a provider rewrites the Message-ID —
+  /// the campaign's own (possibly AI-written) subject is never stored.
+  subjectSha256 String?
+  sentAt        DateTime?
   folder        SeedPlacementFolder @default(UNCLASSIFIED)
-  checkedAt     DateTime            @default(now())
+  checkedAt     DateTime?           @default(now())
 
   @@index([campaignId])
   @@index([seedAccountId])
+  @@index([mailboxId])
+  @@index([checkedAt])
   @@map("seed_placement_results")
+}
+
+/// One warmup email: sent by a customer's own mailbox to a partner (another of the customer's
+/// mailboxes, or an active seed account), then found over IMAP to record where it landed. The rows
+/// are both the dashboard's send log and the data the 7-day health score and graduation rule read.
+model WarmupMessage {
+  id                     String          @id @default(cuid())
+  senderMailboxId        String
+  senderMailbox          Mailbox         @relation("WarmupSender", fields: [senderMailboxId], references: [id], onDelete: Cascade)
+  recipientMailboxId     String?
+  recipientMailbox       Mailbox?        @relation("WarmupRecipient", fields: [recipientMailboxId], references: [id], onDelete: SetNull)
+  recipientSeedAccountId String?
+  recipientSeedAccount   SeedAccount?    @relation(fields: [recipientSeedAccountId], references: [id], onDelete: SetNull)
+  recipientEmail         String
+  subject                String
+  /// RFC 5322 Message-ID as composed by nodemailer, used to find the email on the recipient side.
+  messageId              String?
+  sentAt                 DateTime        @default(now())
+  placement              WarmupPlacement @default(PENDING)
+  /// Raw IMAP folder path the email was found in (before any rescue move).
+  foundFolder            String?
+  /// True when the email was found in spam and moved back to INBOX.
+  rescued                Boolean         @default(false)
+  checkedAt              DateTime?
+  error                  String?
+
+  @@index([senderMailboxId, sentAt])
+  @@index([placement, sentAt])
+  @@map("warmup_messages")
 }

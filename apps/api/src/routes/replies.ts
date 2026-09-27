@@ -8,32 +8,58 @@
  * `POST /`) live separately in `routes/internalReplies.ts`, mounted under `/internal/replies`.
  */
 import type { FastifyInstance } from 'fastify';
-import { prisma, type ReplyClassification } from '@warmhawk/db';
+import { prisma, type Prisma, type ReplyClassification } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
+import { parseChoice, parsePage, wantsPage, type PageQuery } from '../lib/pagination';
 
-interface ListRepliesQuery {
+interface ListRepliesQuery extends PageQuery {
   classification?: ReplyClassification;
   campaignId?: string;
   mailboxId?: string;
+  domainId?: string;
 }
+
+const CLASSIFICATIONS = [
+  'INTERESTED',
+  'NOT_INTERESTED',
+  'OUT_OF_OFFICE',
+  'AUTO_REPLY',
+  'OPT_OUT',
+  'UNCLASSIFIED',
+] as const satisfies readonly ReplyClassification[];
 
 export async function repliesRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
-  app.get<{ Querystring: ListRepliesQuery }>('/', async (request) => {
-    const { classification, campaignId, mailboxId } = request.query;
-    return prisma.reply.findMany({
-      where: {
-        ...(classification ? { classification } : {}),
-        ...(campaignId ? { campaignId } : {}),
-        ...(mailboxId ? { mailboxId } : {}),
-      },
-      // `mailbox: { include: { domain: true } }`, not a flat `mailbox: true` — the operator's
-      // Unified Reply Inbox filters by domain name (`reply.mailbox.domain.domainName`), which
-      // needs the nested relation, not just the mailbox row.
-      include: { lead: true, campaign: true, mailbox: { include: { domain: true } } },
-      orderBy: { repliedAt: 'desc' },
-    });
+  /** Newest first. With `?page`/`?pageSize` it returns `{ replies, total, page, pageSize }`;
+   *  without them it returns the plain array it always has, for dashboards that predate paging. */
+  app.get<{ Querystring: ListRepliesQuery }>('/', async (request, reply) => {
+    const { campaignId, mailboxId, domainId } = request.query;
+    const classification = parseChoice(request.query.classification, CLASSIFICATIONS, 'classification');
+    if (!classification.ok) return reply.code(400).send({ error: classification.error });
+
+    const where: Prisma.ReplyWhereInput = {
+      ...(classification.value ? { classification: classification.value } : {}),
+      ...(campaignId ? { campaignId } : {}),
+      ...(mailboxId ? { mailboxId } : {}),
+      ...(domainId ? { mailbox: { domainId } } : {}),
+    };
+    // `mailbox: { include: { domain: true } }`, not a flat `mailbox: true` — the operator's
+    // Unified Reply Inbox shows the domain name (`reply.mailbox.domain.domainName`), which needs
+    // the nested relation, not just the mailbox row.
+    const include = { lead: true, campaign: true, mailbox: { include: { domain: true } } };
+    const orderBy: Prisma.ReplyOrderByWithRelationInput[] = [{ repliedAt: 'desc' }, { id: 'desc' }];
+
+    if (!wantsPage(request.query)) {
+      return prisma.reply.findMany({ where, include, orderBy });
+    }
+    const page = parsePage(request.query);
+    if (!page.ok) return reply.code(400).send({ error: page.error });
+    const [replies, total] = await Promise.all([
+      prisma.reply.findMany({ where, include, orderBy, skip: page.value.skip, take: page.value.take }),
+      prisma.reply.count({ where }),
+    ]);
+    return { replies, total, page: page.value.page, pageSize: page.value.pageSize };
   });
 
   app.patch<{ Params: { id: string }; Body: { classification?: ReplyClassification } }>(

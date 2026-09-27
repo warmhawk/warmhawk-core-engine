@@ -24,6 +24,8 @@ import { internalMailRoutes } from './routes/internalMail';
 import { internalMailboxesRoutes } from './routes/internalMailboxes';
 import { internalDomainsRoutes } from './routes/internalDomains';
 import { internalSeedPlacementRoutes } from './routes/internalSeedPlacement';
+import { internalWarmupRoutes } from './routes/internalWarmup';
+import { warmupRoutes } from './routes/warmup';
 import { internalRepliesRoutes } from './routes/internalReplies';
 import { repliesRoutes } from './routes/replies';
 import { authRoutes } from './routes/auth';
@@ -173,6 +175,7 @@ export async function createApp(): Promise<FastifyInstance> {
       await v1.register(aiProvidersRoutes, { prefix: '/ai-providers' });
       await v1.register(repliesRoutes, { prefix: '/replies' });
       await v1.register(seedAccountsRoutes, { prefix: '/seed-accounts' });
+      await v1.register(warmupRoutes, { prefix: '/warmup' });
       // NOTE: this repo no longer registers a Stripe webhook / license-issuance route (V12 fix —
       // that logic was built here by mistake during a parallel-agent build; Stripe/RSA license
       // issuance now lives solely on WarmHawk's billing/marketing site, the one piece of billing
@@ -197,6 +200,7 @@ export async function createApp(): Promise<FastifyInstance> {
   await app.register(internalMailboxesRoutes, { prefix: '/internal/mailboxes' });
   await app.register(internalDomainsRoutes, { prefix: '/internal/domains' });
   await app.register(internalSeedPlacementRoutes, { prefix: '/internal/seed-placement' });
+  await app.register(internalWarmupRoutes, { prefix: '/internal/warmup' });
   await app.register(internalRepliesRoutes, { prefix: '/internal/replies' });
   // Fix: imapRoutes was previously mounted under the public /v1 group despite every route in it
   // being n8n-machine-only (guarded by requireCallbackSecret, never a public-client concern).

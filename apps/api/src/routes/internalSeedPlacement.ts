@@ -8,18 +8,13 @@ import type { FastifyInstance } from 'fastify';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { runSeedPlacementPollTick } from '../lib/seedPlacementPoller';
 
-interface PollBody {
-  lookbackHours?: number;
-}
-
 export async function internalSeedPlacementRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireCallbackSecret);
 
-  app.post<{ Body: PollBody }>('/poll', async (request, reply) => {
-    const lookbackHours = request.body?.lookbackHours;
-    const summary = await runSeedPlacementPollTick(
-      typeof lookbackHours === 'number' && lookbackHours > 0 ? lookbackHours : undefined,
-    );
+  // Older workflows still post `{ lookbackHours }`; the check now works from pending samples,
+  // so the body is ignored.
+  app.post('/poll', async (_request, reply) => {
+    const summary = await runSeedPlacementPollTick();
     return reply.send(summary);
   });
 }
