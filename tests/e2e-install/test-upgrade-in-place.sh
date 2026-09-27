@@ -21,10 +21,16 @@
 #      into its own Compose project (COMPOSE_PROJECT_NAME) so it never touches any other stack
 #      already running on this machine.
 #   2. Confirms the app is healthy, then writes a marker row directly into Postgres.
-#   3. Runs scripts/update.sh <current-commit-sha> — the real upgrade command, unmodified.
-#   4. Asserts: update.sh reported success, the app is healthy again afterward, and the marker row
-#      from step 2 is still there — proving the rebuild/migrate/restart cycle didn't lose data.
-#   5. Tears its OWN stack down, always, even on failure.
+#   3. Makes the imported 'WarmHawk Dispatch' n8n workflow look like an older release's copy (edits
+#      its stored nodes, and the recorded hash of dispatch.json in .env/n8n-workflows.sha256) —
+#      exactly the state of a customer whose bundled dispatch.json changed in the release they're
+#      updating to.
+#   4. Runs scripts/update.sh <current-commit-sha> — the real upgrade command, unmodified.
+#   5. Asserts: update.sh reported success, the app is healthy again afterward, the marker row
+#      from step 2 is still there — proving the rebuild/migrate/restart cycle didn't lose data — and
+#      the dispatch workflow now carries this release's nodes, under the same id, once, and active,
+#      while the unchanged workflows were left alone.
+#   6. Tears its OWN stack down, always, even on failure.
 # ==================================================================================================
 set -euo pipefail
 
@@ -52,7 +58,7 @@ cleanup() {
   local exit_code=$?
   log "Tearing down (project-scoped — does not touch any other stack on this host)..."
   docker compose -f "$REPO_ROOT/docker/docker-compose.yml" -p "$COMPOSE_PROJECT_NAME" down -v --remove-orphans >/dev/null 2>&1 || true
-  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env/.env"
+  [ "$OWN_ENV" = true ] && rm -f "$REPO_ROOT/.env/.env" "$REPO_ROOT/.env/n8n-workflows.sha256"
   rm -f "${UPDATE_LOG:-}"
   if [ "$exit_code" -eq 0 ]; then
     log "Teardown complete. PASSED."
@@ -103,7 +109,26 @@ compose exec -T postgres psql -U warmhawk -d warmhawk -c \
   || fail "Could not write the marker row before the upgrade — Postgres isn't actually reachable despite /health reporting ok."
 log "Marker row written: ${MARKER_NOTE}"
 
-# --- 3. Run the real upgrade command, pinned to the exact commit already checked out here ------
+# --- 3. Make the dispatch workflow look like an older release's copy -----------------------------
+# Before 2026-09-27 update.sh skipped any workflow whose name was already imported, so a release
+# that changed dispatch.json never reached a single existing install. Simulate that customer: the
+# stored workflow lacks this release's aiOutcome wiring, and the hash recorded for dispatch.json is
+# not the current file's.
+DISPATCH_NAME="WarmHawk Dispatch"
+N8N_STATE_FILE="$REPO_ROOT/.env/n8n-workflows.sha256"
+n8n_sql() { compose exec -T postgres psql -U warmhawk -d warmhawk -tAc "$1"; }
+[ -f "$N8N_STATE_FILE" ] || fail "install.sh did not write $N8N_STATE_FILE — update.sh would have nothing to compare against."
+grep -q ' dispatch.json$' "$N8N_STATE_FILE" || fail "install.sh did not record a hash for dispatch.json. State file: $(cat "$N8N_STATE_FILE")"
+DISPATCH_ID_BEFORE="$(n8n_sql "SELECT id FROM workflow_entity WHERE name = '${DISPATCH_NAME}';" | tr -d '[:space:]')"
+[ -n "$DISPATCH_ID_BEFORE" ] || fail "install.sh never imported '${DISPATCH_NAME}'."
+log "Rewinding '${DISPATCH_NAME}' (id ${DISPATCH_ID_BEFORE}) to look like an older release's copy..."
+n8n_sql "UPDATE workflow_entity SET nodes = replace(nodes::text, 'aiOutcome', 'e2eOldField')::json WHERE id = '${DISPATCH_ID_BEFORE}';" >/dev/null \
+  || fail "Could not rewrite the stored dispatch workflow."
+[ "$(n8n_sql "SELECT count(*) FROM workflow_entity WHERE id = '${DISPATCH_ID_BEFORE}' AND nodes::text LIKE '%aiOutcome%';" | tr -d '[:space:]')" = "0" ] \
+  || fail "The stored dispatch workflow still mentions aiOutcome after rewinding it — the test setup is wrong."
+sed -i 's/^[0-9a-f]* dispatch\.json$/0000000000000000000000000000000000000000000000000000000000000000 dispatch.json/' "$N8N_STATE_FILE"
+
+# --- 4. Run the real upgrade command, pinned to the exact commit already checked out here ------
 CURRENT_REF="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
 [ -n "$CURRENT_REF" ] || fail "git rev-parse HEAD failed — can't pin update.sh to a specific ref without silently drifting onto 'master' (its own default) instead of the commit actually under test."
 log "Running scripts/update.sh ${CURRENT_REF} (pinned — never update.sh's own 'master' default, so this test can't silently upgrade away from the commit it's supposed to be testing)..."
@@ -117,6 +142,17 @@ cat "$UPDATE_LOG"
 grep -q "Running pending database migrations" "$UPDATE_LOG" || fail "update.sh's log never showed it ran migrations — see full log above."
 grep -q "Update complete" "$UPDATE_LOG" || fail "update.sh did not report completion — see full log above."
 log "Confirmed: update.sh ran migrations and reported completion."
+
+grep -q "Updated n8n workflow '${DISPATCH_NAME}'" "$UPDATE_LOG" \
+  || fail "update.sh never re-imported the changed '${DISPATCH_NAME}' workflow — see full log above."
+# Every other bundled workflow was imported by install.sh and is unchanged, so update.sh must leave
+# it alone. This also catches install.sh failing to import one of them in the first place.
+for wf_file in "$REPO_ROOT"/n8n/workflows/*.json; do
+  [ "$(basename "$wf_file")" = dispatch.json ] && continue
+  wf_name=$(grep -m1 '"name"' "$wf_file" | sed -E 's/.*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/')
+  grep -q "n8n workflow '${wf_name}' is up to date" "$UPDATE_LOG" \
+    || fail "update.sh did not find '${wf_name}' imported and unchanged — see full log above."
+done
 
 # An unresolvable ref must stop before anything is rebuilt. This used to print a warning and carry
 # on, so a customer whose upgrade never happened still saw "Update complete" and kept running the
@@ -135,7 +171,7 @@ if grep -q "Running pending database migrations" "$BOGUS_LOG"; then
 fi
 log "Confirmed: a bad ref stops the upgrade before any rebuild, and says so."
 
-# --- 4. Assert the upgrade cycle didn't lose data or leave the app unhealthy --------------------
+# --- 5. Assert the upgrade cycle didn't lose data or leave the app unhealthy --------------------
 wait_for_health "after upgrade"
 
 log "Confirming the marker row survived the upgrade..."
@@ -145,12 +181,24 @@ FOUND_NOTE="$(compose exec -T postgres psql -U warmhawk -d warmhawk -tAc \
   || fail "Marker row '${MARKER_NOTE}' did not survive the upgrade — postgres_data was not preserved across update.sh's rebuild/migrate/restart cycle. Got: '${FOUND_NOTE}'"
 log "Confirmed: marker row survived the upgrade intact."
 
+log "Confirming '${DISPATCH_NAME}' now carries this release's version, in place..."
+DISPATCH_ROWS="$(n8n_sql "SELECT id || '|' || active::text || '|' || (nodes::text LIKE '%aiOutcome%')::text FROM workflow_entity WHERE name = '${DISPATCH_NAME}';")"
+[ "$(printf '%s\n' "$DISPATCH_ROWS" | grep -c .)" = "1" ] \
+  || fail "Expected exactly one '${DISPATCH_NAME}' workflow after the update, got: ${DISPATCH_ROWS}"
+[ "$(printf '%s' "$DISPATCH_ROWS" | tr -d '[:space:]')" = "${DISPATCH_ID_BEFORE}|true|true" ] \
+  || fail "'${DISPATCH_NAME}' should be id ${DISPATCH_ID_BEFORE}, active, with this release's nodes (id|active|current). Got: ${DISPATCH_ROWS}"
+grep -q "^$(sha256sum "$REPO_ROOT/n8n/workflows/dispatch.json" | cut -d' ' -f1) dispatch.json$" "$N8N_STATE_FILE" \
+  || fail "update.sh did not record the new dispatch.json hash — the next update would re-import it again. State file: $(cat "$N8N_STATE_FILE")"
+log "Confirmed: the changed workflow was re-imported under its existing id, active, and recorded."
+
 log ""
 log "=================================================================================="
 log " UPGRADE-IN-PLACE TEST: ALL ASSERTIONS PASSED"
 log "   - scripts/update.sh rebuilt, migrated, and rolling-restarted without error"
 log "   - the app was healthy again afterward"
 log "   - data written to Postgres before the upgrade was still present after it"
+log "   - a bundled n8n workflow that changed was re-imported in place (same id, active); unchanged"
+log "     ones were left alone"
 log "   - NOT covered here: upgrading between two genuinely different released versions (needs a"
 log "     second real release to check out — this test only proves the mechanism is data-safe)"
 log "=================================================================================="

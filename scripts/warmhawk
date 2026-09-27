@@ -7,7 +7,7 @@
 # documented command simply wasn't there.
 #
 # This is a dispatcher, deliberately, NOT a bare symlink to update.sh. update.sh reads its first
-# positional argument as a git ref (`TARGET_REF="${1:-main}"`), so symlinking it directly would
+# positional argument as a git ref (`TARGET_REF="${1:-master}"`), so symlinking it directly would
 # make the documented `warmhawk update` try to check out a branch literally named "update" —
 # printing a confusing warning and then silently updating to whatever ref happened to be checked
 # out. Every subcommand below is a thin wrapper over a script or compose call that already exists.
@@ -44,7 +44,7 @@ WarmHawk Core Engine
 Usage: warmhawk <command> [args]
 
   update [ref]      Pull the latest release, run pending migrations, rolling restart.
-                    Defaults to the 'main' release line; pass a tag to pin one.
+                    Defaults to the 'master' release line; pass a tag to pin one.
   backup            Run the Postgres backup now, outside the nightly cron.
   status            Show every service and its health.
   logs [service]    Tail logs. With no service, tails everything.
