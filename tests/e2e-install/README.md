@@ -1,9 +1,12 @@
 # Install-Flow E2E Test — release-gated, runs in an automated Docker sandbox
 
-This directory holds five fast-tier scripts — pure local Docker logic, no scratch VM or real DNS
-needed. **All five run in CI** as an `install-flow-fast` workflow (every push/PR, not
+This directory holds six fast-tier scripts — pure local Docker logic, no scratch VM or real DNS
+needed. **All six run in CI** as an `install-flow-fast` workflow (every push/PR, not
 release-gated): `test-port-fallback.sh`, `test-idempotent-rerun.sh`, `test-restart-persistence.sh`,
-`test-upgrade-in-place.sh`, `test-warmhawk-command.sh`. A permanent `verify-scripts-wired` guard
+`test-upgrade-in-place.sh`, `test-warmhawk-command.sh`, `test-upgrade-from-last-release.sh`. The
+last one is the only one that updates between two real releases (the previous tag, installed the
+way the one-line installer does, to the commit under test); the rest install this commit and update
+it to itself at most. A permanent `verify-scripts-wired` guard
 step runs first in that workflow to catch a script ever going un-wired again — it globs
 `tests/e2e-install/test-*.sh` on disk and fails loudly on any mismatch with the wired-in list. See
 each script's own header comment for what it covers. Everything below this point is about `run.sh`
