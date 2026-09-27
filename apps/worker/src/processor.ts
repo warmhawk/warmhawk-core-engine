@@ -6,6 +6,7 @@
  */
 import type { Job } from 'bullmq';
 import { prisma } from '@warmhawk/db';
+import { campaignCapToday } from './campaignCap';
 
 export interface DispatchJobData {
   leadId: string;
@@ -24,7 +25,10 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
     prisma.lead.findUnique({ where: { id: leadId } }),
   ]);
   const stillEligible =
-    mailbox && lead && mailbox.status === 'ACTIVE' && mailbox.sentToday < mailbox.dailyCap;
+    mailbox &&
+    lead &&
+    mailbox.status === 'ACTIVE' &&
+    mailbox.sentToday < campaignCapToday(mailbox.dailyCap, mailbox.warmupGraduatedAt, new Date());
 
   if (!stillEligible) {
     // Revert the lead to UNTOUCHED so the enqueuer re-picks it up against a different mailbox on

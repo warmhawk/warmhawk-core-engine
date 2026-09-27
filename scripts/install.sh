@@ -383,7 +383,7 @@ docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-co
 # file in a directory") does not hit this. It has no per-name skip-existing behavior of its own, so
 # each not-yet-imported file is copied into its own single-file staging directory and imported one
 # at a time — keeping the exact same per-file guard/logging as before, just changing the CLI shape.
-log "Provisioning n8n workflows (dispatch, reply-poll, seed-placement-poll, blocklist-poll, lookalike-scan)..."
+log "Provisioning n8n workflows (dispatch, reply-poll, seed-placement-poll, blocklist-poll, lookalike-scan, warmup-tick)..."
 EXISTING_N8N_WORKFLOWS=$(docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" exec -T n8n n8n list:workflow 2>/dev/null || true)
 N8N_IMPORT_FAILED=false
 N8N_WORKFLOW_NAMES=()

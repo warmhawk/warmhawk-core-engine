@@ -8,9 +8,10 @@
  *   - CAN-SPAM auto-injection gate (`sendCompliance.ts#assertCanSpamCompliant`)
  *   - RFC 8058 one-click unsubscribe headers, unconditionally attached
  *   - EU AI Act Article 50 disclosure marker
- *   - Seed-Inbox Placement Test (V12) BCC hook — every campaign send silently includes the
- *     founder/customer-configured active `SeedAccount` addresses on BCC, gracefully no-op'ing when
- *     none are configured (see `lib/seedAccounts.ts`)
+ *   - Seed-Inbox Placement Test (V12) BCC hook — a sample of campaign sends (1 in 20 by default)
+ *     silently includes the customer-configured active `SeedAccount` addresses on BCC, and each
+ *     sampled copy gets a pending `SeedPlacementResult` the warmup tick later checks by
+ *     Message-ID; a no-op when none are configured (see `lib/seedAccounts.ts`)
  *
  * Never called directly by a public client — `requireCallbackSecret`-guarded and, per the
  * Containerization Model, reachable only over `warmhawk_internal` (nginx has no location block for
@@ -23,7 +24,7 @@ import { mintGoogleAccessToken } from './googleOAuth';
 import { mintMicrosoftAccessToken } from './microsoftOAuth';
 import { createGraphTransport } from './microsoftGraphTransport';
 import { assertCanSpamCompliant, buildRfc8058Headers, appendEuAiDisclosureIfNeeded } from './sendCompliance';
-import { getActiveSeedBccEmails } from './seedAccounts';
+import { pickSeedBccSample, subjectSha256 } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
 import { DEFAULT_BOUNCE_RATE_THRESHOLD, BOUNCE_RATE_MIN_SAMPLE_SIZE } from '../../../../constants';
 
@@ -235,10 +236,10 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
   let listUnsubscribePostHeader: string | undefined;
   let euAiDisclosureAppended = false;
   let seedBccCount = 0;
-  let bccList: string[] = [];
+  let bccSeeds: Array<{ id: string; emailAddress: string }> = [];
 
   // Campaign sends only — compliance gates + guardrail hooks never apply to a non-campaign send
-  // (e.g. the warmup network's own peer-to-peer traffic).
+  // (e.g. the warmup engine's own mailbox-to-mailbox traffic).
   if (campaignId) {
     const [campaign, instanceSettings] = await Promise.all([
       prisma.campaign.findUnique({ where: { id: campaignId } }),
@@ -266,12 +267,11 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
     body = disclosure.body;
     euAiDisclosureAppended = disclosure.disclosureAppended;
 
-    // Seed-Inbox Placement Test (V12, Guardrails option (c)) — BCC every active, founder/customer-
-    // configured seed account on every real campaign send. Gracefully no-ops (empty array) when
-    // none are configured, exactly per the spec ("this is customer/founder-configured, not
-    // something requiring live seed accounts to exist in THIS build").
-    bccList = await getActiveSeedBccEmails();
-    seedBccCount = bccList.length;
+    // Seed-Inbox Placement Test (V12, Guardrails option (c)) — on a sampled send, BCC every
+    // active customer-configured seed account. Empty when this send isn't sampled or no seeds
+    // are configured.
+    bccSeeds = await pickSeedBccSample();
+    seedBccCount = bccSeeds.length;
   }
 
   const key = encryptionKey();
@@ -312,11 +312,30 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
     const info = await transporter.sendMail({
       from: mailbox.email,
       to,
-      ...(bccList.length > 0 ? { bcc: bccList } : {}),
+      ...(bccSeeds.length > 0 ? { bcc: bccSeeds.map((seed) => seed.emailAddress) } : {}),
       subject,
       text: body,
       headers,
     });
+
+    if (campaignId && bccSeeds.length > 0) {
+      // One pending check per seed copy; the warmup tick finds it by Message-ID. Bookkeeping
+      // only — a failure here must never fail a send that already went out.
+      const sentAt = new Date();
+      await prisma.seedPlacementResult
+        .createMany({
+          data: bccSeeds.map((seed) => ({
+            campaignId,
+            seedAccountId: seed.id,
+            mailboxId,
+            messageId: info.messageId ?? null,
+            subjectSha256: subjectSha256(subject),
+            sentAt,
+            checkedAt: null,
+          })),
+        })
+        .catch(() => undefined);
+    }
 
     if (campaignId) {
       await prisma.mailbox.update({

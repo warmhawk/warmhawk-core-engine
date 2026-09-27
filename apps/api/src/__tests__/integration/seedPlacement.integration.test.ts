@@ -62,7 +62,6 @@ describeIntegration('GET /domains/:id/placement-sample (integration, real Postgr
       data: { campaignId, email: `lead-${Date.now()}@example.com`, status: 'CONTACTED' },
     });
 
-    // A real send this domain's mailbox made — the aggregation endpoint's join path.
     await prisma.executionLog.create({
       data: { campaignId, leadId: lead.id, mailboxId, status: 'SENT' },
     });
@@ -81,11 +80,18 @@ describeIntegration('GET /domains/:id/placement-sample (integration, real Postgr
     });
     seedAccountId = seedAccount.id;
 
+    const checkedAt = new Date();
+    const sentAt = new Date(checkedAt.getTime() - 10 * 60_000);
     await prisma.seedPlacementResult.createMany({
       data: [
-        { campaignId, seedAccountId, folder: 'INBOX' },
+        // Checked sampled copies this domain's mailbox sent — the only rows that count.
+        { campaignId, seedAccountId, mailboxId, messageId: '<a@x>', sentAt, checkedAt, folder: 'INBOX' },
+        { campaignId, seedAccountId, mailboxId, messageId: '<b@x>', sentAt, checkedAt, folder: 'SPAM' },
+        { campaignId, seedAccountId, mailboxId, messageId: '<c@x>', sentAt, checkedAt, folder: 'PROMOTIONS' },
+        // Still waiting to be checked — not a result yet.
+        { campaignId, seedAccountId, mailboxId, messageId: '<d@x>', sentAt, checkedAt: null },
+        // Legacy "newest email in the folder" row with no mailbox — ignored.
         { campaignId, seedAccountId, folder: 'SPAM' },
-        { campaignId, seedAccountId, folder: 'PROMOTIONS' },
       ],
     });
   });

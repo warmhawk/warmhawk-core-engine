@@ -15,6 +15,7 @@ import type { Queue } from 'bullmq';
 import type IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
 import { computeNextSlotSeconds } from './computeNextSlotSeconds';
+import { campaignCapToday } from './campaignCap';
 import { DISPATCH_JOB_NAME, mailboxReservationKey } from './queue';
 
 const LEAD_BATCH_SIZE = 20;
@@ -104,12 +105,13 @@ export async function runEnqueuerTick(
   });
 
   let candidates: MailboxCandidate[] = mailboxes
-    .filter((m) => m.sentToday < m.dailyCap)
-    .map((m) => ({
+    .map((m) => ({ m, cap: campaignCapToday(m.dailyCap, m.warmupGraduatedAt, now) }))
+    .filter(({ m, cap }) => m.sentToday < cap)
+    .map(({ m, cap }) => ({
       id: m.id,
       lastSentAt: m.lastSentAt,
       sentToday: m.sentToday,
-      dailyCap: m.dailyCap,
+      dailyCap: cap,
       sortKeyMs: m.lastSentAt ? m.lastSentAt.getTime() : -Infinity,
     }));
 
