@@ -240,6 +240,212 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     expect(again.statusCode).toBe(404);
   });
 
+  const auth = () => ({ authorization: `Bearer ${authToken}` });
+
+  it('stores subject, aiMode and aiWritesSubject, and validates them', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns',
+      headers: auth(),
+      payload: {
+        name: 'Compose Fields',
+        aiPromptTemplate: '',
+        template: 'Hi {{firstName}}',
+        subject: '  {Quick idea|An idea} for {{company}}  ',
+        aiMode: 'PROMPT',
+        aiWritesSubject: true,
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const json = created.json();
+    createdCampaignIds.push(json.id);
+    expect(json).toMatchObject({ subject: '{Quick idea|An idea} for {{company}}', aiMode: 'PROMPT', aiWritesSubject: true });
+
+    const defaults = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns',
+      headers: auth(),
+      payload: { name: 'Compose Defaults', aiPromptTemplate: '' },
+    });
+    createdCampaignIds.push(defaults.json().id);
+    expect(defaults.json()).toMatchObject({ subject: null, aiMode: 'PERSONALIZE', aiWritesSubject: false });
+
+    const badMode = await app.inject({
+      method: 'PATCH',
+      url: `/v1/campaigns/${json.id}`,
+      headers: auth(),
+      payload: { aiMode: 'FREESTYLE' },
+    });
+    expect(badMode.statusCode).toBe(422);
+
+    const badSubject = await app.inject({
+      method: 'PATCH',
+      url: `/v1/campaigns/${json.id}`,
+      headers: auth(),
+      payload: { subject: '{unclosed|group' },
+    });
+    expect(badSubject.statusCode).toBe(422);
+
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: `/v1/campaigns/${json.id}`,
+      headers: auth(),
+      payload: { subject: '   ', aiMode: 'PERSONALIZE' },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json()).toMatchObject({ subject: null, aiMode: 'PERSONALIZE' });
+  });
+
+  it('previews unsaved draft fields with a sample lead, and a saved campaign with its own leads', async () => {
+    const draft = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns/preview',
+      headers: auth(),
+      payload: { subject: 'Idea for {{company}}', template: 'Hi {{firstName}}, {{title}} question.' },
+    });
+    expect(draft.statusCode).toBe(200);
+    expect(draft.json()).toMatchObject({
+      sampleLead: true,
+      subject: 'Idea for Acme Logistics',
+      body: 'Hi Dana, Head of Operations question.',
+      aiOutcome: 'TEMPLATE',
+      fallback: { subject: 'Idea for Acme Logistics' },
+    });
+
+    const campaign = await prisma.campaign.create({
+      data: { name: 'Preview Leads', aiPromptTemplate: '', subject: 'Hi {{firstName}}', template: 'Body for {{company}}' },
+    });
+    createdCampaignIds.push(campaign.id);
+    await prisma.lead.createMany({
+      data: [
+        { campaignId: campaign.id, email: 'one@acme.example', firstName: 'Ada', company: 'One Co' },
+        { campaignId: campaign.id, email: 'two@acme.example', firstName: 'Grace', company: 'Two Co' },
+      ],
+    });
+    const saved = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns/preview',
+      headers: auth(),
+      payload: { campaignId: campaign.id, leadIndex: 1 },
+    });
+    expect(saved.json()).toMatchObject({ sampleLead: false, leadIndex: 1, subject: 'Hi Grace', body: 'Body for Two Co' });
+    expect(saved.json().leads).toHaveLength(2);
+
+    const badSpintax = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns/preview',
+      headers: auth(),
+      payload: { template: '{broken|group' },
+    });
+    expect(badSpintax.statusCode).toBe(422);
+  });
+
+  it('previews the CAN-SPAM footer sends get, or says what is missing when sends would be refused', async () => {
+    const before = await prisma.instanceSettings.findUnique({ where: { id: 'default' } });
+    const address = '100 Example Street, Springfield, ST 00000';
+    const preview = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: '/v1/campaigns/preview', headers: auth(), payload });
+    const draft = { subject: 'Idea for {{company}}', template: 'Hi {{firstName}},' };
+    try {
+      await prisma.instanceSettings.upsert({
+        where: { id: 'default' },
+        create: { id: 'default', physicalMailingAddress: address },
+        update: { physicalMailingAddress: address },
+      });
+
+      // Both set: the body and the if-the-AI-fails body end with the footer, unsubscribe per lead.
+      const complete = await preview({ ...draft, unsubscribeUrlTemplate: 'https://acme.example/u?email={{email}}' });
+      expect(complete.statusCode).toBe(200);
+      const footer = `\n\n--\n${address}\nUnsubscribe: https://acme.example/u?email=dana%40acme.example`;
+      expect(complete.json()).toMatchObject({ complianceMissing: [], body: `Hi Dana,${footer}`, fallback: { body: `Hi Dana,${footer}` } });
+
+      // No unsubscribe link, or one sends would refuse (not https/mailto): no footer, and why.
+      for (const unsubscribeUrlTemplate of [undefined, '', 'ftp://acme.example/u']) {
+        const missing = await preview({ ...draft, unsubscribeUrlTemplate });
+        expect(missing.json()).toMatchObject({ complianceMissing: ['unsubscribe'], body: 'Hi Dana,' });
+      }
+
+      // A saved campaign's own link is used when the draft doesn't send one; the draft's wins when it does.
+      const campaign = await prisma.campaign.create({
+        data: { name: 'Preview Footer', aiPromptTemplate: '', ...draft, unsubscribeUrlTemplate: 'mailto:out@acme.example' },
+      });
+      createdCampaignIds.push(campaign.id);
+      expect((await preview({ campaignId: campaign.id })).json().body).toMatch(/Unsubscribe: mailto:out@acme\.example$/);
+      expect((await preview({ campaignId: campaign.id, unsubscribeUrlTemplate: '' })).json().complianceMissing).toEqual([
+        'unsubscribe',
+      ]);
+
+      // No instance address: nothing can send, and the preview says so first.
+      await prisma.instanceSettings.delete({ where: { id: 'default' } });
+      expect((await preview({ ...draft, unsubscribeUrlTemplate: 'https://acme.example/u' })).json().complianceMissing).toEqual([
+        'address',
+      ]);
+      expect((await preview(draft)).json().complianceMissing).toEqual(['address', 'unsubscribe']);
+    } finally {
+      await prisma.instanceSettings.deleteMany({ where: { id: 'default' } });
+      if (before) await prisma.instanceSettings.create({ data: before });
+    }
+  });
+
+  it('field-check flags unknown fields and counts leads missing a custom field', async () => {
+    const campaign = await prisma.campaign.create({ data: { name: 'Field Check', aiPromptTemplate: '' } });
+    createdCampaignIds.push(campaign.id);
+    await prisma.lead.createMany({
+      data: [
+        { campaignId: campaign.id, email: 'a@acme.example', firstName: 'Ada', customFields: { title: 'COO' } },
+        { campaignId: campaign.id, email: 'b@acme.example', firstName: null, customFields: { title: '' } },
+      ],
+    });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns/field-check',
+      headers: auth(),
+      payload: { campaignId: campaign.id, texts: ['Hi {{firstName}} ({{Title}}) — {{senderName}}', '{{caseStudyResult}}'] },
+    });
+    expect(response.statusCode).toBe(200);
+    const json = response.json();
+    expect(json.leadCount).toBe(2);
+    expect(json.available).toContain('title');
+    expect(json.fields).toEqual([
+      { name: 'firstName', status: 'partial', missingCount: 1 },
+      { name: 'Title', status: 'partial', missingCount: 1 },
+      { name: 'senderName', status: 'ok', missingCount: 0 },
+      { name: 'caseStudyResult', status: 'unknown', missingCount: 2 },
+    ]);
+  });
+
+  it('reports who wrote the last week of sends, on the list and per campaign', async () => {
+    const campaign = await prisma.campaign.create({ data: { name: 'AI Writing', aiPromptTemplate: '', aiProvider: 'GEMINI' } });
+    createdCampaignIds.push(campaign.id);
+    const lead = await prisma.lead.create({
+      data: { campaignId: campaign.id, email: 'w@acme.example', firstName: 'Dana', company: 'Acme' },
+    });
+    const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    await prisma.executionLog.createMany({
+      data: [
+        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_WRITTEN' },
+        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_WRITTEN' },
+        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_FALLBACK', aiFallbackReason: 'model_unavailable' },
+        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_FALLBACK', aiFallbackReason: 'model_unavailable', createdAt: old },
+      ],
+    });
+
+    const list = await app.inject({ method: 'GET', url: '/v1/campaigns', headers: auth() });
+    const row = list.json().find((c: { id: string }) => c.id === campaign.id);
+    expect(row).toMatchObject({ aiWrittenCount: 2, aiFallbackCount: 1 });
+
+    const detail = await app.inject({ method: 'GET', url: `/v1/campaigns/${campaign.id}/ai-writing`, headers: auth() });
+    expect(detail.statusCode).toBe(200);
+    const json = detail.json();
+    expect(json.counts).toEqual({ aiWritten: 2, template: 0, aiFallback: 1 });
+    expect(json.fallbackReasons).toEqual([{ reason: 'model_unavailable', count: 1 }]);
+    expect(json.recent).toHaveLength(3);
+    expect(json.recent[0].lead).toEqual({ firstName: 'Dana', lastName: null, company: 'Acme' });
+
+    const missing = await app.inject({ method: 'GET', url: '/v1/campaigns/nope/ai-writing', headers: auth() });
+    expect(missing.statusCode).toBe(404);
+  });
+
   it('requires authentication', async () => {
     const response = await app.inject({ method: 'GET', url: '/v1/campaigns' });
     expect(response.statusCode).toBe(401);

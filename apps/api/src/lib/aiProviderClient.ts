@@ -21,7 +21,20 @@ export interface PersonalizeRequest {
   model: string;
   promptTemplate: string;
   leadContext: Record<string, unknown>;
+  /** PERSONALIZE hands the model `baseEmail` and asks it to change only what `promptTemplate`
+   *  names; PROMPT (the default, and the only behavior before campaigns had a mode) has it write
+   *  the whole email from `promptTemplate`. PERSONALIZE with no `baseEmail` behaves as PROMPT. */
+  mode?: 'PERSONALIZE' | 'PROMPT';
+  /** The campaign's own email, already rendered for this lead (merge fields + spintax). */
+  baseEmail?: string;
+  /** Ask for a `Subject:` first line — see `parseGeneratedEmail`. */
+  wantsSubject?: boolean;
 }
+
+/** What the model is told to do in PERSONALIZE mode when the campaign leaves its instructions
+ *  blank — the most common single-mailbox use: keep the written email, tailor its opening. */
+export const DEFAULT_PERSONALIZE_INSTRUCTIONS =
+  "Rewrite only the opening line so it speaks to this lead's company or role.";
 
 export interface PersonalizeResult {
   generatedText: string;
@@ -81,16 +94,61 @@ export function fillMergeFields(template: string, leadContext: Record<string, un
 
 /** Fills merge fields in `promptTemplate` (via `fillMergeFields` above), then appends the full lead
  *  context as a JSON block so the model can use fields the customer didn't explicitly template,
- *  without inventing facts not present in it. */
-function buildPersonalizationPrompt(promptTemplate: string, leadContext: Record<string, unknown>): string {
-  const filled = fillMergeFields(promptTemplate, leadContext);
+ *  without inventing facts not present in it. In PERSONALIZE mode the campaign's rendered email
+ *  goes in too, with an instruction to keep everything the customer didn't ask to change. */
+export function buildPersonalizationPrompt(request: Omit<PersonalizeRequest, 'provider' | 'apiKey' | 'model'>): string {
+  const { leadContext, baseEmail, wantsSubject } = request;
+  const personalize = request.mode === 'PERSONALIZE' && Boolean(baseEmail?.trim());
+  const instructions = fillMergeFields(
+    request.promptTemplate.trim() || (personalize ? DEFAULT_PERSONALIZE_INSTRUCTIONS : ''),
+    leadContext,
+  );
+  const outputRule = wantsSubject
+    ? 'Start with one line "Subject: <subject line>", then a blank line, then the email body. No preamble, no markdown formatting, no placeholder brackets left unfilled.'
+    : 'Write only the finished email body text — no subject line, no preamble, no markdown formatting, no placeholder brackets left unfilled.';
+
+  const parts = personalize
+    ? [
+        'Here is a cold email already written for this lead:',
+        '<email>',
+        baseEmail!.trim(),
+        '</email>',
+        '',
+        `Instructions: ${instructions}`,
+        'Change only what the instructions ask for. Keep every other sentence word for word, including the sign-off.',
+      ]
+    : [instructions];
   return [
-    filled,
+    ...parts,
     '',
     `Lead context (use only what's relevant; never invent facts not present here): ${JSON.stringify(leadContext)}`,
     '',
-    'Write only the finished email body text — no subject line, no preamble, no markdown formatting, no placeholder brackets left unfilled.',
+    outputRule,
   ].join('\n');
+}
+
+/** Splits a model reply into subject and body when it was asked for a `Subject:` first line.
+ *  Tolerates the usual model decorations (`**Subject:**`, `Subject line:`); a reply with no such
+ *  line comes back as `subject: null` with the whole text as the body. */
+export function parseGeneratedEmail(text: string): { subject: string | null; body: string } {
+  const trimmed = text.replace(/^\s+/, '');
+  const match = /^\**\s*subject(?:\s+line)?\**\s*:\s*\**\s*(.*)$/im.exec(trimmed.split('\n')[0] ?? '');
+  if (!match) return { subject: null, body: text.trim() };
+  const subject = match[1].replace(/\*+$/, '').trim();
+  const body = trimmed.split('\n').slice(1).join('\n').trim();
+  return { subject: subject || null, body };
+}
+
+/** Why a personalization call failed, as a short stable code stored on the send's ExecutionLog.
+ *  Reads the HTTP status out of the provider error message (`aiProviders/*` put it there) rather
+ *  than importing their error classes, so this stays callable where those modules are mocked. */
+export type AiFallbackReason = 'provider_error' | 'model_unavailable' | 'key_rejected' | 'key_missing';
+
+export function classifyAiFailure(err: unknown): AiFallbackReason {
+  const status = /HTTP (\d{3})/.exec(err instanceof Error ? err.message : String(err))?.[1];
+  if (status === '404') return 'model_unavailable';
+  if (status === '401' || status === '403') return 'key_rejected';
+  return 'provider_error';
 }
 
 /** Real personalization call, dispatched by provider. The plaintext key is available only inside
@@ -98,7 +156,7 @@ function buildPersonalizationPrompt(promptTemplate: string, leadContext: Record<
  *  caller (`routes/internalAi.ts`) owns the retry-once-then-fall-back-to-template policy, since
  *  only it knows what "fall back" means for a given send (the unmodified template, sent as-is). */
 export async function personalizeContent(request: PersonalizeRequest): Promise<PersonalizeResult> {
-  const prompt = buildPersonalizationPrompt(request.promptTemplate, request.leadContext);
+  const prompt = buildPersonalizationPrompt(request);
   const generatedText =
     request.provider === 'GEMINI'
       ? await generateGeminiText({ apiKey: request.apiKey, model: request.model, prompt })

@@ -5,7 +5,7 @@
  * campaign can go out missing them:
  *
  *   1. CAN-SPAM auto-injection: refuse to send a campaign missing a physical mailing address
- *      (instance-wide setting) or an unsubscribe mechanism.
+ *      (instance-wide setting) or an unsubscribe mechanism, and put both in the body as a footer.
  *   2. RFC 8058 one-click unsubscribe headers, generated server-side on every send —
  *      `List-Unsubscribe` + `List-Unsubscribe-Post: One-Click`, not left to template config.
  *   3. EU AI Act Article 50 disclosure marker, auto-appended when the campaign has an AI
@@ -34,6 +34,53 @@ export function assertCanSpamCompliant(input: CanSpamCheckInput): void {
       'Cannot send: campaign has no unsubscribe link configured (CAN-SPAM requires a working opt-out mechanism).',
     );
   }
+}
+
+/** Resolves a WarmHawk-templated unsubscribe URL/mailto for a specific recipient. Campaign
+ *  templates may embed a `{{email}}` placeholder (e.g.
+ *  `https://api.customer-domain.com/unsubscribe?email={{email}}`); a template with no placeholder
+ *  is used as-is (a single shared unsubscribe landing page is still RFC 8058-valid). */
+export function resolveUnsubscribeUrl(template: string, recipientEmail: string): string {
+  return template.replace(/\{\{\s*email\s*\}\}/gi, encodeURIComponent(recipientEmail));
+}
+
+export interface CanSpamFooterInput {
+  physicalMailingAddress: string | null | undefined;
+  /** Already resolved for this recipient (`resolveUnsubscribeUrl`). */
+  unsubscribeUrl: string | null | undefined;
+}
+
+function normalizeForMatch(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/** CAN-SPAM wants the postal address and a clear opt-out in the message itself — the
+ *  `List-Unsubscribe` header alone isn't visible in every client. Appends whichever of the two
+ *  the body doesn't already carry (a customer who signs off with their address keeps just one
+ *  copy), as a plain-text footer after everything else, including the EU AI disclosure. Throws
+ *  like `assertCanSpamCompliant` when either is missing, so no caller can skip the gate by
+ *  calling this alone. */
+export function appendCanSpamFooter(
+  body: string,
+  input: CanSpamFooterInput,
+): { body: string; footerAppended: boolean } {
+  const address = input.physicalMailingAddress?.trim();
+  const unsubscribeUrl = input.unsubscribeUrl?.trim();
+  assertCanSpamCompliant({ physicalMailingAddress: address, unsubscribeUrlTemplate: unsubscribeUrl });
+
+  const lines: string[] = [];
+  if (!normalizeForMatch(body).includes(normalizeForMatch(address as string))) {
+    lines.push(
+      (address as string)
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join('\n'),
+    );
+  }
+  if (!body.includes(unsubscribeUrl as string)) lines.push(`Unsubscribe: ${unsubscribeUrl}`);
+  if (lines.length === 0) return { body, footerAppended: false };
+  return { body: `${body.trimEnd()}\n\n--\n${lines.join('\n')}`, footerAppended: true };
 }
 
 export interface Rfc8058Headers {

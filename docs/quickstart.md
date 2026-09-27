@@ -40,8 +40,14 @@ Save that token — every call below sends it as `Authorization: Bearer <token>`
 ```bash
 curl -s -X POST https://api.yourcompany.com/v1/campaigns \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"name":"First Campaign","aiPromptTemplate":"Write a short, friendly intro email."}'
+  -d '{"name":"First Campaign","subject":"Quick question, {{firstName}}","template":"Hi {{firstName}},\n\n...","aiPromptTemplate":""}'
 ```
+
+`subject` and `template` are the email itself, with `{{merge fields}}` and `{option|option}`
+spintax. With an AI provider set (`"aiProvider":"GEMINI"`), the default `"aiMode":"PERSONALIZE"`
+has the model adjust that email per lead — `aiPromptTemplate` says what to change, blank means
+the opening line; `"aiMode":"PROMPT"` has it write the whole email from `aiPromptTemplate`
+instead. Either way, a provider failure sends the template as written.
 
 ## 4. Import a test lead
 

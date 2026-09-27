@@ -5,7 +5,8 @@
  * multi-provider-OAuth conventions, and extended with the compliance/guardrail hooks that were
  * only documented, not wired to a real send path, before this file existed:
  *
- *   - CAN-SPAM auto-injection gate (`sendCompliance.ts#assertCanSpamCompliant`)
+ *   - CAN-SPAM auto-injection gate (`sendCompliance.ts#assertCanSpamCompliant`) and the address +
+ *     unsubscribe footer it requires in the body (`appendCanSpamFooter`)
  *   - RFC 8058 one-click unsubscribe headers, unconditionally attached
  *   - EU AI Act Article 50 disclosure marker
  *   - Seed-Inbox Placement Test (V12) BCC hook — a sample of campaign sends (1 in 20 by default)
@@ -18,12 +19,18 @@
  * `/internal/*` anywhere in this repo).
  */
 import nodemailer from 'nodemailer';
-import { prisma } from '@warmhawk/db';
+import { prisma, type AiWriteOutcome } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { mintGoogleAccessToken } from './googleOAuth';
 import { mintMicrosoftAccessToken } from './microsoftOAuth';
 import { createGraphTransport } from './microsoftGraphTransport';
-import { assertCanSpamCompliant, buildRfc8058Headers, appendEuAiDisclosureIfNeeded } from './sendCompliance';
+import {
+  assertCanSpamCompliant,
+  buildRfc8058Headers,
+  appendEuAiDisclosureIfNeeded,
+  appendCanSpamFooter,
+  resolveUnsubscribeUrl,
+} from './sendCompliance';
 import { pickSeedBccSample, subjectSha256 } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
 import { DEFAULT_BOUNCE_RATE_THRESHOLD, BOUNCE_RATE_MIN_SAMPLE_SIZE } from '../../../../constants';
@@ -61,6 +68,12 @@ export interface SendMailInput {
   /** n8n's `$execution.id` — recorded onto the `ExecutionLog` row for cross-referencing a send
    *  back to the workflow execution that made it, matching `ExecutionLog.n8nExecutionId`. */
   n8nExecutionId?: string;
+  /** Who wrote this send's copy, as `/internal/ai/personalize` reported it — stored on the
+   *  `ExecutionLog` row so fall-backs to the plain template are countable, and used (instead of
+   *  "does the campaign have a provider") to decide the EU AI disclosure. Omitted by a dispatch
+   *  workflow from before it was forwarded; the old provider-configured rule applies then. */
+  aiOutcome?: AiWriteOutcome;
+  aiFallbackReason?: string;
 }
 
 export interface SendMailResult {
@@ -69,6 +82,8 @@ export interface SendMailResult {
   listUnsubscribeHeader?: string;
   listUnsubscribePostHeader?: string;
   euAiDisclosureAppended: boolean;
+  /** False only when the body already carried both the address and the unsubscribe link. */
+  canSpamFooterAppended: boolean;
   seedBccCount: number;
 }
 
@@ -171,15 +186,26 @@ async function recordSendFailure(params: {
   n8nExecutionId?: string;
   message: string;
   code?: string;
+  aiOutcome?: AiWriteOutcome;
+  aiFallbackReason?: string;
 }): Promise<void> {
-  const { campaignId, leadId, mailboxId, n8nExecutionId, message, code } = params;
+  const { campaignId, leadId, mailboxId, n8nExecutionId, message, code, aiOutcome, aiFallbackReason } = params;
   const hard = isHardBounce(message, code);
 
   if (hard) {
     await prisma.lead.update({ where: { id: leadId }, data: { status: 'BOUNCED' } }).catch(() => undefined);
     await prisma.executionLog
       .create({
-        data: { campaignId, leadId, mailboxId, n8nExecutionId, status: 'BOUNCED', errorMessage: message },
+        data: {
+          campaignId,
+          leadId,
+          mailboxId,
+          n8nExecutionId,
+          status: 'BOUNCED',
+          errorMessage: message,
+          aiOutcome,
+          aiFallbackReason,
+        },
       })
       .catch(() => undefined);
     await applyBounceCircuitBreaker({ campaignId, mailboxId }).catch(() => undefined);
@@ -207,21 +233,23 @@ async function recordSendFailure(params: {
 
   await prisma.executionLog
     .create({
-      data: { campaignId, leadId, mailboxId, n8nExecutionId, status: 'FAILED', errorMessage: message },
+      data: {
+        campaignId,
+        leadId,
+        mailboxId,
+        n8nExecutionId,
+        status: 'FAILED',
+        errorMessage: message,
+        aiOutcome,
+        aiFallbackReason,
+      },
     })
     .catch(() => undefined);
 }
 
-/** Resolves a WarmHawk-templated unsubscribe URL/mailto for a specific recipient. Campaign
- *  templates may embed a `{{email}}` placeholder (e.g.
- *  `https://api.customer-domain.com/unsubscribe?email={{email}}`); a template with no placeholder
- *  is used as-is (a single shared unsubscribe landing page is still RFC 8058-valid). */
-function resolveUnsubscribeUrl(template: string, recipientEmail: string): string {
-  return template.replace(/\{\{\s*email\s*\}\}/gi, encodeURIComponent(recipientEmail));
-}
-
 export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
-  const { mailboxId, to, subject, campaignId, leadId, countryCode, n8nExecutionId } = input;
+  const { mailboxId, to, subject, campaignId, leadId, countryCode, n8nExecutionId, aiOutcome, aiFallbackReason } =
+    input;
   let body = input.body;
 
   const mailbox = await prisma.mailbox.findUnique({ where: { id: mailboxId } });
@@ -235,6 +263,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
   let listUnsubscribeHeader: string | undefined;
   let listUnsubscribePostHeader: string | undefined;
   let euAiDisclosureAppended = false;
+  let canSpamFooterAppended = false;
   let seedBccCount = 0;
   let bccSeeds: Array<{ id: string; emailAddress: string }> = [];
 
@@ -260,12 +289,24 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
     listUnsubscribeHeader = rfc8058['List-Unsubscribe'];
     listUnsubscribePostHeader = rfc8058['List-Unsubscribe-Post'];
 
-    const disclosure = appendEuAiDisclosureIfNeeded(body, Boolean(campaign.aiProvider), {
+    // Only AI-written copy carries the disclosure — a fall-back send is the customer's own template.
+    const aiWritten = aiOutcome ? aiOutcome === 'AI_WRITTEN' : Boolean(campaign.aiProvider);
+    const disclosure = appendEuAiDisclosureIfNeeded(body, aiWritten, {
       email: to,
       countryCode,
     });
     body = disclosure.body;
-    euAiDisclosureAppended = disclosure.disclosureAppended;
+    // `/internal/ai/personalize` usually appended it already; record that it went out either way.
+    euAiDisclosureAppended =
+      disclosure.disclosureAppended || (aiWritten && body.includes('EU AI Act Article 50'));
+
+    // Last, so the address and opt-out close the email whatever wrote the rest.
+    const footer = appendCanSpamFooter(body, {
+      physicalMailingAddress: instanceSettings?.physicalMailingAddress,
+      unsubscribeUrl,
+    });
+    body = footer.body;
+    canSpamFooterAppended = footer.footerAppended;
 
     // Seed-Inbox Placement Test (V12, Guardrails option (c)) — on a sampled send, BCC every
     // active customer-configured seed account. Empty when this send isn't sampled or no seeds
@@ -310,7 +351,8 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
   try {
     const info = await transporter.sendMail({
-      from: mailbox.email,
+      // Graph transport reads the From display name back out of these MIME headers too.
+      from: mailbox.senderName?.trim() ? { name: mailbox.senderName.trim(), address: mailbox.email } : mailbox.email,
       to,
       ...(bccSeeds.length > 0 ? { bcc: bccSeeds.map((seed) => seed.emailAddress) } : {}),
       subject,
@@ -374,6 +416,8 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
               listUnsubscribeHeader,
               listUnsubscribePostHeader,
               euAiDisclosureAppended,
+              aiOutcome,
+              aiFallbackReason,
             },
           })
           .catch(() => undefined);
@@ -386,6 +430,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
       listUnsubscribeHeader,
       listUnsubscribePostHeader,
       euAiDisclosureAppended,
+      canSpamFooterAppended,
       seedBccCount,
     };
   } catch (err) {
@@ -404,6 +449,8 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
         n8nExecutionId,
         message,
         code: smtpErr?.code,
+        aiOutcome,
+        aiFallbackReason,
       });
     }
 

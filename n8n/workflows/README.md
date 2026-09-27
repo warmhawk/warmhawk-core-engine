@@ -12,10 +12,15 @@ every step is a real HTTP call to this API.
 
 - **`dispatch.json`** — triggered by the worker's callback
   (`N8N_BASE_URL`/`webhook/warmhawk/dispatch`, fired from `apps/worker/src/processor.ts` with
-  `{leadId, mailboxId, campaignId, email}`). Calls `POST /internal/ai/personalize`, splits the
-  returned `generatedText` into a subject/body pair (Code node — WarmHawk's `Campaign` model has
-  no discrete subject field), then calls `POST /internal/mail/send` (the actual SMTP/OAuth send —
-  see `apps/api/src/lib/mailSender.ts`), which itself: enforces CAN-SPAM compliance, attaches RFC
+  `{leadId, mailboxId, campaignId, email}`). Calls `POST /internal/ai/personalize` (with the
+  `mailboxId`, for `{{senderName}}`), which returns the finished `subject` and `body` plus who
+  wrote them (`aiOutcome`: `AI_WRITTEN` / `TEMPLATE` / `AI_FALLBACK`, and `aiFallbackReason`) —
+  see `apps/api/src/lib/composeCampaignEmail.ts`. The Code node passes those through, falling back
+  to splitting `generatedText` on its first newline only for an older core engine. It then calls
+  `POST /internal/mail/send` with the outcome, which is stored on the send's `ExecutionLog` row
+  (the actual SMTP/OAuth send —
+  see `apps/api/src/lib/mailSender.ts`), which itself: enforces CAN-SPAM compliance (refuses a send
+  with no mailing address or unsubscribe link, and ends the body with both), attaches RFC
   8058 one-click-unsubscribe headers, applies the EU AI Act Article 50 disclosure marker, BCCs any
   active Seed-Inbox Placement Test seed accounts, and records the Lead/`ExecutionLog` outcome
   (SENT / hard-bounced / soft-failed-with-retry) server-side. The workflow branches on the HTTP

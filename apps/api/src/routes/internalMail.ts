@@ -21,7 +21,11 @@ interface SendMailBody {
   leadId?: string;
   countryCode?: string;
   n8nExecutionId?: string;
+  aiOutcome?: string;
+  aiFallbackReason?: string;
 }
+
+const AI_OUTCOMES = new Set(['AI_WRITTEN', 'TEMPLATE', 'AI_FALLBACK']);
 
 export async function internalMailRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireCallbackSecret);
@@ -29,6 +33,15 @@ export async function internalMailRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: SendMailBody }>('/send', async (request, reply) => {
     const { mailboxId, to, subject, body, campaignId, leadId, countryCode, n8nExecutionId } =
       request.body;
+    // Forwarded from `/internal/ai/personalize` by the dispatch workflow; anything unrecognised is
+    // dropped rather than refused, so a malformed tag never blocks a send.
+    const aiOutcome = AI_OUTCOMES.has(request.body.aiOutcome ?? '')
+      ? (request.body.aiOutcome as 'AI_WRITTEN' | 'TEMPLATE' | 'AI_FALLBACK')
+      : undefined;
+    const aiFallbackReason =
+      aiOutcome === 'AI_FALLBACK' && typeof request.body.aiFallbackReason === 'string'
+        ? request.body.aiFallbackReason.slice(0, 40)
+        : undefined;
     if (!mailboxId || !to || !subject || !body) {
       return reply.code(422).send({ error: 'mailboxId, to, subject and body are required' });
     }
@@ -43,6 +56,8 @@ export async function internalMailRoutes(app: FastifyInstance): Promise<void> {
         leadId,
         countryCode,
         n8nExecutionId,
+        aiOutcome,
+        aiFallbackReason,
       });
       return reply.send(result);
     } catch (err) {

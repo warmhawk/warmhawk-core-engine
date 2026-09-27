@@ -131,6 +131,31 @@ describeIntegration('mailboxes routes (integration, real Postgres)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 
+  it('sets, trims and clears the sender name, and refuses a multi-line one', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/mailboxes',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { email: `sender-${Date.now()}@example.com`, domainId, senderName: '  Sam Patel ' },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id;
+    createdMailboxIds.push(id);
+    expect(created.json().senderName).toBe('Sam Patel');
+
+    const patch = (senderName: unknown) =>
+      app.inject({
+        method: 'PATCH',
+        url: `/v1/mailboxes/${id}`,
+        headers: { authorization: `Bearer ${authToken}` },
+        payload: { senderName },
+      });
+    expect((await patch('Sam from Acme')).json().senderName).toBe('Sam from Acme');
+    expect((await patch('')).json().senderName).toBeNull();
+    expect((await patch('Sam\r\nBcc: victim@example.com')).statusCode).toBe(422);
+    expect((await patch('x'.repeat(81))).statusCode).toBe(422);
+  });
+
   /**
    * Regression guard: `PATCH /:id` used to pass `request.body as never` straight to
    * `prisma.mailbox.update`'s `data`, so this route's `Body` type (`status`/`dailyCap` only) was

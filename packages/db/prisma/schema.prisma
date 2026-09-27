@@ -94,6 +94,23 @@ enum AiProvider {
   CLAUDE
 }
 
+/// How a campaign's AI provider uses the campaign's own email. PERSONALIZE hands the model the
+/// rendered template and asks it to change only what the instructions name (usually the opening
+/// line); PROMPT has the model write the whole email from the instructions alone, the template
+/// being only the fallback. Every campaign before this field existed behaved as PROMPT.
+enum CampaignAiMode {
+  PERSONALIZE
+  PROMPT
+}
+
+/// Who wrote a campaign send's copy — recorded per send so a silent fall-back to the plain template
+/// (provider outage, retired model, removed key) is countable instead of invisible.
+enum AiWriteOutcome {
+  AI_WRITTEN
+  TEMPLATE
+  AI_FALLBACK
+}
+
 /// New, V11 — Reply Management & Unified Inbox. Previously only a generic `REPLIED` value existed
 /// on ExecutionLog.status with no content/classification.
 enum ReplyClassification {
@@ -236,6 +253,10 @@ model Mailbox {
   provider  MailboxProvider @default(SMTP_CUSTOM)
   dailyCap  Int             @default(25)
   sentToday Int             @default(0)
+
+  /// The person this mailbox sends as — the From display name and the `{{senderName}}` merge
+  /// field. Null falls back to the address's local part.
+  senderName String?
   status    MailboxStatus   @default(WARMUP)
   domainId  String
   domain    Domain          @relation(fields: [domainId], references: [id], onDelete: Cascade)
@@ -293,9 +314,20 @@ model Campaign {
   /// not an AI provider is configured (Pre-Send Content Quality, V11).
   template String? @db.Text
 
+  /// The email's subject line — spintax and merge fields allowed, rendered per send. Nullable for
+  /// campaigns created before it existed: with no subject (and no AI-written one) the send falls
+  /// back to the old rule of using the body's first line.
+  subject String? @db.Text
+
   /// Nullable — no configured provider means the campaign sends its template as-is rather than
   /// failing (Phase 3).
   aiProvider AiProvider?
+
+  /// See `CampaignAiMode`. Existing campaigns were migrated to PROMPT, which is what they did.
+  aiMode CampaignAiMode @default(PERSONALIZE)
+
+  /// When true, the model is asked for a `Subject:` line and that wins over `subject`.
+  aiWritesSubject Boolean @default(false)
 
   /// CAN-SPAM auto-injection — the sending pipeline refuses to send a campaign missing either
   /// this or the instance-wide physical mailing address (see InstanceSettings).
@@ -394,6 +426,11 @@ model ExecutionLog {
   /// EU AI Act Article 50 disclosure marker — true when this send had the AI-content-disclosure
   /// marker appended (Campaign.aiProvider set + recipient resolved to an EU-region signal).
   euAiDisclosureAppended Boolean @default(false)
+
+  /// Who wrote this send's copy, and — for AI_FALLBACK — a short reason code (`provider_error`,
+  /// `model_unavailable`, `key_rejected`, `key_missing`). Null on rows from before this existed.
+  aiOutcome        AiWriteOutcome?
+  aiFallbackReason String?
 
   /// The SMTP provider's Message-ID for this send (nodemailer's `info.messageId`, e.g.
   /// "<abc123@host>") — an opaque identifier, never personalized content, so it doesn't reopen the

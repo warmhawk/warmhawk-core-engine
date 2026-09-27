@@ -33,7 +33,12 @@ describe('personalizeWithFallback', () => {
   it('returns the AI result immediately on first-try success, no retry', async () => {
     vi.mocked(aiProviderClient.personalizeContent).mockResolvedValueOnce({ generatedText: 'Hi Ada!' });
     const result = await personalizeWithFallback(baseRequest, 'fallback template text');
-    expect(result).toEqual({ generatedText: 'Hi Ada!', aiUsed: true, aiPersonalizationFailed: false });
+    expect(result).toEqual({
+      generatedText: 'Hi Ada!',
+      aiUsed: true,
+      aiPersonalizationFailed: false,
+      aiFallbackReason: null,
+    });
     expect(aiProviderClient.personalizeContent).toHaveBeenCalledTimes(1);
   });
 
@@ -50,6 +55,7 @@ describe('personalizeWithFallback', () => {
       generatedText: 'Hi Ada, on retry!',
       aiUsed: true,
       aiPersonalizationFailed: false,
+      aiFallbackReason: null,
     });
     expect(aiProviderClient.personalizeContent).toHaveBeenCalledTimes(2);
   });
@@ -67,8 +73,21 @@ describe('personalizeWithFallback', () => {
       generatedText: 'fallback template text',
       aiUsed: false,
       aiPersonalizationFailed: true,
+      aiFallbackReason: 'provider_error',
     });
     expect(aiProviderClient.personalizeContent).toHaveBeenCalledTimes(2);
+  });
+
+  it('records why it fell back — a retired model reads as model_unavailable, not a generic error', async () => {
+    vi.mocked(aiProviderClient.personalizeContent)
+      .mockRejectedValueOnce(new Error('Gemini generateContent failed with HTTP 404: model not found'))
+      .mockRejectedValueOnce(new Error('Gemini generateContent failed with HTTP 404: model not found'));
+
+    const resultPromise = personalizeWithFallback(baseRequest, 'fallback template text');
+    await vi.runAllTimersAsync();
+    const result = await resultPromise;
+
+    expect(result.aiFallbackReason).toBe('model_unavailable');
   });
 });
 
