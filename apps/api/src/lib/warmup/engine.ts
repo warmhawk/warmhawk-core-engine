@@ -3,7 +3,8 @@
  * `POST /internal/warmup/tick`. Three steps, in this order so decisions use fresh data:
  *
  *   1. check  — find recently sent warmup emails on the recipient side, record INBOX / SPAM /
- *               MISSING, rescue spam back to INBOX
+ *               MISSING, rescue spam back to INBOX; before giving up on one, look on the sender
+ *               side for a delivery-failure report and record BOUNCED with its reason
  *   2. decide — recompute each mailbox's 7-day health; graduate WARMUP -> ACTIVE or demote
  *               ACTIVE -> WARMUP (rules in policy.ts)
  *   3. send   — each due mailbox sends one warmup email to its next partner through the same
@@ -23,7 +24,13 @@ import {
   mailboxCanWarm,
   type WarmupPartner,
 } from './partners';
-import { openInboxReader, type InboxReader, type PartnerRef } from './placement';
+import {
+  bounceReasonText,
+  openInboxReader,
+  type BounceReport,
+  type InboxReader,
+  type PartnerRef,
+} from './placement';
 import { checkSampledPlacements } from '../seedPlacementPoller';
 import {
   CHECK_AFTER_MS,
@@ -66,6 +73,7 @@ export interface WarmupTickSummary {
   checked: number;
   rescued: number;
   missing: number;
+  bounced: number;
   graduated: number;
   demoted: number;
   /** Sampled campaign copies checked in seed inboxes (see `seedPlacementPoller.ts`). */
@@ -91,7 +99,7 @@ function truncateError(err: unknown): string {
 
 export async function checkPendingPlacements(
   deps: WarmupDeps,
-): Promise<{ checked: number; rescued: number; missing: number }> {
+): Promise<{ checked: number; rescued: number; missing: number; bounced: number }> {
   const now = deps.now();
   const pending = await prisma.warmupMessage.findMany({
     where: { placement: 'PENDING', sentAt: { lte: new Date(now.getTime() - CHECK_AFTER_MS) } },
@@ -116,95 +124,130 @@ export async function checkPendingPlacements(
   let checked = 0;
   let rescued = 0;
   let missing = 0;
+  let bounced = 0;
 
-  for (const { ref, messages } of groups.values()) {
-    let reader: InboxReader | null = null;
-    let openError: string | null = null;
-    if (ref) {
-      try {
-        reader = await deps.openReader(ref);
-      } catch (err) {
-        openError = truncateError(err);
-      }
-    } else {
-      openError = 'Recipient was removed before the check';
+  // Sender mailboxes, opened only when an email is about to be given up on.
+  const senderReaders = new Map<string, InboxReader | null>();
+  async function bounceFor(m: (typeof pending)[number]): Promise<BounceReport | null> {
+    if (!m.messageId) return null;
+    if (!senderReaders.has(m.senderMailboxId)) {
+      const reader = await deps
+        .openReader({ kind: 'mailbox', id: m.senderMailboxId })
+        .catch(() => null);
+      senderReaders.set(m.senderMailboxId, reader);
     }
-
-    try {
-      for (const m of messages) {
-        const age = now.getTime() - m.sentAt.getTime();
-        if (!reader) {
-          if (age >= UNCHECKED_AFTER_MS) {
-            await prisma.warmupMessage.update({
-              where: { id: m.id },
-              data: { placement: 'UNCHECKED', checkedAt: now, error: openError },
-            });
-          }
-          continue;
-        }
-
-        let found;
-        try {
-          found = await reader.find({
-            messageId: m.messageId,
-            subject: m.subject,
-            fromEmail: m.senderMailbox.email,
-            sentAt: m.sentAt,
-          });
-        } catch (err) {
-          if (age >= UNCHECKED_AFTER_MS) {
-            await prisma.warmupMessage.update({
-              where: { id: m.id },
-              data: { placement: 'UNCHECKED', checkedAt: now, error: truncateError(err) },
-            });
-          }
-          continue;
-        }
-
-        if (!found) {
-          if (age >= CHECK_GIVE_UP_MS) {
-            await prisma.warmupMessage.update({
-              where: { id: m.id },
-              data: { placement: 'MISSING', checkedAt: now },
-            });
-            checked += 1;
-            missing += 1;
-          }
-          continue;
-        }
-
-        const placement: WarmupPlacement = found.inSpam ? 'SPAM' : 'INBOX';
-        let wasRescued = false;
-        let actionError: string | null = null;
-        try {
-          if (found.inSpam) {
-            await reader.rescue(found);
-            wasRescued = true;
-          } else {
-            await reader.markRead(found);
-          }
-        } catch (err) {
-          actionError = truncateError(err);
-        }
-        await prisma.warmupMessage.update({
-          where: { id: m.id },
-          data: {
-            placement,
-            foundFolder: found.folder,
-            rescued: wasRescued,
-            checkedAt: now,
-            error: actionError,
-          },
-        });
-        checked += 1;
-        if (wasRescued) rescued += 1;
-      }
-    } finally {
-      if (reader) await reader.close().catch(() => undefined);
-    }
+    const reader = senderReaders.get(m.senderMailboxId);
+    if (!reader?.findBounce) return null;
+    return reader.findBounce(m.messageId).catch(() => null);
+  }
+  /** Records BOUNCED when a failure report came back; false leaves the caller's outcome. */
+  async function recordBounce(m: (typeof pending)[number]): Promise<boolean> {
+    const report = await bounceFor(m);
+    if (!report) return false;
+    await prisma.warmupMessage.update({
+      where: { id: m.id },
+      data: { placement: 'BOUNCED', checkedAt: now, error: bounceReasonText(report) },
+    });
+    checked += 1;
+    bounced += 1;
+    return true;
   }
 
-  return { checked, rescued, missing };
+  try {
+    for (const { ref, messages } of groups.values()) {
+      let reader: InboxReader | null = null;
+      let openError: string | null = null;
+      if (ref) {
+        try {
+          reader = await deps.openReader(ref);
+        } catch (err) {
+          openError = truncateError(err);
+        }
+      } else {
+        openError = 'Recipient was removed before the check';
+      }
+
+      try {
+        for (const m of messages) {
+          const age = now.getTime() - m.sentAt.getTime();
+          if (!reader) {
+            if (age >= UNCHECKED_AFTER_MS) {
+              if (await recordBounce(m)) continue;
+              await prisma.warmupMessage.update({
+                where: { id: m.id },
+                data: { placement: 'UNCHECKED', checkedAt: now, error: openError },
+              });
+            }
+            continue;
+          }
+
+          let found;
+          try {
+            found = await reader.find({
+              messageId: m.messageId,
+              subject: m.subject,
+              fromEmail: m.senderMailbox.email,
+              sentAt: m.sentAt,
+            });
+          } catch (err) {
+            if (age >= UNCHECKED_AFTER_MS) {
+              if (await recordBounce(m)) continue;
+              await prisma.warmupMessage.update({
+                where: { id: m.id },
+                data: { placement: 'UNCHECKED', checkedAt: now, error: truncateError(err) },
+              });
+            }
+            continue;
+          }
+
+          if (!found) {
+            if (age >= CHECK_GIVE_UP_MS) {
+              if (await recordBounce(m)) continue;
+              await prisma.warmupMessage.update({
+                where: { id: m.id },
+                data: { placement: 'MISSING', checkedAt: now },
+              });
+              checked += 1;
+              missing += 1;
+            }
+            continue;
+          }
+
+          const placement: WarmupPlacement = found.inSpam ? 'SPAM' : 'INBOX';
+          let wasRescued = false;
+          let actionError: string | null = null;
+          try {
+            if (found.inSpam) {
+              await reader.rescue(found);
+              wasRescued = true;
+            } else {
+              await reader.markRead(found);
+            }
+          } catch (err) {
+            actionError = truncateError(err);
+          }
+          await prisma.warmupMessage.update({
+            where: { id: m.id },
+            data: {
+              placement,
+              foundFolder: found.folder,
+              rescued: wasRescued,
+              checkedAt: now,
+              error: actionError,
+            },
+          });
+          checked += 1;
+          if (wasRescued) rescued += 1;
+        }
+      } finally {
+        if (reader) await reader.close().catch(() => undefined);
+      }
+    }
+  } finally {
+    for (const r of senderReaders.values()) if (r) await r.close().catch(() => undefined);
+  }
+
+  return { checked, rescued, missing, bounced };
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -404,6 +447,7 @@ export async function runWarmupTick(
       checked: 0,
       rescued: 0,
       missing: 0,
+      bounced: 0,
       graduated: 0,
       demoted: 0,
       seedChecked: 0,
@@ -445,6 +489,8 @@ export interface WarmupMailboxView {
   campaignCapToday: number;
   dailyCap: number;
   lastMessageAt: string | null;
+  /** The newest bounce in the 7-day window, so the page can say why without opening the log. */
+  lastBounce: { at: string; reason: string } | null;
   nextStep: string;
 }
 
@@ -461,7 +507,8 @@ export interface WarmupOverview {
 
 export async function getWarmupOverview(now: Date = new Date()): Promise<WarmupOverview> {
   const dayStart = startOfUtcDay(now);
-  const [mailboxes, pool, counts, todayRows, lastRows] = await Promise.all([
+  const since = new Date(now.getTime() - HEALTH_WINDOW_DAYS * DAY_MS);
+  const [mailboxes, pool, counts, todayRows, lastRows, bounceRows] = await Promise.all([
     prisma.mailbox.findMany({ orderBy: { createdAt: 'asc' } }),
     loadPartnerPool(),
     loadWindowCounts(now),
@@ -471,9 +518,21 @@ export async function getWarmupOverview(now: Date = new Date()): Promise<WarmupO
       _count: { _all: true },
     }),
     prisma.warmupMessage.groupBy({ by: ['senderMailboxId'], _max: { sentAt: true } }),
+    prisma.warmupMessage.findMany({
+      where: { placement: 'BOUNCED', sentAt: { gte: since } },
+      orderBy: { sentAt: 'desc' },
+      distinct: ['senderMailboxId'],
+      select: { senderMailboxId: true, sentAt: true, error: true },
+    }),
   ]);
   const today = new Map(todayRows.map((r) => [r.senderMailboxId, r._count._all]));
   const last = new Map(lastRows.map((r) => [r.senderMailboxId, r._max.sentAt]));
+  const lastBounce = new Map(
+    bounceRows.map((r) => [
+      r.senderMailboxId,
+      { at: r.sentAt.toISOString(), reason: r.error ?? 'The mail server returned this email.' },
+    ]),
+  );
 
   const views: WarmupMailboxView[] = mailboxes.map((m) => {
     const c = counts.get(m.id) ?? emptyCounts();
@@ -509,6 +568,7 @@ export async function getWarmupOverview(now: Date = new Date()): Promise<WarmupO
       campaignCapToday: cap,
       dailyCap: m.dailyCap,
       lastMessageAt: last.get(m.id)?.toISOString() ?? null,
+      lastBounce: lastBounce.get(m.id) ?? null,
       nextStep: nextStepText({
         status: m.status,
         warmupEnabled: m.warmupEnabled,

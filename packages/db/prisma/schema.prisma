@@ -155,6 +155,8 @@ enum WarmupPlacement {
   MISSING
   UNCHECKED
   FAILED
+  /// The sender got a delivery-failure report (DSN) back for it; `error` says why.
+  BOUNCED
 }
 
 // ---------------------------------------------------------------------------------------------

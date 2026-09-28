@@ -14,6 +14,7 @@ import { createApp } from '../../app';
 import { prisma } from '@warmhawk/db';
 import { runWarmupTick, type WarmupDeps } from '../../lib/warmup/engine';
 import type {
+  BounceReport,
   FoundMessage,
   InboxReader,
   PartnerRef,
@@ -36,6 +37,8 @@ class MailWorld {
   spamFor = new Set<string>();
   dropFor = new Set<string>();
   brokenReaders = new Set<string>();
+  /** Message-ID -> sender email: a delivery-failure report sits in the sender's mailbox. */
+  bounces = new Map<string, string>();
   sends: Array<{ from: string; to: string; subject: string }> = [];
   private n = 0;
 
@@ -78,6 +81,10 @@ class MailWorld {
                 Object.assign(d, { folder: 'INBOX', seen: true, flagged: true });
             }
           },
+          findBounce: async (messageId: string): Promise<BounceReport | null> =>
+            this.bounces.get(messageId) === owner
+              ? { status: '5.7.708', diagnostic: '550 5.7.708 Access denied' }
+              : null,
           close: async () => undefined,
         };
       },
@@ -350,6 +357,45 @@ describeIntegration('warmup engine + routes (integration, real Postgres)', () =>
     expect(after.placement).toBe('UNCHECKED');
     expect(after.error).toMatch(/IMAP login failed/);
     world.brokenReaders.delete(alex);
+  });
+
+  it('marks an email BOUNCED with a readable reason when a failure report came back to the sender', async () => {
+    const beaEmail = [...emailById.values()].find((e) => e.startsWith('bea-'))!;
+    const bea = mailboxIds.find((id) => emailById.get(id) === beaEmail)!;
+    const alexEmail = [...emailById.values()].find((e) => e.startsWith('alex-'))!;
+    const alex = mailboxIds.find((id) => emailById.get(id) === alexEmail)!;
+    const row = await prisma.warmupMessage.create({
+      data: {
+        senderMailboxId: bea,
+        recipientMailboxId: alex,
+        recipientEmail: alexEmail,
+        subject: 'Blocked on the way out',
+        messageId: '<bounced@fake.test>',
+        sentAt: new Date(clock.now.getTime() - 3 * HOUR),
+      },
+    });
+    world.bounces.set('<bounced@fake.test>', beaEmail);
+    const summary = await runWarmupTick(world.deps(clock));
+    expect(summary.bounced).toBeGreaterThanOrEqual(1);
+    const after = await prisma.warmupMessage.findUniqueOrThrow({ where: { id: row.id } });
+    expect(after.placement).toBe('BOUNCED');
+    expect(after.checkedAt).not.toBeNull();
+    expect(after.error).toMatch(/^Microsoft 365 blocked this email .* \(5\.7\.708\)/);
+
+    const log = await app.inject({
+      method: 'GET',
+      url: `/v1/warmup/${bea}/messages?result=bounced`,
+      headers: auth(),
+    });
+    expect(log.statusCode).toBe(200);
+    expect(log.json().messages.map((m: { id: string }) => m.id)).toEqual([row.id]);
+
+    const overview = await app.inject({ method: 'GET', url: '/v1/warmup', headers: auth() });
+    const view = overview.json().mailboxes.find((m: { mailboxId: string }) => m.mailboxId === bea);
+    expect(view.counts.bounced).toBe(1);
+    expect(view.lastBounce).toEqual({ at: row.sentAt.toISOString(), reason: after.error });
+    expect(view.nextStep).toBe('1 bounced in 7 days. Open the send log to see why.');
+    world.bounces.delete('<bounced@fake.test>');
   });
 
   it('shows the send log and the overview for a warming mailbox', async () => {
