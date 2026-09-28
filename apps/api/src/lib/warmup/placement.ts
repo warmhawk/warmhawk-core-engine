@@ -45,13 +45,68 @@ export interface FoundMessage {
   inSpam: boolean;
 }
 
+/** What a delivery-failure report (RFC 3464 DSN) says about one failed recipient. */
+export interface BounceReport {
+  /** Enhanced status code, e.g. `5.7.708`. */
+  status: string | null;
+  /** The remote server's reply, e.g. `550 5.7.708 Access denied, traffic not accepted ...`. */
+  diagnostic: string | null;
+}
+
 export interface InboxReader {
   find(target: WarmupTarget): Promise<FoundMessage | null>;
   /** Found in INBOX: mark it read. */
   markRead(found: FoundMessage): Promise<void>;
   /** Found in spam: mark read, star, move to INBOX. */
   rescue(found: FoundMessage): Promise<void>;
+  /** Sender side: the delivery-failure report that came back for `messageId`, if any. */
+  findBounce?(messageId: string): Promise<BounceReport | null>;
   close(): Promise<void>;
+}
+
+/** A DSN carries the original message, so a large one is cut off; the status lines come first. */
+const BOUNCE_MAX_BYTES = 256 * 1024;
+
+/**
+ * Pure: reads a raw message and returns its failure report, or null when it isn't a DSN (a person's
+ * reply threads the same way) or it only reports a delay. Exchange Online and Gmail both send
+ * `multipart/report; report-type=delivery-status` with `In-Reply-To` set to the original
+ * Message-ID, which is how `findBounce` finds it.
+ */
+export function parseBounceReport(source: string): BounceReport | null {
+  const headerEnd = source.search(/\r?\n\r?\n/);
+  const headers = (headerEnd === -1 ? source : source.slice(0, headerEnd)).replace(
+    /\r?\n[ \t]+/g,
+    ' ',
+  );
+  if (!/^content-type:\s*multipart\/report\b[^\n]*report-type="?delivery-status/im.test(headers)) {
+    return null;
+  }
+  const body = source.replace(/\r?\n[ \t]+/g, ' ');
+  const actions = [...body.matchAll(/^Action:\s*(\w+)/gim)].map((m) => m[1].toLowerCase());
+  if (actions.length > 0 && !actions.includes('failed')) return null;
+  const status = body.match(/^Status:\s*(\d\.\d{1,3}\.\d{1,3})/im)?.[1] ?? null;
+  const diagnostic =
+    body.match(/^Diagnostic-Code:\s*[^;\r\n]*;\s*([^\r\n]+)/im)?.[1]?.trim() ?? null;
+  return { status, diagnostic };
+}
+
+/** Exchange Online's outbound blocks that only Microsoft support can lift (5.7.705 tenant over
+ *  threshold, 5.7.708 low-reputation sending IP — most often a new Microsoft 365 organization). */
+const MICROSOFT_OUTBOUND_BLOCK = /^5\.7\.70[58]$/;
+
+/** The line the send log and the Warmup page show for a bounced warmup email. */
+export function bounceReasonText(report: BounceReport): string {
+  if (report.status && MICROSOFT_OUTBOUND_BLOCK.test(report.status)) {
+    return (
+      `Microsoft 365 blocked this email before it left your organization (${report.status}). ` +
+      'This is common for new Microsoft 365 organizations. Your Microsoft 365 admin can ask ' +
+      'Microsoft support to lift the block.'
+    );
+  }
+  const code = report.status ? ` (${report.status})` : '';
+  const detail = report.diagnostic ? `: ${report.diagnostic}` : '.';
+  return `The mail server returned this email${code}${detail}`.slice(0, 500);
 }
 
 export type PartnerRef = { kind: 'mailbox' | 'seed'; id: string };
@@ -171,6 +226,39 @@ export class ImapInboxReader implements InboxReader {
     } finally {
       lock.release();
     }
+  }
+
+  async findBounce(messageId: string): Promise<BounceReport | null> {
+    const folders = await this.searchFolders();
+    for (const f of folders) {
+      const lock = await this.client.getMailboxLock(f.path);
+      try {
+        const uids = await withTimeout(
+          this.client.search(
+            {
+              or: [{ header: { 'in-reply-to': messageId } }, { header: { references: messageId } }],
+            },
+            { uid: true },
+          ),
+          'IMAP search',
+        );
+        for (const uid of [...(uids || [])].sort((a, b) => b - a).slice(0, 5)) {
+          const msg = await withTimeout(
+            this.client.fetchOne(
+              String(uid),
+              { source: { maxLength: BOUNCE_MAX_BYTES } },
+              { uid: true },
+            ),
+            'IMAP fetch',
+          );
+          const report = msg && msg.source ? parseBounceReport(msg.source.toString('utf8')) : null;
+          if (report) return report;
+        }
+      } finally {
+        lock.release();
+      }
+    }
+    return null;
   }
 
   async close(): Promise<void> {
