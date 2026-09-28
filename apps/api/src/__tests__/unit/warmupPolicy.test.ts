@@ -85,6 +85,11 @@ describe('health score', () => {
     expect(checkedCount(c)).toBe(10);
     expect(healthScore(c)).toBe(90);
   });
+  it('counts a bounced email as checked and not in the inbox', () => {
+    const c = counts({ inbox: 3, bounced: 1 });
+    expect(checkedCount(c)).toBe(4);
+    expect(healthScore(c)).toBe(75);
+  });
   it('counts a rescued email as spam', () => {
     const c = tallyPlacements([
       { placement: 'INBOX', rescued: false },
@@ -98,15 +103,17 @@ describe('health score', () => {
       { placement: 'INBOX', rescued: false },
       { placement: 'SPAM', rescued: false },
       { placement: 'MISSING', rescued: false },
+      { placement: 'BOUNCED', rescued: false },
       { placement: 'PENDING', rescued: false },
       { placement: 'UNCHECKED', rescued: false },
       { placement: 'FAILED', rescued: false },
     ]);
     expect(c).toEqual({
-      sent: 6,
+      sent: 7,
       inbox: 1,
       spam: 1,
       missing: 1,
+      bounced: 1,
       pending: 1,
       unchecked: 1,
       failed: 1,
@@ -200,5 +207,14 @@ describe('nextStepText', () => {
       'Campaign cap today: 9 of 25',
     );
     expect(nextStepText({ ...base, status: 'ACTIVE' })).toBe('Sending campaigns');
+  });
+  it('points at the send log when anything bounced, warming or active', () => {
+    const bounced = counts({ inbox: 12, bounced: 2 });
+    const text = '2 bounced in 7 days. Open the send log to see why.';
+    expect(nextStepText({ ...base, counts: bounced })).toBe(text);
+    expect(nextStepText({ ...base, status: 'ACTIVE', counts: bounced })).toBe(text);
+    expect(nextStepText({ ...base, partnerCount: 0, counts: bounced })).toBe(
+      'Add a second mailbox or a test inbox',
+    );
   });
 });

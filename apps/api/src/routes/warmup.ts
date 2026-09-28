@@ -15,7 +15,16 @@ import { loadPartnerPool, mailboxCanWarm } from '../lib/warmup/partners';
 /** An older dashboard asks without `pageSize` and shows "last 50" — keep that default. */
 const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 
-const RESULTS = ['inbox', 'spam', 'moved', 'missing', 'pending', 'unchecked', 'failed'] as const;
+const RESULTS = [
+  'inbox',
+  'spam',
+  'moved',
+  'missing',
+  'bounced',
+  'pending',
+  'unchecked',
+  'failed',
+] as const;
 type ResultFilter = (typeof RESULTS)[number];
 
 const PERIODS = ['24h', '7d', '30d', 'all'] as const;
@@ -33,6 +42,7 @@ const RESULT_WHERE: Record<ResultFilter, Prisma.WarmupMessageWhereInput> = {
   spam: { placement: 'SPAM' },
   moved: { rescued: true },
   missing: { placement: 'MISSING' },
+  bounced: { placement: 'BOUNCED' },
   pending: { placement: 'PENDING' },
   unchecked: { placement: 'UNCHECKED' },
   failed: { placement: 'FAILED' },

@@ -82,6 +82,8 @@ export interface PlacementCounts {
   inbox: number;
   spam: number;
   missing: number;
+  /** A delivery-failure report came back; it never reached the partner. */
+  bounced: number;
   pending: number;
   unchecked: number;
   failed: number;
@@ -94,6 +96,7 @@ export function emptyCounts(): PlacementCounts {
     inbox: 0,
     spam: 0,
     missing: 0,
+    bounced: 0,
     pending: 0,
     unchecked: 0,
     failed: 0,
@@ -119,6 +122,9 @@ export function tallyPlacements(
       case 'MISSING':
         c.missing += 1;
         break;
+      case 'BOUNCED':
+        c.bounced += 1;
+        break;
       case 'PENDING':
         c.pending += 1;
         break;
@@ -135,7 +141,7 @@ export function tallyPlacements(
 
 /** Emails with a real placement answer — the health score's denominator. */
 export function checkedCount(c: PlacementCounts): number {
-  return c.inbox + c.spam + c.missing;
+  return c.inbox + c.spam + c.missing + c.bounced;
 }
 
 /** 7-day inbox rate, 0-100, or null before anything has been checked. A rescued email still
@@ -199,6 +205,9 @@ export function nextStepText(params: {
   if (status === 'PAUSED') return 'Mailbox is paused';
   if (!warmupEnabled) return 'Warmup is paused';
   if (partnerCount === 0) return 'Add a second mailbox or a test inbox';
+  if (counts.bounced > 0) {
+    return `${counts.bounced} bounced in 7 days. Open the send log to see why.`;
+  }
   const health = healthScore(counts);
   if (status === 'ACTIVE') {
     return campaignCap < dailyCap
