@@ -13,12 +13,13 @@ import type { FastifyInstance } from 'fastify';
 import { createApp } from '../../app';
 import { prisma } from '@warmhawk/db';
 import { runWarmupTick, type WarmupDeps } from '../../lib/warmup/engine';
-import type {
-  BounceReport,
-  FoundMessage,
-  InboxReader,
-  PartnerRef,
-  WarmupTarget,
+import {
+  WARMUP_FOLDER,
+  type BounceReport,
+  type FoundMessage,
+  type InboxReader,
+  type PartnerRef,
+  type WarmupTarget,
 } from '../../lib/warmup/placement';
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
@@ -29,11 +30,14 @@ const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
-type Folder = 'INBOX' | 'Junk';
+type Folder = 'INBOX' | 'Junk' | typeof WARMUP_FOLDER;
 
 /** In-memory stand-in for SMTP + IMAP: sends land in a folder the test chooses per recipient. */
 class MailWorld {
-  delivered = new Map<string, { to: string; folder: Folder; seen: boolean; flagged: boolean }>();
+  delivered = new Map<
+    string,
+    { to: string; uid: number; folder: Folder; seen: boolean; flagged: boolean }
+  >();
   spamFor = new Set<string>();
   dropFor = new Set<string>();
   brokenReaders = new Set<string>();
@@ -43,6 +47,12 @@ class MailWorld {
   private n = 0;
 
   constructor(private readonly emailById: Map<string, string>) {}
+
+  private at(owner: string, f: FoundMessage) {
+    return [...this.delivered.values()].find(
+      (d) => d.to === owner && d.uid === f.uid && d.folder === f.folder,
+    );
+  }
 
   deps(clock: { now: Date }): WarmupDeps {
     return {
@@ -55,6 +65,7 @@ class MailWorld {
         if (!this.dropFor.has(input.to)) {
           this.delivered.set(messageId, {
             to: input.to,
+            uid: this.n,
             folder: this.spamFor.has(input.to) ? 'Junk' : 'INBOX',
             seen: false,
             flagged: false,
@@ -69,17 +80,21 @@ class MailWorld {
           find: async (t: WarmupTarget): Promise<FoundMessage | null> => {
             const d = t.messageId ? this.delivered.get(t.messageId) : undefined;
             if (!d || d.to !== owner) return null;
-            return { folder: d.folder, uid: 1, inSpam: d.folder === 'Junk' };
+            return { folder: d.folder, uid: d.uid, inSpam: d.folder === 'Junk' };
           },
-          markRead: async () => {
-            for (const d of this.delivered.values())
-              if (d.to === owner && d.folder === 'INBOX') d.seen = true;
+          markRead: async (f: FoundMessage) => {
+            const d = this.at(owner, f);
+            if (d) d.seen = true;
           },
-          rescue: async () => {
-            for (const d of this.delivered.values()) {
-              if (d.to === owner && d.folder === 'Junk')
-                Object.assign(d, { folder: 'INBOX', seen: true, flagged: true });
-            }
+          rescue: async (f: FoundMessage) => {
+            const d = this.at(owner, f);
+            if (!d) return undefined;
+            Object.assign(d, { folder: 'INBOX', seen: true, flagged: true });
+            return { folder: 'INBOX', uid: d.uid, inSpam: false };
+          },
+          fileAway: async (f: FoundMessage) => {
+            const d = this.at(owner, f);
+            if (d) d.folder = WARMUP_FOLDER;
           },
           findBounce: async (messageId: string): Promise<BounceReport | null> =>
             this.bounces.get(messageId) === owner
@@ -302,10 +317,13 @@ describeIntegration('warmup engine + routes (integration, real Postgres)', () =>
     expect(toAlex.foundFolder).toBe('Junk');
     expect(toAlex.rescued).toBe(true);
 
-    // the fake mailbox state changed the way a person's would
-    expect(world.delivered.get(toBea.messageId!)?.seen).toBe(true);
+    // the fake mailbox state changed the way a person's would, then both were filed away
+    expect(world.delivered.get(toBea.messageId!)).toMatchObject({
+      folder: WARMUP_FOLDER,
+      seen: true,
+    });
     expect(world.delivered.get(toAlex.messageId!)).toMatchObject({
-      folder: 'INBOX',
+      folder: WARMUP_FOLDER,
       seen: true,
       flagged: true,
     });
