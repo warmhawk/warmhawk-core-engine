@@ -3,8 +3,9 @@
  * `POST /internal/warmup/tick`. Three steps, in this order so decisions use fresh data:
  *
  *   1. check  — find recently sent warmup emails on the recipient side, record INBOX / SPAM /
- *               MISSING, rescue spam back to INBOX; before giving up on one, look on the sender
- *               side for a delivery-failure report and record BOUNCED with its reason
+ *               MISSING, rescue spam back to INBOX, then file it under WARMUP_FOLDER; before
+ *               giving up on one, look on the sender side for a delivery-failure report and
+ *               record BOUNCED with its reason
  *   2. decide — recompute each mailbox's 7-day health; graduate WARMUP -> ACTIVE or demote
  *               ACTIVE -> WARMUP (rules in policy.ts)
  *   3. send   — each due mailbox sends one warmup email to its next partner through the same
@@ -28,6 +29,7 @@ import {
   bounceReasonText,
   openInboxReader,
   type BounceReport,
+  type FoundMessage,
   type InboxReader,
   type PartnerRef,
 } from './placement';
@@ -217,12 +219,14 @@ export async function checkPendingPlacements(
           let wasRescued = false;
           let actionError: string | null = null;
           try {
+            let inInbox: FoundMessage | undefined = found;
             if (found.inSpam) {
-              await reader.rescue(found);
+              inInbox = await reader.rescue(found);
               wasRescued = true;
             } else {
               await reader.markRead(found);
             }
+            if (inInbox && reader.fileAway) await reader.fileAway(inInbox);
           } catch (err) {
             actionError = truncateError(err);
           }

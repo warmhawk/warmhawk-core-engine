@@ -7,13 +7,16 @@
  *
  * Found in spam -> "rescue": mark read, star, move back to INBOX. Found in inbox -> mark read.
  * Those are the ordinary things a person does with mail they wanted, which is the engagement
- * signal warmup is meant to create — on the customer's own mailboxes only.
+ * signal warmup is meant to create — on the customer's own mailboxes only. Then the email is
+ * filed under WARMUP_FOLDER (a label in Gmail), so warmup traffic doesn't sit in the inbox.
  */
 import type { ImapFlow } from 'imapflow';
 import { openImapClient, listSpamFolders } from '../imapClient';
 import { openSeedImapClient, subjectSha256 } from '../seedAccounts';
 
 const IMAP_TIMEOUT_MS = 20_000;
+/** Where checked warmup emails are filed; created on first use. A label in Gmail. */
+export const WARMUP_FOLDER = 'WarmHawk warmup';
 /** Fallback-match window around the send time. */
 const FALLBACK_BEFORE_MS = 5 * 60 * 1000;
 const FALLBACK_AFTER_MS = 3 * 60 * 60 * 1000;
@@ -57,8 +60,11 @@ export interface InboxReader {
   find(target: WarmupTarget): Promise<FoundMessage | null>;
   /** Found in INBOX: mark it read. */
   markRead(found: FoundMessage): Promise<void>;
-  /** Found in spam: mark read, star, move to INBOX. */
-  rescue(found: FoundMessage): Promise<void>;
+  /** Found in spam: mark read, star, move to INBOX. Returns the INBOX copy when the server
+   *  reports its new UID (UIDPLUS). */
+  rescue(found: FoundMessage): Promise<FoundMessage | undefined>;
+  /** Out of the inbox into WARMUP_FOLDER, once its placement is recorded. */
+  fileAway?(found: FoundMessage): Promise<void>;
   /** Sender side: the delivery-failure report that came back for `messageId`, if any. */
   findBounce?(messageId: string): Promise<BounceReport | null>;
   close(): Promise<void>;
@@ -133,6 +139,7 @@ function startOfUtcDay(d: Date): Date {
 
 export class ImapInboxReader implements InboxReader {
   private folders: Array<{ path: string; inSpam: boolean }> | null = null;
+  private warmupFolder: string | null = null;
 
   constructor(private readonly client: ImapFlow) {}
 
@@ -216,16 +223,44 @@ export class ImapInboxReader implements InboxReader {
     }
   }
 
-  async rescue(found: FoundMessage): Promise<void> {
+  async rescue(found: FoundMessage): Promise<FoundMessage | undefined> {
     const lock = await this.client.getMailboxLock(found.folder);
     try {
       await this.client.messageFlagsAdd({ uid: String(found.uid) }, ['\\Seen', '\\Flagged'], {
         uid: true,
       });
-      await this.client.messageMove({ uid: String(found.uid) }, 'INBOX', { uid: true });
+      const moved = await this.client.messageMove({ uid: String(found.uid) }, 'INBOX', {
+        uid: true,
+      });
+      const uid = moved ? moved.uidMap?.get(found.uid) : undefined;
+      return uid ? { folder: 'INBOX', uid, inSpam: false } : undefined;
     } finally {
       lock.release();
     }
+  }
+
+  async fileAway(found: FoundMessage): Promise<void> {
+    const target = await this.ensureWarmupFolder();
+    const lock = await this.client.getMailboxLock(found.folder);
+    try {
+      await withTimeout(
+        this.client.messageMove({ uid: String(found.uid) }, target, { uid: true }),
+        'IMAP move',
+      );
+    } finally {
+      lock.release();
+    }
+  }
+
+  private async ensureWarmupFolder(): Promise<string> {
+    if (!this.warmupFolder) {
+      const all = await withTimeout(this.client.list(), 'IMAP folder list');
+      const existing = all.find((mb) => mb.path.toLowerCase() === WARMUP_FOLDER.toLowerCase());
+      this.warmupFolder = existing
+        ? existing.path
+        : (await withTimeout(this.client.mailboxCreate(WARMUP_FOLDER), 'IMAP create folder')).path;
+    }
+    return this.warmupFolder;
   }
 
   async findBounce(messageId: string): Promise<BounceReport | null> {
