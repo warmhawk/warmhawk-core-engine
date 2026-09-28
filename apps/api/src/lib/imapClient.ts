@@ -8,6 +8,7 @@ import { ImapFlow } from 'imapflow';
 import { prisma } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { mintMailboxAccessToken } from './mailboxAccessToken';
+import { recordConnectionFailure } from './mailboxConnectionHealth';
 
 function encryptionKey() {
   return loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
@@ -25,10 +26,16 @@ export async function openImapClient(mailboxId: string): Promise<ImapFlow> {
   let auth: { user: string; accessToken?: string; pass?: string } | null = null;
 
   if (mailbox.oauthRefreshTokenEncrypted) {
-    const accessToken = await mintMailboxAccessToken(
-      { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
-      'imap',
-    );
+    let accessToken: string;
+    try {
+      accessToken = await mintMailboxAccessToken(
+        { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
+        'imap',
+      );
+    } catch (err) {
+      await recordConnectionFailure(mailbox.id, err);
+      throw err;
+    }
     auth = { user: mailbox.authUsername, accessToken };
   } else if (mailbox.authPasswordEncrypted) {
     auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted, key) };
@@ -46,7 +53,13 @@ export async function openImapClient(mailboxId: string): Promise<ImapFlow> {
     logger: false,
   });
 
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (err) {
+    // Only an authentication refusal is recorded; a network hiccup is not a reconnect.
+    await recordConnectionFailure(mailbox.id, err);
+    throw err;
+  }
   return client;
 }
 

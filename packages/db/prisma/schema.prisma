@@ -281,6 +281,12 @@ model Mailbox {
   /// per mailbox means a later client rotation doesn't strand mailboxes connected before it.
   oauthClientId             String?
 
+  /// Set when the provider stops accepting this mailbox's sign-in (grant revoked, password
+  /// changed, no mailbox behind the account) — the buyer-facing reason, shown as "Needs
+  /// reconnect". Cleared by the next successful send or reconnect. See mailboxConnectionHealth.ts.
+  connectionError           String?
+  connectionErrorAt         DateTime?
+
   // Cadence enforcement — last successful send timestamp, read by computeNextSlotSeconds.ts.
   lastSentAt DateTime?
 

@@ -334,6 +334,7 @@ describeIntegration('oauth client-config routes (integration, real Postgres)', (
       microsoft: false,
       via: { google: 'BYO', microsoft: null },
       connectClientIds: { google: null, microsoft: null },
+      connectAdminConsentUrl: null,
     });
   });
 });

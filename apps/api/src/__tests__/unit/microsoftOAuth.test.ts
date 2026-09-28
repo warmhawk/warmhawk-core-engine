@@ -12,6 +12,7 @@ vi.mock('@warmhawk/db', () => ({
 import {
   buildMicrosoftAuthUrl,
   exchangeMicrosoftCode,
+  microsoftMailboxExists,
   mintMicrosoftAccessToken,
   MICROSOFT_OAUTH_SCOPES,
 } from '../../lib/microsoftOAuth';
@@ -105,7 +106,38 @@ describe('Microsoft 365 OAuth (token exchange/refresh — HTTP boundary mocked, 
   it('mintMicrosoftAccessToken throws on a non-OK refresh response', async () => {
     const fetchImpl = mockFetchOnce({}, false, 401);
     await expect(mintMicrosoftAccessToken('expired-refresh-token', 'sales@contoso.com', 'graph', fetchImpl)).rejects.toThrow(
-      /responded with 401/,
+      /http_401/,
     );
+  });
+
+  it("mintMicrosoftAccessToken keeps Microsoft's error so a revoked grant can be told apart", async () => {
+    const fetchImpl = mockFetchOnce(
+      { error: 'invalid_grant', error_description: 'AADSTS70000: The grant was revoked.' },
+      false,
+      400,
+    );
+    await expect(
+      mintMicrosoftAccessToken('revoked-refresh-token', 'sales@contoso.com', 'graph', fetchImpl),
+    ).rejects.toMatchObject({ error: 'invalid_grant', description: expect.stringContaining('AADSTS70000') });
+  });
+
+  describe('microsoftMailboxExists', () => {
+    it('is false only for Graph saying the account has no Exchange Online mailbox', async () => {
+      const noMailbox = mockFetchOnce({ error: { code: 'MailboxNotEnabledForRESTAPI' } }, false, 404);
+      expect(await microsoftMailboxExists('at', noMailbox)).toBe(false);
+    });
+
+    it.each([
+      ['a readable mailbox', { timeZone: 'UTC' }, true, 200],
+      ['a mailbox the token cannot read settings of', { error: { code: 'ErrorAccessDenied' } }, false, 403],
+      ['some other 404', { error: { code: 'ResourceNotFound' } }, false, 404],
+    ])('is true for %s', async (_label, body, ok, status) => {
+      expect(await microsoftMailboxExists('at', mockFetchOnce(body, ok, status))).toBe(true);
+    });
+
+    it('does not block a connect when Graph is unreachable', async () => {
+      const down = vi.fn().mockRejectedValue(new TypeError('fetch failed')) as unknown as typeof fetch;
+      expect(await microsoftMailboxExists('at', down)).toBe(true);
+    });
   });
 });

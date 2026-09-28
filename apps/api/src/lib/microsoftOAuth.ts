@@ -202,7 +202,13 @@ export async function mintMicrosoftAccessToken(
   });
 
   if (!response.ok) {
-    throw new Error(`Microsoft token refresh responded with ${response.status}`);
+    // Kept structured (not a bare status) so a revoked or expired grant marks the mailbox
+    // "needs reconnect" — see mailboxConnectionHealth.ts.
+    const failure = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    throw new MicrosoftTokenError(
+      typeof failure.error === 'string' ? failure.error : `http_${response.status}`,
+      typeof failure.error_description === 'string' ? failure.error_description : '',
+    );
   }
 
   const json = (await response.json()) as { access_token?: string };
@@ -353,4 +359,27 @@ export async function fetchMicrosoftSignedInAddresses(
       .map((entry) => entry.slice('smtp:'.length)),
   ];
   return [...new Set(addresses.filter((a): a is string => Boolean(a)).map((a) => a.toLowerCase()))];
+}
+
+/** Whether the signed-in Microsoft 365 user has an Exchange Online mailbox. A user with no
+ *  Exchange license signs in and consents fine, then every send fails with
+ *  `MailboxNotEnabledForRESTAPI` — so the connect checks first. `/me/mailboxSettings` needs a
+ *  scope Connect doesn't ask for, which is the point: a real mailbox answers 403, a missing one
+ *  404 `MailboxNotEnabledForRESTAPI`. Anything else (Graph down, a new answer) counts as a
+ *  mailbox, and the first send reports the truth instead. */
+export async function microsoftMailboxExists(
+  graphAccessToken: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<boolean> {
+  try {
+    const response = await fetchImpl('https://graph.microsoft.com/v1.0/me/mailboxSettings', {
+      headers: { authorization: `Bearer ${graphAccessToken}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (response.status !== 404) return true;
+    const json = (await response.json().catch(() => ({}))) as { error?: { code?: string } };
+    return json.error?.code !== 'MailboxNotEnabledForRESTAPI';
+  } catch {
+    return true;
+  }
 }
