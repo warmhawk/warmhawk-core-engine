@@ -74,6 +74,20 @@ describeIntegration('mailboxes routes (integration, real Postgres)', () => {
     expect(response.statusCode).toBe(422);
   });
 
+  it.each(['sales', 'sales@', 'sales@acme', 'sa les@acme.example'])(
+    'rejects the incomplete address %j',
+    async (email) => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v1/mailboxes',
+        headers: { authorization: `Bearer ${authToken}` },
+        payload: { email, domainId },
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.json().error).toMatch(/full mailbox address/);
+    },
+  );
+
   /**
    * Regression guard: `POST`/`PATCH` both explicitly strip `authPasswordEncrypted` and
    * `oauthRefreshTokenEncrypted` from their responses before this pass — `GET /` did not, and

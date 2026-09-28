@@ -25,6 +25,7 @@ import {
   exchangeMicrosoftCodeConnect,
   fetchMicrosoftSignedInAddresses,
   isMicrosoftOAuthConfigured,
+  microsoftMailboxExists,
   MicrosoftTokenError,
 } from '../lib/microsoftOAuth';
 import {
@@ -86,6 +87,9 @@ interface ProviderMode {
   /** WarmHawk's public client id, for the operator's "trust WarmHawk" card. Null for BYO, and for
    *  Connect while the relay can't be asked. */
   connectClientId: string | null;
+  /** Connect + Microsoft only: the relay page a Microsoft 365 admin opens to approve WarmHawk for
+   *  their whole organization, so nobody there hits "Need admin approval" again. */
+  adminConsentUrl: string | null;
 }
 
 /** BYO when the owner registered their own app; otherwise Connect when the operator has pushed a
@@ -95,12 +99,17 @@ interface ProviderMode {
 async function resolveProviderMode(provider: RouteProvider): Promise<ProviderMode | null> {
   const byo =
     provider === 'google' ? await isGoogleOAuthConfigured() : await isMicrosoftOAuthConfigured();
-  if (byo) return { via: 'BYO', connectClientId: null };
+  if (byo) return { via: 'BYO', connectClientId: null, adminConsentUrl: null };
   const license = await loadConnectLicense().catch(() => null);
   if (!license) return null;
   const config = await fetchConnectConfig(license.relayBaseUrl);
   if (config && !config[provider]) return null;
-  return { via: 'CONNECT', connectClientId: config?.[provider]?.clientId ?? null };
+  return {
+    via: 'CONNECT',
+    connectClientId: config?.[provider]?.clientId ?? null,
+    adminConsentUrl:
+      provider === 'microsoft' ? `${license.relayBaseUrl}/connect/microsoft/admin-consent` : null,
+  };
 }
 
 /** The claims of a JWT, unverified. Only for Google's id_token, which comes straight from Google's
@@ -140,6 +149,20 @@ function connectProviderError(
       detail: 'A Microsoft 365 admin in your organization has to approve WarmHawk once.',
     };
   }
+  // Microsoft's "Need admin approval" screen has one way out — "Return to the application" — and it
+  // comes back as a bare `access_denied` with no description. Someone who declines the consent
+  // prompt themselves comes back with AADSTS65004 instead, so only that one is a plain cancel.
+  if (
+    provider === 'microsoft' &&
+    error === 'access_denied' &&
+    !/AADSTS65004/.test(description ?? '')
+  ) {
+    return {
+      reason: 'ms_admin_required',
+      detail:
+        'Microsoft stopped the sign-in. If it said "Need admin approval", a Microsoft 365 admin in your organization has to approve WarmHawk once. If you cancelled, just click Connect again.',
+    };
+  }
   if (error === 'access_denied') return { reason: 'cancelled' };
   return { reason: `${provider}_rejected`, detail: providerErrorDetail(description) };
 }
@@ -165,6 +188,7 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
         google: google?.connectClientId ?? null,
         microsoft: microsoft?.connectClientId ?? null,
       },
+      connectAdminConsentUrl: microsoft?.adminConsentUrl ?? null,
     };
   });
 
@@ -316,6 +340,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             // the Prisma schema already defaults it to 993, correct for both providers).
             imapHost: 'imap.gmail.com',
             authUsername: mailboxRecord.email,
+            connectionError: null,
+            connectionErrorAt: null,
           },
         });
       } else {
@@ -333,6 +359,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             smtpPort: 587,
             imapHost: 'outlook.office365.com',
             authUsername: mailboxRecord.email,
+            connectionError: null,
+            connectionErrorAt: null,
           },
         });
       }
@@ -420,6 +448,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             smtpPort: 587,
             imapHost: 'imap.gmail.com',
             authUsername: mailboxRecord.email,
+            connectionError: null,
+            connectionErrorAt: null,
           },
         });
       } else {
@@ -448,6 +478,16 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             `You signed in to Microsoft as ${addresses[0] ?? 'a different account'}. Sign in as ${mailboxRecord.email} to connect it.`,
           );
         }
+        // A Microsoft 365 user without an Exchange Online license signs in fine but has no mailbox,
+        // so every send would fail while the dashboard said "Connected". Catch it here instead.
+        if (!(await microsoftMailboxExists(tokens.accessToken))) {
+          await removeIfNeverConnected(mailboxId);
+          return redirectWithError(
+            reply,
+            'ms_no_mailbox',
+            `${mailboxRecord.email} signed in, but it has no Microsoft 365 mailbox yet — it needs an Exchange Online license. Assign one in the Microsoft 365 admin center, wait a few minutes, then connect again.`,
+          );
+        }
         await prisma.mailbox.update({
           where: { id: mailboxId },
           data: {
@@ -461,6 +501,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             smtpPort: 587,
             imapHost: 'outlook.office365.com',
             authUsername: mailboxRecord.email,
+            connectionError: null,
+            connectionErrorAt: null,
           },
         });
       }
