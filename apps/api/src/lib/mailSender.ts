@@ -23,6 +23,7 @@ import { prisma, type AiWriteOutcome } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { mintMailboxAccessToken } from './mailboxAccessToken';
 import { createGraphTransport } from './microsoftGraphTransport';
+import { clearConnectionFailure, recordConnectionFailure } from './mailboxConnectionHealth';
 import {
   assertCanSpamCompliant,
   buildRfc8058Headers,
@@ -318,34 +319,40 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
   let transporter: nodemailer.Transporter;
 
-  if (mailbox.oauthRefreshTokenEncrypted && mailbox.provider === 'MICROSOFT_365') {
-    // Microsoft 365 sends through Graph, not SMTP — see microsoftGraphTransport.ts for why.
-    const accessToken = await mintMailboxAccessToken(
-      { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
-      'send',
-    );
-    transporter = nodemailer.createTransport(createGraphTransport(accessToken));
-  } else {
-    let auth:
-      | { type: 'OAuth2'; user: string; accessToken: string }
-      | { user: string; pass: string };
-
-    if (mailbox.oauthRefreshTokenEncrypted) {
+  try {
+    if (mailbox.oauthRefreshTokenEncrypted && mailbox.provider === 'MICROSOFT_365') {
+      // Microsoft 365 sends through Graph, not SMTP — see microsoftGraphTransport.ts for why.
       const accessToken = await mintMailboxAccessToken(
         { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
         'send',
       );
-      auth = { type: 'OAuth2', user: mailbox.authUsername, accessToken };
+      transporter = nodemailer.createTransport(createGraphTransport(accessToken));
     } else {
-      auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted as string, key) };
-    }
+      let auth:
+        | { type: 'OAuth2'; user: string; accessToken: string }
+        | { user: string; pass: string };
 
-    transporter = nodemailer.createTransport({
-      host: mailbox.smtpHost,
-      port: mailbox.smtpPort,
-      secure: mailbox.smtpPort === 465,
-      auth,
-    });
+      if (mailbox.oauthRefreshTokenEncrypted) {
+        const accessToken = await mintMailboxAccessToken(
+          { ...mailbox, oauthRefreshTokenEncrypted: mailbox.oauthRefreshTokenEncrypted },
+          'send',
+        );
+        auth = { type: 'OAuth2', user: mailbox.authUsername, accessToken };
+      } else {
+        auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted as string, key) };
+      }
+
+      transporter = nodemailer.createTransport({
+        host: mailbox.smtpHost,
+        port: mailbox.smtpPort,
+        secure: mailbox.smtpPort === 465,
+        auth,
+      });
+    }
+  } catch (err) {
+    // A refused token refresh — the grant was revoked or the password changed.
+    await recordConnectionFailure(mailboxId, err);
+    throw err;
   }
 
   const headers: Record<string, string> = {};
@@ -362,6 +369,8 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
       text: body,
       headers,
     });
+
+    if (mailbox.connectionError) await clearConnectionFailure(mailboxId);
 
     if (campaignId && bccSeeds.length > 0) {
       // One pending check per seed copy; the warmup tick finds it by Message-ID. Bookkeeping
@@ -442,6 +451,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
     // classify hard vs. soft failures without string-matching the message as their only signal.
     const smtpErr = err as { responseCode?: number; code?: string; message?: string };
     const message = err instanceof Error ? err.message : 'Failed to send email';
+    await recordConnectionFailure(mailboxId, err);
 
     if (campaignId && leadId) {
       // "Handle failure" half of the dispatch pipeline.

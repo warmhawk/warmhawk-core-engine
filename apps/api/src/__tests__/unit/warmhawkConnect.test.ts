@@ -178,6 +178,7 @@ describe('WarmHawk Connect (install side)', () => {
         microsoft: false,
         via: { google: 'BYO', microsoft: null },
         connectClientIds: { google: null, microsoft: null },
+        connectAdminConsentUrl: null,
       });
     });
 
@@ -197,6 +198,7 @@ describe('WarmHawk Connect (install side)', () => {
         microsoft: false,
         via: { google: 'CONNECT', microsoft: null },
         connectClientIds: { google: GOOGLE_CLIENT_ID, microsoft: null },
+        connectAdminConsentUrl: null,
       });
     });
 
@@ -213,6 +215,9 @@ describe('WarmHawk Connect (install side)', () => {
         headers: { authorization: 'Bearer operator-token' },
       });
       expect(response.json().via).toEqual({ google: 'CONNECT', microsoft: 'CONNECT' });
+      expect(response.json().connectAdminConsentUrl).toBe(
+        `${RELAY}/connect/microsoft/admin-consent`,
+      );
     });
   });
 
@@ -314,6 +319,24 @@ describe('WarmHawk Connect (install side)', () => {
         url: '/v1/oauth/google/authorize?mailboxId=mb-1',
       });
       expect(errorParams(response.headers.location).error).toBe('relay_unreachable');
+    });
+
+    it('explains an incomplete address instead of blaming Google', async () => {
+      withStoredLicense();
+      withMailbox('sales');
+      vi.spyOn(prisma.mailbox, 'deleteMany').mockResolvedValue({ count: 1 });
+      stubFetch({
+        [`${RELAY}/api/connect/config`]: configRoute,
+        [`${RELAY}/api/connect/start`]: () => jsonResponse({ error: 'invalid_request' }, 400),
+      });
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/oauth/microsoft/authorize?mailboxId=mb-1',
+      });
+      const params = errorParams(response.headers.location);
+      expect(params.error).toBe('invalid_address');
+      expect(params.detail).toContain('"sales"');
+      expect(params.detail).not.toMatch(/google/i);
     });
   });
 
@@ -491,6 +514,31 @@ describe('WarmHawk Connect (install side)', () => {
         oauthClientId: MICROSOFT_CLIENT_ID,
       });
       expect(decrypt(data.oauthRefreshTokenEncrypted as string, key())).toBe('ms-refresh');
+      expect(data).toMatchObject({ connectionError: null, connectionErrorAt: null });
+    });
+
+    it('refuses an account with no Exchange Online mailbox instead of showing it connected', async () => {
+      withStoredLicense();
+      withMailbox('sales@acme.example');
+      const update = vi.spyOn(prisma.mailbox, 'update');
+      const deleteMany = vi.spyOn(prisma.mailbox, 'deleteMany').mockResolvedValue({ count: 1 });
+      stubFetch({
+        [`${RELAY}/api/connect/config`]: configRoute,
+        'https://login.microsoftonline.com/organizations/oauth2/v2.0/token': tokenRoute,
+        'https://graph.microsoft.com/v1.0/me': () =>
+          jsonResponse({ mail: null, userPrincipalName: 'sales@acme.example' }),
+        'https://graph.microsoft.com/v1.0/me/mailboxSettings': () =>
+          jsonResponse({ error: { code: 'MailboxNotEnabledForRESTAPI' } }, 404),
+      });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/oauth/microsoft/connect-callback?code=ms-code&state=${connectState()}`,
+      });
+      const params = errorParams(response.headers.location);
+      expect(params.error).toBe('ms_no_mailbox');
+      expect(params.detail).toMatch(/Exchange Online license/);
+      expect(update).not.toHaveBeenCalled();
+      expect(deleteMany).toHaveBeenCalled();
     });
 
     it('rejects an account that cannot send as the mailbox', async () => {
@@ -524,6 +572,27 @@ describe('WarmHawk Connect (install side)', () => {
         url: `/v1/oauth/microsoft/connect-callback?error=invalid_client&error_description=${description}&state=${connectState()}`,
       });
       expect(errorParams(response.headers.location).error).toBe('ms_admin_required');
+    });
+
+    it('treats a bare access_denied (the "Need admin approval" screen) as needs-admin', async () => {
+      vi.spyOn(prisma.mailbox, 'deleteMany').mockResolvedValue({ count: 1 });
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/oauth/microsoft/connect-callback?error=access_denied&error_subcode=cancel&state=${connectState()}`,
+      });
+      const params = errorParams(response.headers.location);
+      expect(params.error).toBe('ms_admin_required');
+      expect(params.detail).toMatch(/Need admin approval/);
+    });
+
+    it('keeps a user declining consent (AADSTS65004) as a plain cancel', async () => {
+      vi.spyOn(prisma.mailbox, 'deleteMany').mockResolvedValue({ count: 1 });
+      const description = encodeURIComponent('AADSTS65004: User declined to consent.');
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/oauth/microsoft/connect-callback?error=access_denied&error_description=${description}&state=${connectState()}`,
+      });
+      expect(errorParams(response.headers.location).error).toBe('cancelled');
     });
   });
 });

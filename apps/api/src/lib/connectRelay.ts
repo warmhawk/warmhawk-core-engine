@@ -32,6 +32,7 @@ export type ConnectErrorCode =
   | 'rate_limited'
   | 'scope_missing'
   | 'invalid_grant'
+  | 'invalid_address'
   | 'exchange_failed';
 
 export class ConnectRelayError extends Error {
@@ -150,8 +151,10 @@ async function relayPost(
   return { status: response.status, json };
 }
 
-/** The error answers every relay route shares: license, config, rate limit, outage. */
-function commonRelayError({ status, json }: RelayResponse): ConnectRelayError {
+/** The error answers every relay route shares: license, config, rate limit, outage. `fallback`
+ *  is what the calling route says about anything else — it names the step that failed, so a
+ *  Microsoft connect never reads "Google turned down the sign-in". */
+function commonRelayError({ status, json }: RelayResponse, fallback: string): ConnectRelayError {
   const error = typeof json.error === 'string' ? json.error : '';
   if (status === 402 || error === 'license_expired') {
     return new ConnectRelayError(
@@ -191,10 +194,7 @@ function commonRelayError({ status, json }: RelayResponse): ConnectRelayError {
     );
   }
   if (status >= 500) return new ConnectRelayError('relay_unreachable', UNREACHABLE_DETAIL);
-  return new ConnectRelayError(
-    'exchange_failed',
-    'Google turned down the sign-in. Click Connect to try again.',
-  );
+  return new ConnectRelayError('exchange_failed', fallback);
 }
 
 async function requireLicense(): Promise<ConnectLicense> {
@@ -242,7 +242,17 @@ export async function startConnect(
   if (response.status === 200 && typeof authorizeUrl === 'string' && typeof clientId === 'string') {
     return { authorizeUrl, clientId };
   }
-  throw commonRelayError(response);
+  // The relay checks the login hint is a whole address; a local part alone ("sales") fails here.
+  if (response.status === 400 && response.json.error === 'invalid_request') {
+    throw new ConnectRelayError(
+      'invalid_address',
+      `"${input.loginHint}" isn't a complete email address. Enter it as name@yourdomain.com and connect again.`,
+    );
+  }
+  throw commonRelayError(
+    response,
+    "warmhawk.com couldn't start the sign-in. Click Connect to try again.",
+  );
 }
 
 export interface RelayGoogleTokens {
@@ -273,7 +283,9 @@ export async function exchangeGoogleCodeViaRelay(
       'Google needs the box next to "Read, compose, send and permanently delete all your email from Gmail" ticked. Click Connect again and tick it.',
     );
   }
-  if (response.status !== 200) throw commonRelayError(response);
+  if (response.status !== 200) {
+    throw commonRelayError(response, 'Google turned down the sign-in. Click Connect to try again.');
+  }
   if (
     typeof json.access_token !== 'string' ||
     typeof json.refresh_token !== 'string' ||
@@ -311,7 +323,12 @@ export async function refreshGoogleViaRelay(
       'Google no longer accepts this mailbox’s sign-in (password reset or access removed). Reconnect it.',
     );
   }
-  if (response.status !== 200) throw commonRelayError(response);
+  if (response.status !== 200) {
+    throw commonRelayError(
+      response,
+      'Google refused to refresh this mailbox’s sign-in. Try again, or reconnect it.',
+    );
+  }
   if (typeof json.access_token !== 'string') {
     throw new ConnectRelayError('exchange_failed', 'Google refresh returned no access token.');
   }

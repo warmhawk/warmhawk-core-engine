@@ -59,6 +59,13 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
     if (!body.email?.trim() || !body.domainId) {
       return reply.code(422).send({ error: 'email and domainId are required' });
     }
+    // A bare "sales" used to be saved as-is, then sent to Google/Microsoft as the sign-in hint and
+    // dead-ended there. Only a complete address can ever connect.
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email.trim())) {
+      return reply
+        .code(422)
+        .send({ error: 'Enter the full mailbox address, like sales@yourdomain.com' });
+    }
     const senderName = body.senderName === undefined ? { ok: true as const, value: null } : parseSenderName(body.senderName);
     if (!senderName.ok) return reply.code(422).send({ error: senderName.error });
 

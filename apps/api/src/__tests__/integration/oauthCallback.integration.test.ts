@@ -129,6 +129,7 @@ describeIntegration('oauth authorize route (integration, real Postgres)', () => 
       microsoft: false,
       via: { google: null, microsoft: null },
       connectClientIds: { google: null, microsoft: null },
+      connectAdminConsentUrl: null,
     });
   });
 
@@ -149,6 +150,7 @@ describeIntegration('oauth authorize route (integration, real Postgres)', () => 
       microsoft: false,
       via: { google: 'BYO', microsoft: null },
       connectClientIds: { google: null, microsoft: null },
+      connectAdminConsentUrl: null,
     });
   });
 
