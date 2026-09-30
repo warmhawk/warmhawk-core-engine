@@ -18,7 +18,7 @@
  * Containerization Model, reachable only over `warmhawk_internal` (nginx has no location block for
  * `/internal/*` anywhere in this repo).
  */
-import nodemailer from 'nodemailer';
+import nodemailer, { type Transporter } from 'nodemailer';
 import { prisma, type AiWriteOutcome } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { mintMailboxAccessToken } from './mailboxAccessToken';
@@ -317,7 +317,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
   const key = encryptionKey();
 
-  let transporter: nodemailer.Transporter;
+  let transporter: Transporter;
 
   try {
     if (mailbox.oauthRefreshTokenEncrypted && mailbox.provider === 'MICROSOFT_365') {

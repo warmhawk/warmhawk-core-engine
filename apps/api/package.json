@@ -35,7 +35,7 @@
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.2",
     "mailparser": "^3.9.25",
-    "nodemailer": "^9.0.5",
+    "nodemailer": "^10.0.12",
     "tsx": "^4.23.12"
   },
   "devDependencies": {
@@ -44,7 +44,6 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/mailparser": "^3.4.6",
     "@types/node": "^22.7.4",
-    "@types/nodemailer": "^8.0.1",
     "typescript": "^5.6.3",
     "vitest": "^3.2.6"
   }
