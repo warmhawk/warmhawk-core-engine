@@ -46,6 +46,13 @@ export function warmupDay(warmupStartedAt: Date | null, now: Date): number {
   return Math.max(1, Math.floor((now.getTime() - warmupStartedAt.getTime()) / DAY_MS) + 1);
 }
 
+/** Start of the mailbox's current warm-up day, the same 24-hour window warmupDay() numbers.
+ *  Counting "sent today" from here keeps each day's sends equal to that day's target; counting
+ *  from UTC midnight let a mailbox send on three calendar days inside two warm-up days. */
+export function warmupDayStart(warmupStartedAt: Date, now: Date): Date {
+  return new Date(warmupStartedAt.getTime() + (warmupDay(warmupStartedAt, now) - 1) * DAY_MS);
+}
+
 /** How many warmup emails a mailbox should send today. */
 export function dailyWarmupTarget(day: number, status: MailboxStatus): number {
   if (status === 'PAUSED') return 0;
