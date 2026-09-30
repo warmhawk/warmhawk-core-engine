@@ -50,6 +50,7 @@ import {
   nextStepText,
   tallyPlacements,
   warmupDay,
+  warmupDayStart,
   type PlacementCounts,
   type WarmupStage,
 } from './policy';
@@ -88,6 +89,29 @@ const CHECK_BATCH = 100;
 
 function startOfUtcDay(d: Date): Date {
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+/** Warmup sends per mailbox since the start of its current warm-up day (UTC midnight for a
+ *  mailbox that hasn't started yet). `rows` must cover the last 24 hours, which is where every
+ *  current warm-up day starts. */
+function countSentThisWarmupDay(
+  mailboxes: Array<Pick<Mailbox, 'id' | 'warmupStartedAt'>>,
+  rows: Array<{ senderMailboxId: string; sentAt: Date }>,
+  now: Date,
+): Map<string, number> {
+  const since = new Map(
+    mailboxes.map((m) => [
+      m.id,
+      (m.warmupStartedAt ? warmupDayStart(m.warmupStartedAt, now) : startOfUtcDay(now)).getTime(),
+    ]),
+  );
+  const counts = new Map<string, number>();
+  for (const r of rows) {
+    const start = since.get(r.senderMailboxId);
+    if (start === undefined || r.sentAt.getTime() < start) continue;
+    counts.set(r.senderMailboxId, (counts.get(r.senderMailboxId) ?? 0) + 1);
+  }
+  return counts;
 }
 
 function truncateError(err: unknown): string {
@@ -389,16 +413,14 @@ export async function sendOneWarmup(
 
 export async function sendDueWarmups(deps: WarmupDeps): Promise<{ sent: number; failed: number }> {
   const now = deps.now();
-  const dayStart = startOfUtcDay(now);
   const [mailboxes, pool, todayRows, lastRows] = await Promise.all([
     prisma.mailbox.findMany({
       where: { warmupEnabled: true, status: { in: ['WARMUP', 'ACTIVE'] } },
     }),
     loadPartnerPool(),
-    prisma.warmupMessage.groupBy({
-      by: ['senderMailboxId'],
-      where: { sentAt: { gte: dayStart } },
-      _count: { _all: true },
+    prisma.warmupMessage.findMany({
+      where: { sentAt: { gte: new Date(now.getTime() - DAY_MS) } },
+      select: { senderMailboxId: true, sentAt: true },
     }),
     prisma.warmupMessage.groupBy({
       by: ['senderMailboxId'],
@@ -406,7 +428,7 @@ export async function sendDueWarmups(deps: WarmupDeps): Promise<{ sent: number; 
       _max: { sentAt: true },
     }),
   ]);
-  const today = new Map(todayRows.map((r) => [r.senderMailboxId, r._count._all]));
+  const today = countSentThisWarmupDay(mailboxes, todayRows, now);
   const last = new Map(lastRows.map((r) => [r.senderMailboxId, r._max.sentAt]));
 
   let sent = 0;
@@ -510,16 +532,14 @@ export interface WarmupOverview {
 }
 
 export async function getWarmupOverview(now: Date = new Date()): Promise<WarmupOverview> {
-  const dayStart = startOfUtcDay(now);
   const since = new Date(now.getTime() - HEALTH_WINDOW_DAYS * DAY_MS);
   const [mailboxes, pool, counts, todayRows, lastRows, bounceRows] = await Promise.all([
     prisma.mailbox.findMany({ orderBy: { createdAt: 'asc' } }),
     loadPartnerPool(),
     loadWindowCounts(now),
-    prisma.warmupMessage.groupBy({
-      by: ['senderMailboxId'],
-      where: { sentAt: { gte: dayStart }, placement: { not: 'FAILED' } },
-      _count: { _all: true },
+    prisma.warmupMessage.findMany({
+      where: { sentAt: { gte: new Date(now.getTime() - DAY_MS) }, placement: { not: 'FAILED' } },
+      select: { senderMailboxId: true, sentAt: true },
     }),
     prisma.warmupMessage.groupBy({ by: ['senderMailboxId'], _max: { sentAt: true } }),
     prisma.warmupMessage.findMany({
@@ -529,7 +549,7 @@ export async function getWarmupOverview(now: Date = new Date()): Promise<WarmupO
       select: { senderMailboxId: true, sentAt: true, error: true },
     }),
   ]);
-  const today = new Map(todayRows.map((r) => [r.senderMailboxId, r._count._all]));
+  const today = countSentThisWarmupDay(mailboxes, todayRows, now);
   const last = new Map(lastRows.map((r) => [r.senderMailboxId, r._max.sentAt]));
   const lastBounce = new Map(
     bounceRows.map((r) => [

@@ -587,3 +587,4 @@ log "Run 'warmhawk update' (or './scripts/update.sh') any time to pull the lates
 log "Running the licensed dashboard too? Copy this .env/.env's OPERATOR_SERVICE_TOKEN value into"
 log "  that product's own .env/.env as CORE_ENGINE_SERVICE_TOKEN — the two packages never share a .env/.env, so"
 log "  nothing does this for you automatically. Without it, the dashboard's data pages 401."
+log "Enjoying WarmHawk? A GitHub star helps other self-hosters find it: https://github.com/warmhawk/warmhawk-core-engine"

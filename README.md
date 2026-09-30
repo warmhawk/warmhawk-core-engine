@@ -1,9 +1,37 @@
 # 🦅 WarmHawk Core Engine
 
-Open-core, self-hosted cold-email/outbound sending infrastructure. API server + BullMQ worker +
-Prisma schema + install/update scripts — the free, fully-functional Tier 0 engine
-("direct API endpoints, no web UI"). The web dashboard is a separate, private licensed
-dashboard product.
+**Self-hosted cold email with the deliverability guardrails built in.** Warmup, bounce circuit
+breakers and send-cadence limits run on your own server, with your own Google Workspace or
+Microsoft 365 mailboxes. There are no per-seat, per-mailbox or per-send fees.
+
+[Website](https://warmhawk.com/?ref=github) · [Docs](https://warmhawk.com/docs?ref=github) ·
+[Bounce-code dictionary](https://warmhawk.com/errors?ref=github) ·
+[Cold-email cost calculator](https://warmhawk.com/tools/cold-email-calculator?ref=github) ·
+[Free domain checker](https://warmhawk.com/tools/domain-check?ref=github)
+
+⭐ If WarmHawk is useful to you, [star the repo](https://github.com/warmhawk/warmhawk-core-engine).
+It helps other self-hosters find it.
+
+This repo is the free, fully functional Tier 0 engine: the API server, BullMQ worker, Prisma
+schema and install/update scripts, with direct API endpoints and no web UI. The web dashboard is
+a separate, licensed product. The code is source-available under BSL 1.1 (see [License](#-license)).
+
+---
+
+## 🛡️ What the engine does for you
+
+| Guardrail | What happens |
+|---|---|
+| **Warmup before campaigns** | New mailboxes warm up for at least 14 days and graduate only when their measured inbox rate reaches 90%. |
+| **Campaign ramp** | After warmup, campaign sends start at 5 a day and grow 20% a day, up to each mailbox's own daily cap. |
+| **Bounce circuit breaker** | A mailbox whose bounce rate passes 5% (after at least 20 sends) is paused and flagged before it damages the domain. |
+| **Hard vs. soft bounces** | Hard bounces mark the lead as bounced. Temporary failures retry with backoff and are suppressed after 4 attempts. |
+| **Human send cadence** | An 8-minute floor between sends, plus jitter, so a mailbox never bursts. |
+| **Domain auth checks** | SPF, DKIM and DMARC are checked against live DNS. |
+
+![The licensed WarmHawk dashboard's live queue: per-mailbox daily caps and send-cadence throttling](https://warmhawk.com/dashboard-screens/queue.png)
+
+<sub>The licensed dashboard (Tier 1) is shown above. This free engine is API-only, and the guardrails above run in it either way.</sub>
 
 ---
 
