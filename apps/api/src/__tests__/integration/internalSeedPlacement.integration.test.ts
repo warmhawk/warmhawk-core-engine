@@ -25,12 +25,20 @@ describeIntegration('seed placement check (integration, real Postgres)', () => {
   let seedAccountId: string;
   const now = new Date();
 
-  function fakeReader(found: Record<string, { inSpam: boolean } | null>): InboxReader {
+  function fakeReader(
+    found: Record<string, { inSpam: boolean; promotions?: boolean } | null>,
+  ): InboxReader {
+    const uids = new Map<number, boolean>();
+    let next = 1;
     return {
       find: async (target: WarmupTarget) => {
         const hit = found[target.messageId ?? ''];
-        return hit ? { uid: 1, folder: hit.inSpam ? 'Junk' : 'INBOX', inSpam: hit.inSpam } : null;
+        if (!hit) return null;
+        const uid = next++;
+        uids.set(uid, hit.promotions ?? false);
+        return { uid, folder: hit.inSpam ? 'Junk' : 'INBOX', inSpam: hit.inSpam };
       },
+      inPromotions: async ({ uid }: { uid: number }) => uids.get(uid) ?? false,
       markRead: async () => undefined,
       rescue: async () => undefined,
       close: async () => undefined,
@@ -118,6 +126,27 @@ describeIntegration('seed placement check (integration, real Postgres)', () => {
     expect(rows.get(spam.id)).toMatchObject({ folder: 'SPAM', checkedAt: now });
     expect(rows.get(tooFresh.id)?.checkedAt).toBeNull();
     expect(rows.get(notYet.id)?.checkedAt).toBeNull();
+  });
+
+  it('records PROMOTIONS for an INBOX copy under the Gmail Promotions tab', async () => {
+    const promo = await pending('<promo@x>', 10);
+    const primary = await pending('<primary@x>', 10);
+
+    const summary = await checkSampledPlacements({
+      now: () => now,
+      openReader: async () =>
+        fakeReader({
+          '<promo@x>': { inSpam: false, promotions: true },
+          '<primary@x>': { inSpam: false },
+        }),
+    });
+
+    expect(summary).toEqual({ seedChecked: 2, seedDropped: 0 });
+    const rows = new Map(
+      (await prisma.seedPlacementResult.findMany({ where: { campaignId } })).map((r) => [r.id, r]),
+    );
+    expect(rows.get(promo.id)).toMatchObject({ folder: 'PROMOTIONS', checkedAt: now });
+    expect(rows.get(primary.id)).toMatchObject({ folder: 'INBOX', checkedAt: now });
   });
 
   it('marks a copy UNCLASSIFIED once it has been missing for 2 hours', async () => {
