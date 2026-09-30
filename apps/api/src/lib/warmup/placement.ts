@@ -65,6 +65,9 @@ export interface InboxReader {
   rescue(found: FoundMessage): Promise<FoundMessage | undefined>;
   /** Out of the inbox into WARMUP_FOLDER, once its placement is recorded. */
   fileAway?(found: FoundMessage): Promise<void>;
+  /** Gmail only: true when the copy found in INBOX sits under the Promotions tab. Gmail keeps
+   *  tabs as categories inside INBOX, not as IMAP folders, so `find` alone reports them as INBOX. */
+  inPromotions?(found: FoundMessage): Promise<boolean>;
   /** Sender side: the delivery-failure report that came back for `messageId`, if any. */
   findBounce?(messageId: string): Promise<BounceReport | null>;
   close(): Promise<void>;
@@ -234,6 +237,20 @@ export class ImapInboxReader implements InboxReader {
       });
       const uid = moved ? moved.uidMap?.get(found.uid) : undefined;
       return uid ? { folder: 'INBOX', uid, inSpam: false } : undefined;
+    } finally {
+      lock.release();
+    }
+  }
+
+  async inPromotions(found: FoundMessage): Promise<boolean> {
+    if (found.inSpam || !this.client.capabilities.has('X-GM-EXT-1')) return false;
+    const lock = await this.client.getMailboxLock(found.folder);
+    try {
+      const uids = await withTimeout(
+        this.client.search({ uid: String(found.uid), gmraw: 'category:promotions' }, { uid: true }),
+        'IMAP search',
+      );
+      return !!uids && uids.length > 0;
     } finally {
       lock.release();
     }

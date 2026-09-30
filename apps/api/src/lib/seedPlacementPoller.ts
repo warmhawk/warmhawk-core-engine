@@ -97,7 +97,11 @@ export async function checkSampledPlacements(
         }
 
         let folder: SeedPlacementFolder;
-        if (found) folder = found.inSpam ? 'SPAM' : 'INBOX';
+        if (found?.inSpam) folder = 'SPAM';
+        else if (found)
+          folder = (await reader?.inPromotions?.(found).catch(() => false))
+            ? 'PROMOTIONS'
+            : 'INBOX';
         else if (age >= CHECK_GIVE_UP_MS) folder = 'UNCLASSIFIED';
         else continue;
 
