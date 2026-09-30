@@ -9,6 +9,9 @@ Microsoft 365 mailboxes. There are no per-seat, per-mailbox or per-send fees.
 [Cold-email cost calculator](https://warmhawk.com/tools/cold-email-calculator?ref=github) ·
 [Free domain checker](https://warmhawk.com/tools/domain-check?ref=github)
 
+⭐ If WarmHawk is useful to you, [star the repo](https://github.com/warmhawk/warmhawk-core-engine).
+It helps other self-hosters find it.
+
 This repo is the free, fully functional Tier 0 engine: the API server, BullMQ worker, Prisma
 schema and install/update scripts, with direct API endpoints and no web UI. The web dashboard is
 a separate, licensed product. The code is source-available under BSL 1.1 (see [License](#-license)).

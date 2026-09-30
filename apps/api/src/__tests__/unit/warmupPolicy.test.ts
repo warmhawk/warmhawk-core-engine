@@ -17,6 +17,7 @@ import {
   nextStepText,
   tallyPlacements,
   warmupDay,
+  warmupDayStart,
   type PlacementCounts,
 } from '../../lib/warmup/policy';
 
@@ -37,6 +38,25 @@ describe('warmupDay', () => {
   });
   it('never goes below 1 for a start time in the future (clock skew)', () => {
     expect(warmupDay(new Date(NOW.getTime() + DAY_MS), NOW)).toBe(1);
+  });
+});
+
+describe('warmupDayStart', () => {
+  // A real install: warmup started 09-28 12:50 UTC. Counting "today" from UTC midnight let it
+  // send 3 a day against a target of 2, so the day's window has to start at 12:50, not 00:00.
+  const started = new Date('2026-09-28T12:50:33Z');
+  it('starts each warm-up day 24 hours after the last, from the warmup start time', () => {
+    expect(warmupDayStart(started, new Date('2026-09-28T23:59:00Z'))).toEqual(started);
+    expect(warmupDayStart(started, new Date('2026-09-30T12:31:00Z'))).toEqual(
+      new Date('2026-09-29T12:50:33Z'),
+    );
+    expect(warmupDayStart(started, new Date('2026-09-30T12:50:33Z'))).toEqual(
+      new Date('2026-09-30T12:50:33Z'),
+    );
+  });
+  it('stays at the start time for a start time in the future (clock skew)', () => {
+    const future = new Date(NOW.getTime() + DAY_MS);
+    expect(warmupDayStart(future, NOW)).toEqual(future);
   });
 });
 
