@@ -34,6 +34,7 @@ import { campaignsRoutes } from './routes/campaigns';
 import { mailboxesRoutes } from './routes/mailboxes';
 import { queueRoutes } from './routes/queue';
 import { seedAccountsRoutes } from './routes/seedAccounts';
+import { unsubscribeRoutes } from './routes/unsubscribe';
 
 /**
  * How many reverse proxies sit between this app and the caller, from `TRUST_PROXY_HOPS`.
@@ -191,6 +192,11 @@ export async function createApp(): Promise<FastifyInstance> {
     },
     { prefix: '/v1' },
   );
+
+  // The built-in unsubscribe page a campaign email links to. Unauthenticated like the tool above
+  // was, but not the same thing: this is the customer's own legal duty to their recipients, it
+  // acts only on a token this instance signed, and it makes no outbound request.
+  await app.register(unsubscribeRoutes, { prefix: '/unsubscribe' });
 
   // Internal-only routes — guarded by requireCallbackSecret AND, per the Containerization Model,
   // reachable only over the internal Docker network (nginx never proxies these paths; there is

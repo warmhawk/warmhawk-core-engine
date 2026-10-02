@@ -41,6 +41,7 @@ export const MAX_CSV_FILE_BYTES = 10 * 1024 * 1024;
 export const RATE_LIMIT_WEBHOOK_INGEST = { max: 30, timeWindowMs: 60_000 };
 export const RATE_LIMIT_CSV_IMPORT = { max: 10, timeWindowMs: 60_000 };
 export const RATE_LIMIT_LOGIN = { max: 10, timeWindowMs: 60_000 };
+export const RATE_LIMIT_UNSUBSCRIBE = { max: 30, timeWindowMs: 60_000 };
 
 // --- Bounce/complaint circuit breaker (Guardrails — Reputation protection)
 export const DEFAULT_BOUNCE_RATE_THRESHOLD = 0.05; // 5%
