@@ -88,7 +88,7 @@ describe('POST /internal/ai/classify-reply', () => {
     expect(transactionSpy).not.toHaveBeenCalled();
   });
 
-  it('OPT_OUT: upserts a SuppressionEntry and flips the lead to SUPPRESSED inside one transaction', async () => {
+  it('OPT_OUT: upserts a SuppressionEntry and flips every lead with that address to SUPPRESSED inside one transaction', async () => {
     vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue(baseReplyRow as never);
     vi.spyOn(prisma.aiProviderKey, 'findUnique').mockResolvedValue({
       provider: 'GEMINI',
@@ -100,7 +100,7 @@ describe('POST /internal/ai/classify-reply', () => {
     vi.spyOn(prisma.reply, 'update').mockResolvedValue({ ...baseReplyRow, classification: 'OPT_OUT' } as never);
     vi.spyOn(prisma.lead, 'findUnique').mockResolvedValue({ id: 'lead-1', email: 'lead1@example.com' } as never);
     const upsertSpy = vi.spyOn(prisma.suppressionEntry, 'upsert').mockResolvedValue({} as never);
-    const leadUpdateSpy = vi.spyOn(prisma.lead, 'update').mockResolvedValue({} as never);
+    const leadUpdateSpy = vi.spyOn(prisma.lead, 'updateMany').mockResolvedValue({ count: 1 } as never);
     const transactionSpy = vi.spyOn(prisma, '$transaction').mockImplementation(async (ops) => {
       return Promise.all(ops as unknown as Promise<unknown>[]);
     });
@@ -121,7 +121,11 @@ describe('POST /internal/ai/classify-reply', () => {
       },
       update: {},
     });
-    expect(leadUpdateSpy).toHaveBeenCalledWith({ where: { id: 'lead-1' }, data: { status: 'SUPPRESSED' } });
+    // By address, not by lead id: the same person can be a lead in several campaigns.
+    expect(leadUpdateSpy).toHaveBeenCalledWith({
+      where: { email: 'lead1@example.com', status: { not: 'SUPPRESSED' } },
+      data: { status: 'SUPPRESSED', nextRetryAt: null },
+    });
   });
 
   it('OPT_OUT but the lead is already gone: skips the transaction instead of crashing', async () => {

@@ -20,6 +20,7 @@ import {
   isDuplicateLead,
   type RawLeadInput,
 } from '../lib/leadIngest';
+import { suppressEmail } from '../lib/suppression';
 import { MAX_CSV_ROWS, MAX_CSV_FILE_BYTES, RATE_LIMIT_CSV_IMPORT } from '../../../../constants';
 
 interface ImportRejection {
@@ -232,15 +233,8 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
     const lead = await prisma.lead.findUnique({ where: { id: request.params.id } });
     if (!lead) return reply.code(404).send({ error: 'Lead not found' });
 
-    await prisma.suppressionEntry.upsert({
-      where: { email: lead.email },
-      create: { email: lead.email, reason: 'Manually suppressed from dashboard', source: 'manual' },
-      update: {},
-    });
-    const updated = await prisma.lead.update({
-      where: { id: lead.id },
-      data: { status: 'SUPPRESSED' },
-    });
+    await suppressEmail(lead.email, { source: 'manual', reason: 'Manually suppressed from dashboard' });
+    const updated = await prisma.lead.findUnique({ where: { id: lead.id } });
     return updated;
   });
 

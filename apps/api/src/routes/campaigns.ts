@@ -18,6 +18,7 @@ import { scoreContent, type SpamScoreResult } from '../lib/spamScore';
 import { listSpintaxGroups, SpintaxParseError } from '../lib/spintax';
 import { composeCampaignEmail, resolveSenderName, type ComposeCampaign } from '../lib/composeCampaignEmail';
 import { appendCanSpamFooter, resolveUnsubscribeUrl } from '../lib/sendCompliance';
+import { hostedUnsubscribeUrl } from '../lib/unsubscribeToken';
 
 interface CreateCampaignBody {
   name: string;
@@ -294,7 +295,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
             where: { campaignId: saved.id, piiErasedAt: null },
             orderBy: { createdAt: 'asc' },
             take: 3,
-            select: { email: true, firstName: true, lastName: true, company: true, customFields: true },
+            select: { id: true, email: true, firstName: true, lastName: true, company: true, customFields: true },
           })
         : Promise.resolve([]),
       prisma.mailbox.findFirst({
@@ -314,16 +315,18 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
     const address = settings?.physicalMailingAddress?.trim() ?? '';
     const unsubscribeTemplate =
       (body.unsubscribeUrlTemplate !== undefined ? body.unsubscribeUrlTemplate : saved?.unsubscribeUrlTemplate)?.trim() ?? '';
+    // No link of the campaign's own means the built-in page, signed per lead at send time; the
+    // sample lead has no id, so its link is only the right shape.
+    const unsubscribeUrl = unsubscribeTemplate
+      ? resolveUnsubscribeUrl(unsubscribeTemplate, lead.email)
+      : hostedUnsubscribeUrl('id' in lead ? lead.id : 'sample');
     const complianceMissing: Array<'address' | 'unsubscribe'> = [];
     if (!address) complianceMissing.push('address');
-    if (!/^https?:|^mailto:/i.test(unsubscribeTemplate)) complianceMissing.push('unsubscribe');
+    if (!unsubscribeUrl || !/^https?:|^mailto:/i.test(unsubscribeUrl)) complianceMissing.push('unsubscribe');
     const withFooter = (text: string) =>
       complianceMissing.length > 0
         ? text
-        : appendCanSpamFooter(text, {
-            physicalMailingAddress: address,
-            unsubscribeUrl: resolveUnsubscribeUrl(unsubscribeTemplate, lead.email),
-          }).body;
+        : appendCanSpamFooter(text, { physicalMailingAddress: address, unsubscribeUrl }).body;
 
     return {
       lead: { firstName: lead.firstName, lastName: lead.lastName, company: lead.company, email: lead.email },
@@ -440,14 +443,15 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** `POST /v1/campaigns/:id/launch` (spec) — the one dedicated "go live" action, distinct from
-   *  the generic `PATCH /:id` status setter: refuses to launch a campaign that's missing the
-   *  CAN-SPAM-required unsubscribe template (the same gate `sendCompliance.ts` enforces per-send,
-   *  applied here as an up-front check so a customer finds out at launch time, not on the first
-   *  failed send) or that's still paused for a bounce-rate trip that hasn't been resolved. */
+   *  the generic `PATCH /:id` status setter: refuses to launch a campaign with no unsubscribe
+   *  link (the same gate `sendCompliance.ts` enforces per-send, applied here as an up-front check
+   *  so a customer finds out at launch time, not on the first failed send) or that's still paused
+   *  for a bounce-rate trip that hasn't been resolved. The built-in unsubscribe page counts as a
+   *  link, so only an install with no `WARMHAWK_DOMAIN` has to set one on the campaign. */
   app.post<{ Params: { id: string } }>('/:id/launch', async (request, reply) => {
     const campaign = await prisma.campaign.findUnique({ where: { id: request.params.id } });
     if (!campaign) return reply.code(404).send({ error: 'Campaign not found' });
-    if (!campaign.unsubscribeUrlTemplate?.trim()) {
+    if (!campaign.unsubscribeUrlTemplate?.trim() && !process.env.WARMHAWK_DOMAIN?.trim()) {
       return reply
         .code(422)
         .send({ error: 'unsubscribeUrlTemplate is required before a campaign can launch' });
