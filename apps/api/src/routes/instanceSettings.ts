@@ -27,7 +27,12 @@ export async function instanceSettingsRoutes(app: FastifyInstance): Promise<void
       where: { id: 'default' },
       select: PUBLIC_FIELDS,
     });
-    return settings ?? { id: 'default', physicalMailingAddress: null };
+    // `builtInUnsubscribe`: whether a campaign with no unsubscribe URL of its own gets the
+    // built-in page (lib/unsubscribeToken.ts) — the dashboard uses it to say the field is optional.
+    return {
+      ...(settings ?? { id: 'default', physicalMailingAddress: null }),
+      builtInUnsubscribe: Boolean(process.env.WARMHAWK_DOMAIN?.trim()),
+    };
   });
 
   app.put<{ Body: { physicalMailingAddress?: string } }>('/', async (request, reply) => {

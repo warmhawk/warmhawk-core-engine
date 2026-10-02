@@ -16,6 +16,7 @@ import type { FastifyInstance } from 'fastify';
 import { createApp } from '../../app';
 import { prisma } from '@warmhawk/db';
 import { encrypt, loadEncryptionKey } from '../../lib/encryption';
+import { signUnsubscribeToken } from '../../lib/unsubscribeToken';
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
@@ -105,6 +106,7 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
 
   beforeAll(async () => {
     process.env.NEXTJS_CALLBACK_SECRET = CALLBACK_SECRET;
+    process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-only-not-a-real-secret-value';
     process.env.MAILBOX_CREDENTIAL_KEY =
       process.env.MAILBOX_CREDENTIAL_KEY || Buffer.from('c'.repeat(32)).toString('base64');
 
@@ -344,13 +346,86 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     }
   });
 
-  it('refuses a campaign send missing CAN-SPAM compliance (no unsubscribe template)', async () => {
+  it('links the built-in unsubscribe page when the campaign has no link of its own', async () => {
+    const campaign = await prisma.campaign.create({
+      data: { name: 'Built-in Unsubscribe Campaign', status: 'ACTIVE', aiPromptTemplate: '' },
+    });
+    const lead = await prisma.lead.create({
+      data: { campaignId: campaign.id, email: `built-in-unsub-${Date.now()}@example.com`, status: 'UNTOUCHED' },
+    });
+    const savedDomain = process.env.WARMHAWK_DOMAIN;
+    process.env.WARMHAWK_DOMAIN = 'api.acme.example';
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/mail/send',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+        payload: { mailboxId, to: lead.email, subject: 'x', body: 'Hi', campaignId: campaign.id, leadId: lead.id },
+      });
+      expect(response.statusCode).toBe(200);
+
+      const url = `https://api.acme.example/unsubscribe/${signUnsubscribeToken(lead.id)}`;
+      expect(response.json().listUnsubscribeHeader).toBe(`<${url}>`);
+      expect(response.json().listUnsubscribePostHeader).toBe('List-Unsubscribe=One-Click');
+      expect(textOf(fakeSmtp.messages.at(-1) as string).trim()).toBe(
+        `Hi\n\n--\n123 Test St, Testville\nUnsubscribe: ${url}`,
+      );
+
+      // The link that went out is a live one: following it takes the lead off the list.
+      const clicked = await app.inject({ method: 'POST', url: new URL(url).pathname });
+      expect(clicked.statusCode).toBe(200);
+      expect((await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } })).status).toBe('SUPPRESSED');
+    } finally {
+      if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
+      else process.env.WARMHAWK_DOMAIN = savedDomain;
+      await prisma.suppressionEntry.deleteMany({ where: { email: lead.email } });
+      await prisma.executionLog.deleteMany({ where: { campaignId: campaign.id } });
+      await prisma.lead.deleteMany({ where: { campaignId: campaign.id } });
+      await prisma.campaign.deleteMany({ where: { id: campaign.id } });
+    }
+  });
+
+  it('refuses a campaign send to a suppressed address, never reaches SMTP, and takes the lead out of the queue', async () => {
+    const lead = await prisma.lead.create({
+      data: {
+        campaignId,
+        email: `opted-out-${Date.now()}@acme.example`,
+        status: 'QUEUED',
+        nextRetryAt: new Date(Date.now() + 60_000),
+      },
+    });
+    await prisma.suppressionEntry.create({ data: { email: lead.email, source: 'unsubscribe_link' } });
+    const received = fakeSmtp.messages.length;
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/mail/send',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+        payload: { mailboxId, to: lead.email, subject: 'x', body: 'y', campaignId, leadId: lead.id },
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ code: 'ESUPPRESSED' });
+      expect(fakeSmtp.messages.length).toBe(received);
+
+      const after = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
+      expect(after.status).toBe('SUPPRESSED');
+      expect(after.nextRetryAt).toBeNull();
+    } finally {
+      await prisma.suppressionEntry.deleteMany({ where: { email: lead.email } });
+    }
+  });
+
+  it('refuses a campaign send missing CAN-SPAM compliance (no unsubscribe template, no install domain)', async () => {
     const campaign = await prisma.campaign.create({
       data: { name: 'No Unsubscribe Campaign', status: 'ACTIVE', aiPromptTemplate: '' },
     });
     const lead = await prisma.lead.create({
       data: { campaignId: campaign.id, email: `no-unsub-${Date.now()}@example.com`, status: 'UNTOUCHED' },
     });
+    const savedDomain = process.env.WARMHAWK_DOMAIN;
+    delete process.env.WARMHAWK_DOMAIN;
 
     try {
       const response = await app.inject({
@@ -369,6 +444,7 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
       expect(response.statusCode).toBe(422);
       expect(response.json().error).toMatch(/unsubscribe/i);
     } finally {
+      if (savedDomain !== undefined) process.env.WARMHAWK_DOMAIN = savedDomain;
       await prisma.lead.deleteMany({ where: { campaignId: campaign.id } });
       await prisma.campaign.deleteMany({ where: { id: campaign.id } });
     }

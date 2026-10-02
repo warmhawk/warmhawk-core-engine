@@ -52,7 +52,26 @@ describeIntegration('instance-settings routes (integration, real Postgres)', () 
 
     expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json).toEqual({ id: 'default', physicalMailingAddress: null });
+    expect(json).toMatchObject({ id: 'default', physicalMailingAddress: null });
+  });
+
+  it('says whether campaigns get the built-in unsubscribe page, which needs a public domain', async () => {
+    const savedDomain = process.env.WARMHAWK_DOMAIN;
+    const get = () =>
+      app.inject({
+        method: 'GET',
+        url: '/v1/instance-settings',
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+    try {
+      delete process.env.WARMHAWK_DOMAIN;
+      expect((await get()).json().builtInUnsubscribe).toBe(false);
+      process.env.WARMHAWK_DOMAIN = 'api.acme.example';
+      expect((await get()).json().builtInUnsubscribe).toBe(true);
+    } finally {
+      if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
+      else process.env.WARMHAWK_DOMAIN = savedDomain;
+    }
   });
 
   it('sets the physical mailing address via PUT and rejects an empty value', async () => {

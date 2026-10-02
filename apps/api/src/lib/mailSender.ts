@@ -31,6 +31,8 @@ import {
   appendCanSpamFooter,
   resolveUnsubscribeUrl,
 } from './sendCompliance';
+import { hostedUnsubscribeUrl } from './unsubscribeToken';
+import { isEmailSuppressed } from './leadIngest';
 import { pickSeedBccSample, subjectSha256 } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
 import { DEFAULT_BOUNCE_RATE_THRESHOLD, BOUNCE_RATE_MIN_SAMPLE_SIZE } from '../../../../constants';
@@ -276,16 +278,39 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
     ]);
     if (!campaign) throw new MailSendError('Campaign not found', 404);
 
+    // The suppression floor, at the last point before a send. The queue only picks leads that
+    // aren't suppressed, but a lead can opt out (unsubscribe link, reply) after it was claimed, or
+    // while it waits on a retry; this is what keeps that send from going out anyway.
+    if (await isEmailSuppressed(to)) {
+      if (leadId) {
+        await prisma.lead
+          .updateMany({
+            where: { id: leadId, status: { not: 'SUPPRESSED' } },
+            data: { status: 'SUPPRESSED', nextRetryAt: null },
+          })
+          .catch(() => undefined);
+      }
+      throw new MailSendError('Recipient is on the suppression list', 409, 'ESUPPRESSED');
+    }
+
     // CAN-SPAM auto-injection — refuses to send a campaign missing either required element. This
     // is the one shared send path every entry point (API route, CSV import, webhook ingest,
     // dashboard) ultimately funnels through, so the gate cannot be bypassed.
+    //
+    // A campaign's own unsubscribe URL wins; without one the lead gets the built-in page
+    // (`routes/unsubscribe.ts`), so an install with a public domain needs no link configured.
+    const customTemplate = campaign.unsubscribeUrlTemplate?.trim();
+    const unsubscribeUrl = customTemplate
+      ? resolveUnsubscribeUrl(customTemplate, to)
+      : leadId
+        ? hostedUnsubscribeUrl(leadId)
+        : null;
     assertCanSpamCompliant({
       physicalMailingAddress: instanceSettings?.physicalMailingAddress,
-      unsubscribeUrlTemplate: campaign.unsubscribeUrlTemplate,
+      unsubscribeUrlTemplate: unsubscribeUrl,
     });
 
-    const unsubscribeUrl = resolveUnsubscribeUrl(campaign.unsubscribeUrlTemplate as string, to);
-    const rfc8058 = buildRfc8058Headers(unsubscribeUrl);
+    const rfc8058 = buildRfc8058Headers(unsubscribeUrl as string);
     listUnsubscribeHeader = rfc8058['List-Unsubscribe'];
     listUnsubscribePostHeader = rfc8058['List-Unsubscribe-Post'];
 

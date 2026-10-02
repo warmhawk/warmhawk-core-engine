@@ -15,4 +15,12 @@ describe('nginx.conf.template', () => {
     expect(prefixes.length).toBeGreaterThan(0);
     expect(missing).toEqual([]);
   });
+
+  // The link in every campaign email. With no location block, nginx 404s it and nobody can opt out.
+  it('proxies the built-in unsubscribe page in the live block and in both TLS blocks', () => {
+    const root = resolve(__dirname, '../../../../..');
+    const nginx = readFileSync(resolve(root, 'nginx/nginx.conf.template'), 'utf8');
+    expect(nginx.match(/^#?\s*location \/unsubscribe\/ \{$/gm)).toHaveLength(3);
+    expect(nginx.match(/^ {4}location \/unsubscribe\/ \{$/gm)).toHaveLength(1);
+  });
 });

@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { createApp } from '../../app';
 import { prisma } from '@warmhawk/db';
+import { signUnsubscribeToken } from '../../lib/unsubscribeToken';
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
@@ -158,8 +159,28 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 
-  it('refuses to launch without an unsubscribe template, then launches once one is set; pause works and 404s unknown', async () => {
+  it('launches with no unsubscribe template of its own when the install has a domain for the built-in page', async () => {
+    const campaign = await prisma.campaign.create({ data: { name: 'Built-in Unsubscribe', aiPromptTemplate: '' } });
+    createdCampaignIds.push(campaign.id);
+    const savedDomain = process.env.WARMHAWK_DOMAIN;
+    process.env.WARMHAWK_DOMAIN = 'api.acme.example';
+    try {
+      const launched = await app.inject({
+        method: 'POST',
+        url: `/v1/campaigns/${campaign.id}/launch`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(launched.statusCode).toBe(200);
+      expect(launched.json().status).toBe('ACTIVE');
+    } finally {
+      if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
+      else process.env.WARMHAWK_DOMAIN = savedDomain;
+    }
+  });
+
+  it('refuses to launch without an unsubscribe template on an install with no domain, then launches once one is set; pause works and 404s unknown', async () => {
     const id = createdCampaignIds[0];
+    delete process.env.WARMHAWK_DOMAIN;
 
     const refused = await app.inject({
       method: 'POST',
@@ -346,6 +367,8 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     const preview = (payload: Record<string, unknown>) =>
       app.inject({ method: 'POST', url: '/v1/campaigns/preview', headers: auth(), payload });
     const draft = { subject: 'Idea for {{company}}', template: 'Hi {{firstName}},' };
+    const savedDomain = process.env.WARMHAWK_DOMAIN;
+    delete process.env.WARMHAWK_DOMAIN;
     try {
       await prisma.instanceSettings.upsert({
         where: { id: 'default' },
@@ -375,6 +398,19 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
         'unsubscribe',
       ]);
 
+      // An install with a domain: no link of the campaign's own means the built-in page, signed
+      // for the lead being previewed. A link sends would refuse is still reported, not replaced.
+      process.env.WARMHAWK_DOMAIN = 'api.acme.example';
+      const lead = await prisma.lead.create({ data: { campaignId: campaign.id, email: 'dana@acme.example', firstName: 'Dana' } });
+      const builtIn = (await preview({ campaignId: campaign.id, unsubscribeUrlTemplate: '' })).json();
+      expect(builtIn.complianceMissing).toEqual([]);
+      expect(builtIn.body.endsWith(`Unsubscribe: https://api.acme.example/unsubscribe/${signUnsubscribeToken(lead.id)}`)).toBe(true);
+      expect((await preview(draft)).json().body).toMatch(/Unsubscribe: https:\/\/api\.acme\.example\/unsubscribe\/sample\./);
+      expect((await preview({ ...draft, unsubscribeUrlTemplate: 'ftp://acme.example/u' })).json().complianceMissing).toEqual([
+        'unsubscribe',
+      ]);
+      delete process.env.WARMHAWK_DOMAIN;
+
       // No instance address: nothing can send, and the preview says so first.
       await prisma.instanceSettings.delete({ where: { id: 'default' } });
       expect((await preview({ ...draft, unsubscribeUrlTemplate: 'https://acme.example/u' })).json().complianceMissing).toEqual([
@@ -382,6 +418,8 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
       ]);
       expect((await preview(draft)).json().complianceMissing).toEqual(['address', 'unsubscribe']);
     } finally {
+      if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
+      else process.env.WARMHAWK_DOMAIN = savedDomain;
       await prisma.instanceSettings.deleteMany({ where: { id: 'default' } });
       if (before) await prisma.instanceSettings.create({ data: before });
     }
