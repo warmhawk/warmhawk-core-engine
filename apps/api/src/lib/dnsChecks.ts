@@ -47,44 +47,106 @@ export async function checkSpf(domainName: string): Promise<CheckStatus> {
   return lookup.records.some((r) => r.toLowerCase().startsWith('v=spf1')) ? 'PASS' : 'FAIL';
 }
 
-// Providers don't agree on a selector name, so when the caller doesn't pin one down we probe
-// every selector convention we're likely to see in the wild (Hostinger's three fixed selectors,
-// Google, Microsoft 365, etc.) and pass on the first hit.
-const DKIM_SELECTOR_CANDIDATES = [
-  'default',
-  'google',
-  'selector1',
+// Providers don't agree on a selector name, so when the caller doesn't pin one down we probe the
+// default selector of every provider we're likely to see in the wild and pass on the first usable
+// key. Kept identical to `DKIM_SELECTORS` in warmhawk-probe, so WarmHawk's public domain check and
+// this dashboard never disagree about the same domain.
+export const DKIM_SELECTOR_CANDIDATES = [
+  'default', // cPanel, Namecheap Private Email, many shared hosts
+  'google', // Google Workspace
+  'selector1', // Microsoft 365
   'selector2',
-  'hostingermail-a',
+  'cf2024-1', // Cloudflare Email Routing
+  'k1', // Mailchimp / Mailgun
+  'k2',
+  'k3',
+  's1', // SendGrid
+  's2',
+  'mail', // Brevo (older setups), generic
+  'dkim',
+  'zmail', // Zoho
+  'zoho',
+  'hostingermail-a', // Hostinger
   'hostingermail-b',
   'hostingermail-c',
-  'k1',
-  'zmail',
-];
+  'mx', // Mailgun
+  'smtp',
+  'pic',
+  'mte1', // Mandrill
+  'fm1', // Fastmail
+  'fm2',
+  'fm3',
+  'protonmail', // Proton Mail
+  'protonmail2',
+  'protonmail3',
+  'brevo1', // Brevo
+  'brevo2',
+  'resend', // Resend
+  'hs1', // HubSpot
+  'hs2',
+  'sig1', // iCloud custom domains
+] as const;
+
+/** A selector is one or more DNS labels: letters, digits, hyphens, dots between labels. */
+const SELECTOR_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+
+/** Normalizes a customer-supplied selector; `null` for blank, `undefined` for not-a-selector. */
+export function normalizeDkimSelector(input: unknown): string | null | undefined {
+  if (input === null || input === undefined) return null;
+  if (typeof input !== 'string') return undefined;
+  const value = input.trim().toLowerCase().replace(/\._domainkey(\..*)?$/, '');
+  if (!value) return null;
+  return value.length <= 253 && SELECTOR_PATTERN.test(value) ? value : undefined;
+}
+
+type DkimRecordKind = 'usable' | 'unusable';
+
+/**
+ * Classifies one TXT record found at a `_domainkey` name. `usable` can verify a signature;
+ * `unusable` is a DKIM record with no key in it — RFC 6376 section 3.6.1: an empty `p=` means the
+ * key has been REVOKED; `null` is not a DKIM key record at all (an unrelated TXT sharing the name,
+ * or a wildcard). Counting any record as a key was a false pass, and with dozens of guessed names
+ * the odds of hitting one go up — example.com, for one, publishes `"v=DKIM1; p="` at `default`.
+ * Ported from warmhawk-probe, which caught this live.
+ */
+function classifyDkimRecord(record: string): DkimRecordKind | null {
+  const value = record.trim();
+  const lower = value.toLowerCase();
+  if (lower.startsWith('v=') && !lower.startsWith('v=dkim1')) return null;
+
+  const tag = /(?:^|;)\s*p\s*=\s*([^;]*)/i.exec(value);
+  if (!tag) return lower.startsWith('v=dkim1') ? 'unusable' : null;
+  return tag[1].replace(/\s+/g, '') ? 'usable' : 'unusable';
+}
+
+function hasUsableKey(lookup: TxtLookup): boolean {
+  return (
+    lookup.outcome === 'records' && lookup.records.some((r) => classifyDkimRecord(r) === 'usable')
+  );
+}
 
 /**
  * DKIM selectors cannot be enumerated from DNS — there is no record that lists them. So a miss
- * across our nine guesses means "we didn't find one", not "this domain has no DKIM", and it is
- * reported as PENDING. An explicit selector is different: the caller told us the name, so a miss
- * there IS a real finding and stays FAIL.
+ * across our guesses means "we didn't find one", not "this domain has no DKIM", and it is
+ * reported as PENDING. An explicit selector is different: the customer told us the name, so a
+ * miss there (nothing published, or a revoked key) IS a real finding and is FAIL.
  */
-export async function checkDkim(domainName: string, selector?: string): Promise<CheckStatus> {
+export async function checkDkim(domainName: string, selector?: string | null): Promise<CheckStatus> {
   if (selector) {
     const lookup = await resolveTxtFlat(`${selector}._domainkey.${domainName}`);
     if (lookup.outcome === 'error') return 'PENDING';
-    return lookup.outcome === 'records' && lookup.records.length > 0 ? 'PASS' : 'FAIL';
+    return hasUsableKey(lookup) ? 'PASS' : 'FAIL';
   }
 
-  // Nine candidates in parallel — the sequential form cost up to nine serial round trips per
-  // domain, which is the whole latency budget of a refresh spent on guesses.
+  // All candidates in parallel — the sequential form cost one serial round trip per guess, which
+  // is the whole latency budget of a refresh spent on guesses.
   const lookups = await Promise.all(
     DKIM_SELECTOR_CANDIDATES.map((candidate) =>
       resolveTxtFlat(`${candidate}._domainkey.${domainName}`),
     ),
   );
 
-  if (lookups.some((l) => l.outcome === 'records' && l.records.length > 0)) return 'PASS';
-  return 'PENDING';
+  return lookups.some(hasUsableKey) ? 'PASS' : 'PENDING';
 }
 
 export async function checkDmarc(domainName: string): Promise<CheckStatus> {
@@ -117,9 +179,60 @@ export async function checkDmarc(domainName: string): Promise<CheckStatus> {
 export interface DnsblSource {
   name: string;
   zone: string;
+  /** A name the zone always lists, per its operator's docs — proves the answers are real. */
+  canary: string;
 }
 
-export const DNSBL_SOURCES: DnsblSource[] = [{ name: 'spamhausDbl', zone: 'dbl.spamhaus.org' }];
+export const DNSBL_SOURCES: DnsblSource[] = [
+  { name: 'spamhausDbl', zone: 'dbl.spamhaus.org', canary: 'dbltest.com' },
+];
+
+/**
+ * Where DNSBL queries go. Spamhaus refuses queries arriving through public or shared resolvers:
+ * Cloudflare 1.1.1.1 and Hetzner's resolvers answer `127.255.255.254` (so every domain read
+ * PENDING forever), and Google 8.8.8.8 answers NXDOMAIN even for the zone's own test listing — a
+ * green PASS for a domain that is in fact listed. Most installs sit behind exactly those resolvers.
+ *
+ * So the zone's own authoritative nameservers are asked directly, from this server's IP, which
+ * Spamhaus answers for low-volume use. The NS set is looked up through the system resolver (NS
+ * lookups are not refused) and cached for an hour. If that lookup fails, the system resolver is
+ * used and the canary below decides whether its answers mean anything.
+ */
+const AUTHORITATIVE_CACHE_MS = 60 * 60 * 1000;
+const authoritativeResolvers = new Map<string, { at: number; resolver: Promise<DnsblResolver> }>();
+
+interface DnsblResolver {
+  resolve4(hostname: string): Promise<string[]>;
+}
+
+async function buildAuthoritativeResolver(zone: string): Promise<DnsblResolver> {
+  try {
+    const nameservers = await dns.promises.resolveNs(zone);
+    const addresses = (
+      await Promise.all(nameservers.map((ns) => dns.promises.resolve4(ns).catch(() => [])))
+    ).flat();
+    const unique = [...new Set(addresses)];
+    if (unique.length === 0) return dns.promises;
+    const resolver = new dns.promises.Resolver({ timeout: 3000, tries: 2 });
+    resolver.setServers(unique);
+    return resolver;
+  } catch {
+    return dns.promises;
+  }
+}
+
+function resolverFor(zone: string): Promise<DnsblResolver> {
+  const cached = authoritativeResolvers.get(zone);
+  if (cached && Date.now() - cached.at < AUTHORITATIVE_CACHE_MS) return cached.resolver;
+  const resolver = buildAuthoritativeResolver(zone);
+  authoritativeResolvers.set(zone, { at: Date.now(), resolver });
+  return resolver;
+}
+
+/** Test seam: forget cached nameserver sets. */
+export function resetDnsblResolverCache(): void {
+  authoritativeResolvers.clear();
+}
 
 /**
  * Decodes a DNSBL answer. The `127.255.255.x` block is NOT a listing — it is the zone telling us
@@ -135,14 +248,33 @@ function classifyDnsblAnswer(addresses: string[]): CheckStatus {
   return 'PENDING'; // outside 127/8 — not a verdict this convention can express
 }
 
-async function queryDnsbl(query: string): Promise<CheckStatus> {
+async function queryDnsbl(resolver: DnsblResolver, query: string): Promise<CheckStatus> {
   try {
-    return classifyDnsblAnswer(await dns.promises.resolve4(query));
+    return classifyDnsblAnswer(await resolver.resolve4(query));
   } catch (err) {
     // NXDOMAIN is the not-listed answer. Anything else — SERVFAIL, timeout, refusal — means the
     // lookup did not happen, which is not the same as a clean result.
     return isAbsent(err) ? 'PASS' : 'PENDING';
   }
+}
+
+/**
+ * One source: the canary and the domain, asked of the same resolver. NXDOMAIN only means "not
+ * listed" if the same resolver, asked about a name the zone always lists, says FAIL — otherwise it
+ * is a resolver that hides listings, and its clean answer is PENDING, not PASS.
+ */
+async function checkSource(source: DnsblSource, domainName: string): Promise<CheckStatus> {
+  const resolver = await resolverFor(source.zone);
+  const [canary, result] = await Promise.all([
+    queryDnsbl(resolver, `${source.canary}.${source.zone}`),
+    queryDnsbl(resolver, `${domainName}.${source.zone}`),
+  ]);
+  if (canary !== 'FAIL') {
+    // Drop the cached nameserver set so the next run looks them up again.
+    authoritativeResolvers.delete(source.zone);
+    return 'PENDING';
+  }
+  return result;
 }
 
 export type BlocklistResults = Record<string, CheckStatus>;
@@ -158,7 +290,7 @@ export type BlocklistResults = Record<string, CheckStatus>;
  */
 export async function checkBlocklists(domainName: string): Promise<BlocklistResults> {
   const settled = await Promise.allSettled(
-    DNSBL_SOURCES.map((source) => queryDnsbl(`${domainName}.${source.zone}`)),
+    DNSBL_SOURCES.map((source) => checkSource(source, domainName)),
   );
 
   const results: BlocklistResults = {};
