@@ -1,12 +1,14 @@
 /**
- * BullMQ job processor — re-checks mailbox eligibility at dispatch time (a mailbox can be
- * paused/capped between enqueue and the job actually firing, given the jittered delay), then hands
+ * BullMQ job processor — re-checks eligibility at dispatch time (a mailbox can be paused, capped or
+ * lose its domain's mailing address, a campaign can be paused or change its senders, and a lead can
+ * reply, between enqueue and the job actually firing, given the jittered delay), then hands
  * off the real send to the n8n dispatch workflow over the internal Docker network — this process
  * never talks to an SMTP server directly.
  */
 import type { Job } from 'bullmq';
 import { prisma } from '@warmhawk/db';
 import { campaignCapToday } from './campaignCap';
+import { hasMailingAddress } from './enqueuer';
 
 export interface DispatchJobData {
   leadId: string;
@@ -17,26 +19,71 @@ function n8nBaseUrl(): string {
   return process.env.N8N_BASE_URL || 'http://n8n:5678';
 }
 
+/** How long a first email waits after a dispatch that failed before `sendMail` could record it
+ *  (a compliance refusal, a missing credential). Before this it went straight back to UNTOUCHED and
+ *  was re-picked — and re-written by AI — on the very next tick, forever. */
+export const DISPATCH_FAILURE_RETRY_MS = 30 * 60 * 1000;
+/** The same, for a follow-up: it stays due and tries again after this. */
+export const FOLLOW_UP_FAILURE_RETRY_MS = 60 * 60 * 1000;
+
+/** Takes a lead back off the queue without sending. A first email goes back to UNTOUCHED for the
+ *  enqueuer to re-assign; a follow-up keeps its due time and loses only its queued job. */
+async function releaseLead(leadId: string, followUp: boolean): Promise<void> {
+  if (followUp) {
+    await prisma.lead.updateMany({
+      where: { id: leadId, queuedJobId: { not: null } },
+      data: { queuedJobId: null, queuedSlotAt: null },
+    });
+    return;
+  }
+  await prisma.lead.updateMany({
+    where: { id: leadId, status: 'QUEUED' },
+    data: { status: 'UNTOUCHED', queuedJobId: null, queuedSlotAt: null },
+  });
+}
+
 export async function processDispatchJob(data: DispatchJobData): Promise<void> {
   const { leadId, mailboxId } = data;
 
   const [mailbox, lead] = await Promise.all([
-    prisma.mailbox.findUnique({ where: { id: mailboxId } }),
-    prisma.lead.findUnique({ where: { id: leadId } }),
+    prisma.mailbox.findUnique({
+      where: { id: mailboxId },
+      include: { domain: { select: { mailingAddress: true } } },
+    }),
+    prisma.lead.findUnique({
+      where: { id: leadId },
+      include: {
+        campaign: {
+          select: {
+            status: true,
+            pausedForBounceRate: true,
+            mailboxes: { where: { mailboxId }, select: { mailboxId: true } },
+          },
+        },
+      },
+    }),
   ]);
-  const stillEligible =
-    mailbox &&
-    lead &&
-    mailbox.status === 'ACTIVE' &&
-    mailbox.sentToday < campaignCapToday(mailbox.dailyCap, mailbox.warmupGraduatedAt, new Date());
+  if (!lead) return;
+  const followUp = lead.stepsSent > 0;
 
-  if (!stillEligible) {
-    // Revert the lead to UNTOUCHED so the enqueuer re-picks it up against a different mailbox on
-    // its next tick, rather than silently dropping it.
-    await prisma.lead.updateMany({
-      where: { id: leadId, status: 'QUEUED' },
-      data: { status: 'UNTOUCHED', queuedJobId: null, queuedSlotAt: null },
-    });
+  const mailboxCanSend =
+    mailbox &&
+    mailbox.status === 'ACTIVE' &&
+    hasMailingAddress(mailbox) &&
+    mailbox.sentToday < campaignCapToday(mailbox.dailyCap, mailbox.warmupGraduatedAt, new Date());
+  const campaignCanSend = lead.campaign.status === 'ACTIVE' && !lead.campaign.pausedForBounceRate;
+  // A first email only from a mailbox the campaign (still) sends from; a follow-up only from the
+  // lead's own mailbox, and only while the lead is still waiting on one.
+  const leadFits = followUp
+    ? lead.mailboxId === mailboxId &&
+      (lead.status === 'CONTACTED' || lead.status === 'OPENED') &&
+      lead.nextStepAt !== null
+    : lead.status === 'QUEUED' && lead.campaign.mailboxes.length > 0;
+
+  if (!mailboxCanSend || !campaignCanSend || !leadFits) {
+    // Put the lead back for the enqueuer to re-pick — against a different mailbox for a first
+    // email — rather than silently dropping it.
+    await releaseLead(leadId, followUp);
     return;
   }
 
@@ -95,11 +142,26 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
   const dispatchFailed = !response.ok || responseBody?.status !== 'sent';
 
   if (dispatchFailed) {
+    // `queuedJobId` still set means `sendMail` never recorded the failure itself. Wait before
+    // the next try rather than re-picking it on the next tick.
     const currentLead = await prisma.lead.findUnique({ where: { id: leadId } });
-    if (currentLead && currentLead.status === 'QUEUED' && currentLead.queuedJobId) {
+    if (currentLead?.queuedJobId && followUp) {
+      await prisma.lead.updateMany({
+        where: { id: leadId, queuedJobId: currentLead.queuedJobId, nextStepAt: { not: null } },
+        data: {
+          queuedJobId: null,
+          queuedSlotAt: null,
+          nextStepAt: new Date(Date.now() + FOLLOW_UP_FAILURE_RETRY_MS),
+        },
+      });
+    } else if (currentLead?.queuedJobId && currentLead.status === 'QUEUED') {
       await prisma.lead.updateMany({
         where: { id: leadId, status: 'QUEUED' },
-        data: { status: 'UNTOUCHED', queuedJobId: null, queuedSlotAt: null },
+        data: {
+          queuedJobId: null,
+          queuedSlotAt: null,
+          nextRetryAt: new Date(Date.now() + DISPATCH_FAILURE_RETRY_MS),
+        },
       });
     }
 

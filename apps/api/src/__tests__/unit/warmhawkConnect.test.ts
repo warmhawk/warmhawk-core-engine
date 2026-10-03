@@ -91,8 +91,8 @@ describe('WarmHawk Connect (install side)', () => {
     } as never);
   }
 
-  function withMailbox(email = 'sales@acme.example') {
-    return vi.spyOn(prisma.mailbox, 'findUnique').mockResolvedValue({ email } as never);
+  function withMailbox(email = 'sales@acme.example', senderName: string | null = null) {
+    return vi.spyOn(prisma.mailbox, 'findUnique').mockResolvedValue({ email, senderName } as never);
   }
 
   function errorParams(location: string | undefined) {
@@ -149,16 +149,13 @@ describe('WarmHawk Connect (install side)', () => {
     );
 
     it('never returns the license from GET /v1/instance-settings', async () => {
-      const findUnique = vi
-        .spyOn(prisma.instanceSettings, 'findUnique')
-        .mockResolvedValue({ id: 'default', physicalMailingAddress: '1 Main St' } as never);
-      await app.inject({
+      const response = await app.inject({
         method: 'GET',
         url: '/v1/instance-settings',
         headers: { authorization: 'Bearer operator-token' },
       });
-      const { select } = findUnique.mock.calls[0]![0] as { select: Record<string, boolean> };
-      expect(select).toEqual({ id: true, physicalMailingAddress: true, updatedAt: true });
+      expect(response.statusCode).toBe(200);
+      expect(Object.keys(response.json() as object).sort()).toEqual(['builtInUnsubscribe', 'id']);
     });
   });
 
@@ -391,6 +388,72 @@ describe('WarmHawk Connect (install side)', () => {
         authUsername: 'Sales@Acme.example',
       });
       expect(decrypt(data.oauthRefreshTokenEncrypted as string, key())).toBe('1//refresh');
+      // No Gmail send-as route stubbed, so the name lookup failed — the connect still went through.
+      expect(data).not.toHaveProperty('senderName');
+    });
+
+    const SEND_AS = 'https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs/';
+    const matchingClaims = {
+      email: 'sales@acme.example',
+      email_verified: true,
+      aud: GOOGLE_CLIENT_ID,
+    };
+
+    it("saves Gmail's send-as display name as the sender name", async () => {
+      withStoredLicense();
+      withMailbox('sales@acme.example');
+      const update = vi.spyOn(prisma.mailbox, 'update').mockResolvedValue({} as never);
+      const calls = stubFetch({
+        [`${RELAY}/api/connect/google/token`]: relayTokenRoute(matchingClaims),
+        [SEND_AS]: () =>
+          jsonResponse({ sendAsEmail: 'sales@acme.example', displayName: ' Sam  Patel ' }),
+      });
+      await app.inject({
+        method: 'GET',
+        url: `/v1/oauth/google/connect-callback?code=c&state=${connectState()}`,
+      });
+
+      const sendAs = calls.find((c) => c.url.startsWith(SEND_AS))!;
+      expect(sendAs.url).toBe(`${SEND_AS}sales%40acme.example`);
+      expect(new Headers(sendAs.init!.headers).get('authorization')).toBe('Bearer ya29.access');
+      const { data } = update.mock.calls[0]![0] as { data: Record<string, unknown> };
+      expect(data.senderName).toBe('Sam Patel');
+    });
+
+    it('never overwrites a sender name the owner already set', async () => {
+      withStoredLicense();
+      withMailbox('sales@acme.example', 'Sam from Acme');
+      const update = vi.spyOn(prisma.mailbox, 'update').mockResolvedValue({} as never);
+      stubFetch({
+        [`${RELAY}/api/connect/google/token`]: relayTokenRoute(matchingClaims),
+        [SEND_AS]: () => jsonResponse({ displayName: 'Samuel Patel' }),
+      });
+      await app.inject({
+        method: 'GET',
+        url: `/v1/oauth/google/connect-callback?code=c&state=${connectState()}`,
+      });
+      const { data } = update.mock.calls[0]![0] as { data: Record<string, unknown> };
+      expect(data).not.toHaveProperty('senderName');
+    });
+
+    it('leaves the name unset when Gmail has none, or only the address', async () => {
+      for (const displayName of ['', 'sales@acme.example']) {
+        withStoredLicense();
+        withMailbox('sales@acme.example');
+        const update = vi.spyOn(prisma.mailbox, 'update').mockResolvedValue({} as never);
+        stubFetch({
+          [`${RELAY}/api/connect/google/token`]: relayTokenRoute(matchingClaims),
+          [SEND_AS]: () => jsonResponse({ displayName }),
+        });
+        const response = await app.inject({
+          method: 'GET',
+          url: `/v1/oauth/google/connect-callback?code=c&state=${connectState()}`,
+        });
+        expect(errorParams(response.headers.location).connected).toBe('mb-1');
+        const { data } = update.mock.calls[0]![0] as { data: Record<string, unknown> };
+        expect(data).not.toHaveProperty('senderName');
+        vi.restoreAllMocks();
+      }
     });
 
     it('rejects a different Google account, revokes its grant and removes the pending row', async () => {
@@ -493,6 +556,7 @@ describe('WarmHawk Connect (install side)', () => {
             mail: 'santhi@acme.example',
             userPrincipalName: 'santhi@acme.onmicrosoft.com',
             proxyAddresses: ['SMTP:santhi@acme.example', 'smtp:Sales@acme.example', 'X500:/o=x'],
+            displayName: 'Santhi T.',
           }),
       });
       const response = await app.inject({
@@ -515,6 +579,9 @@ describe('WarmHawk Connect (install side)', () => {
       });
       expect(decrypt(data.oauthRefreshTokenEncrypted as string, key())).toBe('ms-refresh');
       expect(data).toMatchObject({ connectionError: null, connectionErrorAt: null });
+      expect(data.senderName).toBe('Santhi T.');
+      const me = calls.find((c) => c.url.startsWith('https://graph.microsoft.com/v1.0/me?'))!;
+      expect(me.url).toContain('displayName');
     });
 
     it('refuses an account with no Exchange Online mailbox instead of showing it connected', async () => {

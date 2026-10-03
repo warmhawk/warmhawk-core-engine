@@ -43,7 +43,7 @@ describeIntegration('instance-settings routes (integration, real Postgres)', () 
     await prisma.$disconnect();
   });
 
-  it('returns a synthetic default (null address) when no row has been configured yet', async () => {
+  it('returns the install defaults, with no mailing address (that is per domain now)', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/v1/instance-settings',
@@ -52,7 +52,8 @@ describeIntegration('instance-settings routes (integration, real Postgres)', () 
 
     expect(response.statusCode).toBe(200);
     const json = response.json();
-    expect(json).toMatchObject({ id: 'default', physicalMailingAddress: null });
+    expect(json).toMatchObject({ id: 'default' });
+    expect(json).not.toHaveProperty('physicalMailingAddress');
   });
 
   it('says whether campaigns get the built-in unsubscribe page, which needs a public domain', async () => {
@@ -74,7 +75,7 @@ describeIntegration('instance-settings routes (integration, real Postgres)', () 
     }
   });
 
-  it('sets the physical mailing address via PUT and rejects an empty value', async () => {
+  it('answers 410 to the old install-wide address PUT, pointing at the per-domain field', async () => {
     const putResponse = await app.inject({
       method: 'PUT',
       url: '/v1/instance-settings',
@@ -82,23 +83,8 @@ describeIntegration('instance-settings routes (integration, real Postgres)', () 
       payload: { physicalMailingAddress: '123 Main St, Springfield, USA' },
     });
 
-    expect(putResponse.statusCode).toBe(200);
-    expect(putResponse.json().physicalMailingAddress).toBe('123 Main St, Springfield, USA');
-
-    const getResponse = await app.inject({
-      method: 'GET',
-      url: '/v1/instance-settings',
-      headers: { authorization: `Bearer ${authToken}` },
-    });
-    expect(getResponse.json().physicalMailingAddress).toBe('123 Main St, Springfield, USA');
-
-    const rejected = await app.inject({
-      method: 'PUT',
-      url: '/v1/instance-settings',
-      headers: { authorization: `Bearer ${authToken}` },
-      payload: { physicalMailingAddress: '   ' },
-    });
-    expect(rejected.statusCode).toBe(422);
+    expect(putResponse.statusCode).toBe(410);
+    expect(putResponse.json().error).toMatch(/per domain/);
   });
 
   it('requires authentication', async () => {

@@ -191,6 +191,25 @@ model Domain {
   dkimStatus  DnsRecordStatus @default(PENDING)
   dmarcStatus DnsRecordStatus @default(PENDING)
 
+  /// The DKIM selector this domain signs with, when the customer has told us. Providers like
+  /// Amazon SES, Postmark and ZeptoMail mint a per-customer selector no guess list can find; with
+  /// one saved, every check looks there and a miss is FAIL rather than PENDING.
+  dkimSelector String?
+
+  /// Who this domain sends for — "Brightlane", "Own brand". Display only, so an agency can tell
+  /// client domains apart on the Domains page and in a campaign's Send from list.
+  label String?
+
+  /// CAN-SPAM postal address printed in the footer of every campaign email sent from this domain.
+  /// Each domain keeps its own, so an agency's client domains never sign with someone else's
+  /// address. Optional to save; a campaign sending from a domain without one can't launch, and the
+  /// worker never sends from it (see `lib/sendingReadiness.ts`).
+  mailingAddress String? @db.Text
+
+  /// The same address as the dashboard's form fields (businessName, street, suite, city, region,
+  /// postalCode, country), kept so the form re-opens filled in. `mailingAddress` is what prints.
+  mailingAddressParts Json?
+
   /// New, V11 — continuous DNSBL/blocklist monitoring. Per-list PASS/FAIL/PENDING, e.g.
   /// `{ "spamhausZen": "PASS", "spamhausDbl": "PASS", "barracuda": "FAIL", "sorbs": "PASS" }`.
   blocklistStatus      Json?
@@ -310,6 +329,11 @@ model Mailbox {
   executionLogs ExecutionLog[]
   replies       Reply[]
 
+  /// Campaigns that may send first emails from this mailbox.
+  campaignLinks CampaignMailbox[]
+  /// Leads pinned to this mailbox by their first send — their follow-ups go from here.
+  pinnedLeads   Lead[]
+
   seedPlacements         SeedPlacementResult[]
   warmupMessagesSent     WarmupMessage[] @relation("WarmupSender")
   warmupMessagesReceived WarmupMessage[] @relation("WarmupRecipient")
@@ -345,7 +369,7 @@ model Campaign {
   aiWritesSubject Boolean @default(false)
 
   /// CAN-SPAM auto-injection — the sending pipeline refuses to send a campaign missing either
-  /// this or the instance-wide physical mailing address (see InstanceSettings).
+  /// this or the sending domain's mailing address (`Domain.mailingAddress`).
   unsubscribeUrlTemplate String?
 
   /// Reputation protection — bounce/complaint circuit breaker threshold (default 5%, Guardrails).
@@ -358,6 +382,13 @@ model Campaign {
   leads         Lead[]
   executionLogs ExecutionLog[]
   replies       Reply[]
+
+  /// The mailboxes this campaign sends first emails from. Only these, and only while ACTIVE with
+  /// an address on their domain — never every mailbox on the install.
+  mailboxes CampaignMailbox[]
+
+  /// Follow-ups after the first email (`template`/`subject`), position 1..3.
+  steps CampaignStep[]
 
   /// Seed-Inbox Placement Test (V12) — placement-sampling results recorded against this
   /// campaign's real sends. See `SeedPlacementResult`.
@@ -386,6 +417,22 @@ model Lead {
   queuedJobId  String?
   queuedSlotAt DateTime?
 
+  /// The mailbox that sent this lead's first email. Every follow-up goes from it, so the lead
+  /// sees one person in one thread. Set on the first successful send.
+  mailboxId String?
+  mailbox   Mailbox? @relation(fields: [mailboxId], references: [id], onDelete: SetNull)
+
+  /// Emails sent to this lead so far: 0 before the first, 1 after it, +1 per follow-up.
+  stepsSent  Int       @default(0)
+  lastStepAt DateTime?
+  /// When the next follow-up is due; null when none is (no more steps, or the lead stopped).
+  nextStepAt DateTime?
+
+  /// The first email's subject, so follow-ups go out as "Re: <it>" and thread in the lead's
+  /// inbox. The one piece of sent copy kept past the send — threading needs the exact text — and
+  /// nulled by GDPR erasure with the rest of the lead's data.
+  threadSubject String? @db.Text
+
   /// GDPR right-to-erasure (Guardrails) — set when `DELETE /v1/leads/erase` scrubs this row's PII
   /// (email/firstName/lastName/company/customFields). The row itself is kept, not hard-deleted, so
   /// campaign/send aggregate counts stay accurate ("preserves anonymized counts" per spec) — only
@@ -401,7 +448,42 @@ model Lead {
   @@unique([campaignId, email])
   @@index([status])
   @@index([campaignId])
+  @@index([nextStepAt])
+  @@index([mailboxId])
   @@map("leads")
+}
+
+/// Which mailboxes a campaign may send first emails from. Unticking one stops new first emails;
+/// leads already pinned to it (`Lead.mailboxId`) still get their follow-ups from it.
+model CampaignMailbox {
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  mailboxId  String
+  mailbox    Mailbox  @relation(fields: [mailboxId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@id([campaignId, mailboxId])
+  @@index([mailboxId])
+  @@map("campaign_mailboxes")
+}
+
+/// One follow-up in a campaign's sequence. Sent `waitDays` after the email before it, from the
+/// lead's pinned mailbox, as a reply in the same thread; never to a lead who replied, bounced or
+/// unsubscribed. `body` always goes out as written unless `aiRewrite` is on and the campaign has an
+/// AI provider — and even then it is what sends when the AI fails.
+model CampaignStep {
+  id         String   @id @default(cuid())
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  position   Int
+  waitDays   Int
+  body       String   @db.Text
+  aiRewrite  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([campaignId, position])
+  @@map("campaign_steps")
 }
 
 /// Hard floor for suppression enforcement (Guardrails — "no code path anywhere may re-add or
@@ -541,8 +623,9 @@ model Reply {
 // billing/marketing site (issuance) and the licensed dashboard (verification + its own separate
 // License record, in its own separate Postgres instance).
 
-/// Singleton instance-wide settings — CAN-SPAM auto-injection reads `physicalMailingAddress` and
-/// refuses to send a campaign if it's unset (Guardrails). Always exactly one row, id = "default".
+/// Singleton instance-wide settings. Always exactly one row, id = "default". `physicalMailingAddress`
+/// is no longer read: the address moved to each domain (`Domain.mailingAddress`, 10-03-26) and the
+/// column stays only until a later release drops it.
 model InstanceSettings {
   id                     String   @id @default("default")
   physicalMailingAddress String?

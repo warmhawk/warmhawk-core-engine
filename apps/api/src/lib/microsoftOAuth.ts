@@ -334,15 +334,22 @@ export async function refreshMicrosoftConnectToken(
   };
 }
 
-/** Every address the signed-in Microsoft account can send as, lowercased: `mail`,
- *  `userPrincipalName` and each `smtp:` proxy address. On 09-26 the UPN and the primary SMTP
- *  address differed on a real tenant, so checking only one of them rejects real owners. */
-export async function fetchMicrosoftSignedInAddresses(
+export interface MicrosoftSignedInProfile {
+  /** Every address the account can send as, lowercased. */
+  addresses: string[];
+  /** The account's display name as Graph reports it, untidied; null when Graph has none. */
+  displayName: string | null;
+}
+
+/** The signed-in Microsoft account's addresses — `mail`, `userPrincipalName` and each `smtp:`
+ *  proxy address — and its display name. On 09-26 the UPN and the primary SMTP address differed on
+ *  a real tenant, so checking only one of them rejects real owners. */
+export async function fetchMicrosoftSignedInProfile(
   graphAccessToken: string,
   fetchImpl: FetchLike = fetch,
-): Promise<string[]> {
+): Promise<MicrosoftSignedInProfile> {
   const response = await fetchImpl(
-    'https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,proxyAddresses',
+    'https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName,proxyAddresses,displayName',
     { headers: { authorization: `Bearer ${graphAccessToken}` } },
   );
   if (!response.ok) throw new Error(`Graph /me responded with ${response.status}`);
@@ -350,6 +357,7 @@ export async function fetchMicrosoftSignedInAddresses(
     mail?: string | null;
     userPrincipalName?: string | null;
     proxyAddresses?: string[] | null;
+    displayName?: string | null;
   };
   const addresses = [
     me.mail,
@@ -358,7 +366,12 @@ export async function fetchMicrosoftSignedInAddresses(
       .filter((entry) => /^smtp:/i.test(entry))
       .map((entry) => entry.slice('smtp:'.length)),
   ];
-  return [...new Set(addresses.filter((a): a is string => Boolean(a)).map((a) => a.toLowerCase()))];
+  return {
+    addresses: [
+      ...new Set(addresses.filter((a): a is string => Boolean(a)).map((a) => a.toLowerCase())),
+    ],
+    displayName: typeof me.displayName === 'string' ? me.displayName : null,
+  };
 }
 
 /** Whether the signed-in Microsoft 365 user has an Exchange Online mailbox. A user with no
