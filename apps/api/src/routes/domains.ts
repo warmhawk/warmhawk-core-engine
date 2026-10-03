@@ -11,12 +11,22 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
-import { checkSpf, checkDkim, checkDmarc, checkBlocklists } from '../lib/dnsChecks';
+import { normalizeDkimSelector } from '../lib/dnsChecks';
+import { runDomainCheck } from '../lib/domainCheck';
 
 interface CreateDomainBody {
   domainName: string;
   redirectUrl?: string;
+  dkimSelector?: string | null;
 }
+
+interface UpdateDomainBody {
+  redirectUrl?: string;
+  dkimSelector?: string | null;
+}
+
+const INVALID_SELECTOR_ERROR =
+  'dkimSelector must be a DNS label such as "s1" or "abc123" — the part before ._domainkey';
 
 interface CheckDnsQuery {
   selector?: string;
@@ -45,28 +55,39 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
     if (!domainName?.trim()) {
       return reply.code(422).send({ error: 'domainName is required' });
     }
+    const dkimSelector = normalizeDkimSelector(request.body.dkimSelector);
+    if (dkimSelector === undefined) {
+      return reply.code(422).send({ error: INVALID_SELECTOR_ERROR });
+    }
     const domain = await prisma.domain.create({
       data: {
         domainName: domainName.trim().toLowerCase(),
         redirectUrl: redirectUrl?.trim() || null,
+        dkimSelector,
       },
     });
     return reply.code(201).send(domain);
   });
 
-  app.patch<{ Params: { id: string }; Body: { redirectUrl?: string } }>(
-    '/:id',
-    async (request, reply) => {
-      const domain = await prisma.domain
-        .update({
-          where: { id: request.params.id },
-          data: { redirectUrl: request.body.redirectUrl },
-        })
-        .catch(() => null);
-      if (!domain) return reply.code(404).send({ error: 'Domain not found' });
-      return domain;
-    },
-  );
+  /** Only the fields present in the body change; `dkimSelector: null` or `""` clears it. */
+  app.patch<{ Params: { id: string }; Body: UpdateDomainBody }>('/:id', async (request, reply) => {
+    const body = request.body ?? {};
+    const data: { redirectUrl?: string; dkimSelector?: string | null } = {
+      redirectUrl: body.redirectUrl,
+    };
+    if ('dkimSelector' in body) {
+      const dkimSelector = normalizeDkimSelector(body.dkimSelector);
+      if (dkimSelector === undefined) {
+        return reply.code(422).send({ error: INVALID_SELECTOR_ERROR });
+      }
+      data.dkimSelector = dkimSelector;
+    }
+    const domain = await prisma.domain
+      .update({ where: { id: request.params.id }, data })
+      .catch(() => null);
+    if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+    return domain;
+  });
 
   /**
    * Domain deletion — was deliberately absent (see the dashboard's domain-row.tsx comment history)
@@ -97,7 +118,8 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
    *  by the domain NAME (not the internal id, unlike this file's other routes) since that's the
    *  shape the spec names and the shape a customer thinks in. Replaces what were previously two
    *  separate id-keyed routes (`/:id/check-dns`, `/:id/check-blocklists`) — collapsed into one
-   *  call since a customer re-checking a domain wants both signals together, not two round trips. */
+   *  call since a customer re-checking a domain wants both signals together, not two round trips.
+   *  DKIM looks at `?selector=` if given, else the domain's saved `dkimSelector`, else guesses. */
   app.post<{ Params: { domain: string }; Querystring: CheckDnsQuery }>(
     '/:domain/check',
     async (request, reply) => {
@@ -105,40 +127,9 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       const domain = await prisma.domain.findUnique({ where: { domainName } });
       if (!domain) return reply.code(404).send({ error: 'Domain not found' });
 
-      const selector = request.query.selector?.trim() || undefined;
-      const [spfStatus, dkimStatus, dmarcStatus, blocklistStatus] = await Promise.all([
-        checkSpf(domain.domainName),
-        checkDkim(domain.domainName, selector),
-        checkDmarc(domain.domainName),
-        checkBlocklists(domain.domainName),
-      ]);
-
-      // History row captures the PRE-update snapshot (`domain.*`, read above before either check
-      // ran) — the point is a diff against what this check is about to overwrite, not a copy of
-      // the new result. Written in the same transaction as the update so a diff-history reader
-      // can never observe the new domain values without the row explaining what they replaced.
-      const [, updated] = await prisma.$transaction([
-        prisma.domainCheckHistory.create({
-          data: {
-            domainId: domain.id,
-            spfStatus: domain.spfStatus,
-            dkimStatus: domain.dkimStatus,
-            dmarcStatus: domain.dmarcStatus,
-            blocklistStatus: domain.blocklistStatus ?? undefined,
-          },
-        }),
-        prisma.domain.update({
-          where: { id: domain.id },
-          data: {
-            spfStatus,
-            dkimStatus,
-            dmarcStatus,
-            blocklistStatus,
-            lastBlocklistCheckAt: new Date(),
-          },
-        }),
-      ]);
-      return updated;
+      const selector = normalizeDkimSelector(request.query.selector);
+      if (selector === undefined) return reply.code(422).send({ error: INVALID_SELECTOR_ERROR });
+      return runDomainCheck(domain, selector ?? undefined);
     },
   );
 
