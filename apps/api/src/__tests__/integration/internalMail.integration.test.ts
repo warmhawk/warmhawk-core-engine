@@ -21,6 +21,7 @@ import { signUnsubscribeToken } from '../../lib/unsubscribeToken';
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
 const CALLBACK_SECRET = process.env.NEXTJS_CALLBACK_SECRET || 'test-only-callback-secret';
+const ADDRESS = '123 Test St, Testville';
 
 interface FakeSmtpServer {
   port: number;
@@ -89,7 +90,9 @@ function startFakeSmtpServer(): Promise<FakeSmtpServer> {
 function textOf(raw: string): string {
   const body = raw.slice(raw.indexOf('\n\n') + 2);
   return /quoted-printable/i.test(raw)
-    ? body.replace(/=\n/g, '').replace(/=([0-9A-F]{2})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    ? body
+        .replace(/=\n/g, '')
+        .replace(/=([0-9A-F]{2})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)))
     : body;
 }
 
@@ -114,14 +117,9 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     app = await createApp();
     await app.ready();
 
-    await prisma.instanceSettings.upsert({
-      where: { id: 'default' },
-      create: { id: 'default', physicalMailingAddress: '123 Test St, Testville' },
-      update: { physicalMailingAddress: '123 Test St, Testville' },
-    });
-
+    // The address every campaign footer prints is the sending domain's own.
     const domain = await prisma.domain.create({
-      data: { domainName: `internal-mail-test-${Date.now()}.example.com` },
+      data: { domainName: `internal-mail-test-${Date.now()}.example.com`, mailingAddress: ADDRESS },
     });
     domainId = domain.id;
 
@@ -148,6 +146,8 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
       },
     });
     campaignId = campaign.id;
+    // A first email only goes from a mailbox the campaign sends from.
+    await prisma.campaignMailbox.create({ data: { campaignId, mailboxId } });
 
     leadEmail = `internal-mail-lead-${Date.now()}@example.com`;
     const lead = await prisma.lead.create({
@@ -162,7 +162,6 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     await prisma.campaign.deleteMany({ where: { id: campaignId } });
     await prisma.mailbox.deleteMany({ where: { id: mailboxId } });
     await prisma.domain.deleteMany({ where: { id: domainId } });
-    await prisma.instanceSettings.deleteMany({ where: { id: 'default' } });
     await fakeSmtp.close();
     await app.close();
     await prisma.$disconnect();
@@ -222,7 +221,10 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     // Privacy fix (Guardrails): only length metadata is persisted, never the actual content.
     // The CAN-SPAM footer is part of what went out, so it counts toward the length.
     const sentBody = `Campaign body\n\n--\n123 Test St, Testville\nUnsubscribe: https://example.org/unsub?email=${encodeURIComponent(leadEmail)}`;
-    expect(log?.payloadSent).toEqual({ subjectLength: 'Campaign Subject'.length, bodyLength: sentBody.length });
+    expect(log?.payloadSent).toEqual({
+      subjectLength: 'Campaign Subject'.length,
+      bodyLength: sentBody.length,
+    });
     expect(json.canSpamFooterAppended).toBe(true);
     expect(textOf(fakeSmtp.messages.at(-1) as string).trim()).toBe(sentBody);
 
@@ -253,10 +255,14 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
       });
       expect(response.statusCode).toBe(200);
 
-      const log = await prisma.executionLog.findFirstOrThrow({ where: { leadId: lead.id, status: 'SENT' } });
+      const log = await prisma.executionLog.findFirstOrThrow({
+        where: { leadId: lead.id, status: 'SENT' },
+      });
       expect(log.aiOutcome).toBe('AI_FALLBACK');
       expect(log.aiFallbackReason).toBe('model_unavailable');
-      expect(fakeSmtp.messages.at(-1)).toMatch(new RegExp(`^From: "?Sam Patel"? <${mailboxEmail}>$`, 'm'));
+      expect(fakeSmtp.messages.at(-1)).toMatch(
+        new RegExp(`^From: "?Sam Patel"? <${mailboxEmail}>$`, 'm'),
+      );
     } finally {
       await prisma.mailbox.update({ where: { id: mailboxId }, data: { senderName: null } });
     }
@@ -265,13 +271,26 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
   it('adds the EU AI disclosure by the reported outcome, not by whether the campaign has a provider', async () => {
     const send = async (aiOutcome: string) => {
       const lead = await prisma.lead.create({
-        data: { campaignId, email: `eu-${aiOutcome}-${Date.now()}@acme.example`, status: 'UNTOUCHED' },
+        data: {
+          campaignId,
+          email: `eu-${aiOutcome}-${Date.now()}@acme.example`,
+          status: 'UNTOUCHED',
+        },
       });
       const response = await app.inject({
         method: 'POST',
         url: '/internal/mail/send',
         headers: { 'x-callback-secret': CALLBACK_SECRET },
-        payload: { mailboxId, to: lead.email, subject: 'EU', body: 'EU body', campaignId, leadId: lead.id, countryCode: 'DE', aiOutcome },
+        payload: {
+          mailboxId,
+          to: lead.email,
+          subject: 'EU',
+          body: 'EU body',
+          campaignId,
+          leadId: lead.id,
+          countryCode: 'DE',
+          aiOutcome,
+        },
       });
       expect(response.statusCode).toBe(200);
       return response.json().euAiDisclosureAppended;
@@ -317,32 +336,52 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
       method: 'POST',
       url: '/internal/mail/send',
       headers: { 'x-callback-secret': CALLBACK_SECRET },
-      payload: { mailboxId, to: lead.email, subject: 'EU', body: 'Hallo', campaignId, leadId: lead.id, aiOutcome: 'AI_WRITTEN' },
+      payload: {
+        mailboxId,
+        to: lead.email,
+        subject: 'EU',
+        body: 'Hallo',
+        campaignId,
+        leadId: lead.id,
+        aiOutcome: 'AI_WRITTEN',
+      },
     });
-    expect(response.json()).toMatchObject({ euAiDisclosureAppended: true, canSpamFooterAppended: true });
+    expect(response.json()).toMatchObject({
+      euAiDisclosureAppended: true,
+      canSpamFooterAppended: true,
+    });
     const sent = textOf(fakeSmtp.messages.at(-1) as string);
     expect(sent.indexOf('EU AI Act Article 50')).toBeLessThan(sent.indexOf('123 Test St'));
   });
 
-  it('refuses a campaign send with no instance mailing address, and never reaches SMTP', async () => {
+  it('refuses a campaign send when the sending domain has no mailing address, and never reaches SMTP', async () => {
     const lead = await prisma.lead.create({
       data: { campaignId, email: `no-address-${Date.now()}@acme.example`, status: 'UNTOUCHED' },
     });
     const received = fakeSmtp.messages.length;
-    await prisma.instanceSettings.delete({ where: { id: 'default' } });
+    await prisma.domain.update({ where: { id: domainId }, data: { mailingAddress: null } });
     try {
       const response = await app.inject({
         method: 'POST',
         url: '/internal/mail/send',
         headers: { 'x-callback-secret': CALLBACK_SECRET },
-        payload: { mailboxId, to: lead.email, subject: 'x', body: 'y', campaignId, leadId: lead.id },
+        payload: {
+          mailboxId,
+          to: lead.email,
+          subject: 'x',
+          body: 'y',
+          campaignId,
+          leadId: lead.id,
+        },
       });
       expect(response.statusCode).toBe(422);
-      expect(response.json().error).toMatch(/physical mailing address/i);
+      expect(response.json().error).toMatch(/sending domain has no mailing address/i);
       expect(fakeSmtp.messages.length).toBe(received);
-      expect((await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } })).status).toBe('UNTOUCHED');
+      expect((await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } })).status).toBe(
+        'UNTOUCHED',
+      );
     } finally {
-      await prisma.instanceSettings.create({ data: { id: 'default', physicalMailingAddress: '123 Test St, Testville' } });
+      await prisma.domain.update({ where: { id: domainId }, data: { mailingAddress: ADDRESS } });
     }
   });
 
@@ -350,8 +389,13 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     const campaign = await prisma.campaign.create({
       data: { name: 'Built-in Unsubscribe Campaign', status: 'ACTIVE', aiPromptTemplate: '' },
     });
+    await prisma.campaignMailbox.create({ data: { campaignId: campaign.id, mailboxId } });
     const lead = await prisma.lead.create({
-      data: { campaignId: campaign.id, email: `built-in-unsub-${Date.now()}@example.com`, status: 'UNTOUCHED' },
+      data: {
+        campaignId: campaign.id,
+        email: `built-in-unsub-${Date.now()}@example.com`,
+        status: 'UNTOUCHED',
+      },
     });
     const savedDomain = process.env.WARMHAWK_DOMAIN;
     process.env.WARMHAWK_DOMAIN = 'api.acme.example';
@@ -361,7 +405,14 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
         method: 'POST',
         url: '/internal/mail/send',
         headers: { 'x-callback-secret': CALLBACK_SECRET },
-        payload: { mailboxId, to: lead.email, subject: 'x', body: 'Hi', campaignId: campaign.id, leadId: lead.id },
+        payload: {
+          mailboxId,
+          to: lead.email,
+          subject: 'x',
+          body: 'Hi',
+          campaignId: campaign.id,
+          leadId: lead.id,
+        },
       });
       expect(response.statusCode).toBe(200);
 
@@ -375,7 +426,9 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
       // The link that went out is a live one: following it takes the lead off the list.
       const clicked = await app.inject({ method: 'POST', url: new URL(url).pathname });
       expect(clicked.statusCode).toBe(200);
-      expect((await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } })).status).toBe('SUPPRESSED');
+      expect((await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } })).status).toBe(
+        'SUPPRESSED',
+      );
     } finally {
       if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
       else process.env.WARMHAWK_DOMAIN = savedDomain;
@@ -395,7 +448,9 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
         nextRetryAt: new Date(Date.now() + 60_000),
       },
     });
-    await prisma.suppressionEntry.create({ data: { email: lead.email, source: 'unsubscribe_link' } });
+    await prisma.suppressionEntry.create({
+      data: { email: lead.email, source: 'unsubscribe_link' },
+    });
     const received = fakeSmtp.messages.length;
 
     try {
@@ -403,7 +458,14 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
         method: 'POST',
         url: '/internal/mail/send',
         headers: { 'x-callback-secret': CALLBACK_SECRET },
-        payload: { mailboxId, to: lead.email, subject: 'x', body: 'y', campaignId, leadId: lead.id },
+        payload: {
+          mailboxId,
+          to: lead.email,
+          subject: 'x',
+          body: 'y',
+          campaignId,
+          leadId: lead.id,
+        },
       });
       expect(response.statusCode).toBe(409);
       expect(response.json()).toMatchObject({ code: 'ESUPPRESSED' });
@@ -421,8 +483,13 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     const campaign = await prisma.campaign.create({
       data: { name: 'No Unsubscribe Campaign', status: 'ACTIVE', aiPromptTemplate: '' },
     });
+    await prisma.campaignMailbox.create({ data: { campaignId: campaign.id, mailboxId } });
     const lead = await prisma.lead.create({
-      data: { campaignId: campaign.id, email: `no-unsub-${Date.now()}@example.com`, status: 'UNTOUCHED' },
+      data: {
+        campaignId: campaign.id,
+        email: `no-unsub-${Date.now()}@example.com`,
+        status: 'UNTOUCHED',
+      },
     });
     const savedDomain = process.env.WARMHAWK_DOMAIN;
     delete process.env.WARMHAWK_DOMAIN;
