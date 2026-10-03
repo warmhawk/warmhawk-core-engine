@@ -23,7 +23,7 @@ import {
   createPkcePair,
   exchangeMicrosoftCode,
   exchangeMicrosoftCodeConnect,
-  fetchMicrosoftSignedInAddresses,
+  fetchMicrosoftSignedInProfile,
   isMicrosoftOAuthConfigured,
   microsoftMailboxExists,
   MicrosoftTokenError,
@@ -38,6 +38,7 @@ import {
 import { signOAuthState, verifyOAuthState, type OAuthStatePayload } from '../lib/oauthState';
 import { decrypt, encrypt, loadEncryptionKey } from '../lib/encryption';
 import { requireAuth } from '../lib/requireAuth';
+import { cleanProviderName, fetchGmailSendAsName } from '../lib/providerSenderName';
 
 type DbProvider = OAuthStatePayload['provider'];
 type RouteProvider = 'google' | 'microsoft';
@@ -48,6 +49,12 @@ function isSupportedProvider(value: string): value is RouteProvider {
 
 function toDbProvider(routeProvider: RouteProvider): DbProvider {
   return routeProvider === 'google' ? 'GOOGLE_WORKSPACE' : 'MICROSOFT_365';
+}
+
+/** The provider's display name as the mailbox's sender name — only when the owner hasn't typed
+ *  one, so a reconnect never overwrites a name they chose. */
+function senderNameFill(current: string | null, fromProvider: string | null) {
+  return !current?.trim() && fromProvider ? { senderName: fromProvider } : {};
 }
 
 function dashboardUrl(): string {
@@ -312,13 +319,16 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       const encryptionKey = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
       const mailboxRecord = await prisma.mailbox.findUnique({
         where: { id: mailboxId },
-        select: { email: true },
+        select: { email: true, senderName: true },
       });
       if (!mailboxRecord) {
         return redirectWithError(reply, 'mailbox_not_found');
       }
       if (provider === 'google') {
         const tokens = await exchangeGoogleCode(code);
+        const providerName = tokens.accessToken
+          ? await fetchGmailSendAsName(tokens.accessToken, mailboxRecord.email)
+          : null;
         await prisma.mailbox.update({
           where: { id: mailboxId },
           data: {
@@ -342,9 +352,12 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             authUsername: mailboxRecord.email,
             connectionError: null,
             connectionErrorAt: null,
+            ...senderNameFill(mailboxRecord.senderName, providerName),
           },
         });
       } else {
+        // No sender name from here: this app's token is for Outlook IMAP/SMTP only, and adding
+        // User.Read would send every BYO install back through admin consent. The dashboard asks.
         const tokens = await exchangeMicrosoftCode(code, mailboxRecord.email);
         await prisma.mailbox.update({
           where: { id: mailboxId },
@@ -412,7 +425,7 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
       const encryptionKey = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
       const mailboxRecord = await prisma.mailbox.findUnique({
         where: { id: mailboxId },
-        select: { email: true },
+        select: { email: true, senderName: true },
       });
       if (!mailboxRecord) return redirectWithError(reply, 'mailbox_not_found');
       const wantedEmail = mailboxRecord.email.toLowerCase();
@@ -435,6 +448,7 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             `You signed in to Google as ${signedInAs || 'a different account'}. Sign in as ${mailboxRecord.email} to connect it.`,
           );
         }
+        const providerName = await fetchGmailSendAsName(tokens.accessToken, mailboxRecord.email);
         await prisma.mailbox.update({
           where: { id: mailboxId },
           data: {
@@ -450,6 +464,7 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             authUsername: mailboxRecord.email,
             connectionError: null,
             connectionErrorAt: null,
+            ...senderNameFill(mailboxRecord.senderName, providerName),
           },
         });
       } else {
@@ -469,7 +484,8 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
           clientId,
           redirectUri: `${license.relayBaseUrl}/connect/microsoft/callback`,
         });
-        const addresses = await fetchMicrosoftSignedInAddresses(tokens.accessToken);
+        const profile = await fetchMicrosoftSignedInProfile(tokens.accessToken);
+        const { addresses } = profile;
         if (!addresses.includes(wantedEmail)) {
           await removeIfNeverConnected(mailboxId);
           return redirectWithError(
@@ -503,6 +519,10 @@ export async function oauthCallbackRoutes(app: FastifyInstance): Promise<void> {
             authUsername: mailboxRecord.email,
             connectionError: null,
             connectionErrorAt: null,
+            ...senderNameFill(
+              mailboxRecord.senderName,
+              cleanProviderName(profile.displayName, mailboxRecord.email),
+            ),
           },
         });
       }
