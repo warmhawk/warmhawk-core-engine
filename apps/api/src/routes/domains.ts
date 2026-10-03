@@ -7,22 +7,149 @@
  * checks are outbound network calls, so an unauthenticated caller here would be spending the
  * customer's own IP reputation against Spamhaus. If a route in this repo ever needs these checks
  * without a session, that is the wrong repo.
+ *
+ * Mailing address (10-03-26): the CAN-SPAM postal address lives on the domain, so an agency's
+ * client brands each send their own. Adding a domain never needs one — only launching a campaign
+ * that sends from it does (`lib/sendingReadiness.ts`). Clearing an address that live or draft
+ * campaigns rely on needs `confirm: true`, since their sends from this domain stop.
  */
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '@warmhawk/db';
+import { Prisma, prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { normalizeDkimSelector } from '../lib/dnsChecks';
 import { runDomainCheck } from '../lib/domainCheck';
 
-interface CreateDomainBody {
+interface AddressFields {
+  /** "Client or brand" — a free-text note shown under the domain name. */
+  label?: string | null;
+  /** The address as one block of text (one line per footer line). */
+  mailingAddress?: string | null;
+  /** The address as the dialog's fields; when given, `mailingAddress` is built from it. */
+  mailingAddressParts?: Partial<Record<(typeof ADDRESS_PARTS)[number], unknown>> | null;
+}
+
+interface CreateDomainBody extends AddressFields {
   domainName: string;
   redirectUrl?: string;
   dkimSelector?: string | null;
 }
 
-interface UpdateDomainBody {
+interface UpdateDomainBody extends AddressFields {
   redirectUrl?: string;
   dkimSelector?: string | null;
+  /** Required to clear an address that campaigns send with. */
+  confirm?: boolean;
+}
+
+const ADDRESS_PARTS = [
+  'businessName',
+  'street',
+  'suite',
+  'city',
+  'region',
+  'postalCode',
+  'country',
+] as const;
+const MAX_ADDRESS_LENGTH = 500;
+const MAX_LABEL_LENGTH = 80;
+
+type AddressPatch = {
+  label?: string | null;
+  mailingAddress?: string | null;
+  mailingAddressParts?: Prisma.InputJsonValue | typeof Prisma.DbNull;
+};
+
+/** The address fields of a create/update body, validated. Only the keys present in the body are
+ *  returned, so a PATCH without them leaves the address alone. Blank means "no address" (null). */
+function parseAddressFields(
+  body: AddressFields,
+): { ok: true; data: AddressPatch } | { ok: false; error: string } {
+  const data: AddressPatch = {};
+  if ('label' in body) {
+    if (body.label != null && typeof body.label !== 'string')
+      return { ok: false, error: 'label must be text' };
+    const label = body.label?.trim() || null;
+    if (label && label.length > MAX_LABEL_LENGTH)
+      return { ok: false, error: `label must be ${MAX_LABEL_LENGTH} characters or fewer` };
+    data.label = label;
+  }
+  if (body.mailingAddressParts != null) {
+    if (typeof body.mailingAddressParts !== 'object' || Array.isArray(body.mailingAddressParts)) {
+      return { ok: false, error: 'mailingAddressParts must be an object' };
+    }
+    const parts: Partial<Record<(typeof ADDRESS_PARTS)[number], string>> = {};
+    for (const key of ADDRESS_PARTS) {
+      const value = body.mailingAddressParts[key];
+      if (value != null && typeof value !== 'string')
+        return { ok: false, error: `${key} must be text` };
+      if (typeof value === 'string' && value.trim())
+        parts[key] = value.trim().replace(/\s*\n\s*/g, ' ');
+    }
+    if (Object.keys(parts).length === 0) {
+      data.mailingAddress = null;
+      data.mailingAddressParts = Prisma.DbNull;
+    } else {
+      const missing = (['street', 'city', 'country'] as const).filter((key) => !parts[key]);
+      if (missing.length) return { ok: false, error: `The address needs ${missing.join(', ')}` };
+      const cityLine = [parts.city, [parts.region, parts.postalCode].filter(Boolean).join(' ')]
+        .filter(Boolean)
+        .join(', ');
+      data.mailingAddress = [
+        parts.businessName,
+        [parts.street, parts.suite].filter(Boolean).join(', '),
+        cityLine,
+        parts.country,
+      ]
+        .filter(Boolean)
+        .join('\n');
+      data.mailingAddressParts = parts;
+    }
+  } else if ('mailingAddress' in body || 'mailingAddressParts' in body) {
+    if (body.mailingAddress != null && typeof body.mailingAddress !== 'string') {
+      return { ok: false, error: 'mailingAddress must be text' };
+    }
+    data.mailingAddress = body.mailingAddress?.trim() || null;
+    data.mailingAddressParts = Prisma.DbNull;
+  }
+  if (data.mailingAddress && data.mailingAddress.length > MAX_ADDRESS_LENGTH) {
+    return {
+      ok: false,
+      error: `The mailing address must be ${MAX_ADDRESS_LENGTH} characters or fewer`,
+    };
+  }
+  return { ok: true, data };
+}
+
+/** Per domain, the non-archived campaigns that send from one of its mailboxes. */
+async function campaignUsage(domainIds: string[]) {
+  const links = domainIds.length
+    ? await prisma.campaignMailbox.findMany({
+        where: {
+          mailbox: { domainId: { in: domainIds } },
+          campaign: { status: { not: 'ARCHIVED' } },
+        },
+        select: {
+          mailbox: { select: { domainId: true } },
+          campaign: { select: { id: true, name: true, status: true } },
+        },
+      })
+    : [];
+  const usage = new Map<string, Map<string, { id: string; name: string; status: string }>>();
+  for (const link of links) {
+    const byCampaign = usage.get(link.mailbox.domainId) ?? new Map();
+    byCampaign.set(link.campaign.id, link.campaign);
+    usage.set(link.mailbox.domainId, byCampaign);
+  }
+  return (domainId: string) => {
+    const campaigns = [...(usage.get(domainId)?.values() ?? [])];
+    const count = (status: string) => campaigns.filter((c) => c.status === status).length;
+    return {
+      campaigns: campaigns.map((c) => ({ id: c.id, name: c.name, status: c.status })),
+      sending: count('ACTIVE'),
+      paused: count('PAUSED'),
+      drafts: count('DRAFT'),
+    };
+  };
 }
 
 const INVALID_SELECTOR_ERROR =
@@ -47,7 +174,8 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       include: { _count: { select: { mailboxes: true } } },
       orderBy: { createdAt: 'desc' },
     });
-    return domains;
+    const usageOf = await campaignUsage(domains.map((domain) => domain.id));
+    return domains.map((domain) => ({ ...domain, usedBy: usageOf(domain.id) }));
   });
 
   app.post<{ Body: CreateDomainBody }>('/', async (request, reply) => {
@@ -59,22 +187,46 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
     if (dkimSelector === undefined) {
       return reply.code(422).send({ error: INVALID_SELECTOR_ERROR });
     }
+    const address = parseAddressFields(request.body);
+    if (!address.ok) return reply.code(422).send({ error: address.error });
+    const name = domainName.trim().toLowerCase();
+    if (await prisma.domain.findUnique({ where: { domainName: name } })) {
+      return reply.code(409).send({ error: `${name} is already added` });
+    }
     const domain = await prisma.domain.create({
       data: {
-        domainName: domainName.trim().toLowerCase(),
+        domainName: name,
         redirectUrl: redirectUrl?.trim() || null,
         dkimSelector,
+        ...address.data,
       },
     });
     return reply.code(201).send(domain);
   });
 
-  /** Only the fields present in the body change; `dkimSelector: null` or `""` clears it. */
+  /** Only the fields present in the body change; `dkimSelector: null` or `""` clears it, and so
+   *  does a blank address — with `confirm: true` when campaigns send with it. */
   app.patch<{ Params: { id: string }; Body: UpdateDomainBody }>('/:id', async (request, reply) => {
     const body = request.body ?? {};
-    const data: { redirectUrl?: string; dkimSelector?: string | null } = {
+    const address = parseAddressFields(body);
+    if (!address.ok) return reply.code(422).send({ error: address.error });
+    const data: { redirectUrl?: string; dkimSelector?: string | null } & AddressPatch = {
       redirectUrl: body.redirectUrl,
+      ...address.data,
     };
+    if (address.data.mailingAddress === null && body.confirm !== true) {
+      const current = await prisma.domain.findUnique({ where: { id: request.params.id } });
+      if (!current) return reply.code(404).send({ error: 'Domain not found' });
+      const usage = (await campaignUsage([current.id]))(current.id);
+      const live = usage.campaigns.filter((c) => c.status !== 'COMPLETED');
+      if (current.mailingAddress?.trim() && live.length > 0) {
+        return reply.code(409).send({
+          error: `${live.length} campaign${live.length === 1 ? '' : 's'} send${live.length === 1 ? 's' : ''} from ${current.domainName} — without an address its mailboxes stop sending them. Send confirm: true to clear it anyway.`,
+          code: 'ADDRESS_IN_USE',
+          campaigns: live,
+        });
+      }
+    }
     if ('dkimSelector' in body) {
       const dkimSelector = normalizeDkimSelector(body.dkimSelector);
       if (dkimSelector === undefined) {
@@ -86,7 +238,7 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       .update({ where: { id: request.params.id }, data })
       .catch(() => null);
     if (!domain) return reply.code(404).send({ error: 'Domain not found' });
-    return domain;
+    return { ...domain, usedBy: (await campaignUsage([domain.id]))(domain.id) };
   });
 
   /**

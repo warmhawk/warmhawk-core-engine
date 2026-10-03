@@ -8,7 +8,8 @@
  * `dispatchFailed` block in `../processor.ts` for the full story. The case that matters most here
  * is the 200-with-`{status:"failed"}` response: before the fix, `processDispatchJob` only checked
  * `response.ok` (true for that response), so it returned normally and left the Lead exactly as
- * `QUEUED` — this suite asserts it now reverts to `UNTOUCHED` and the job throws instead.
+ * `QUEUED` with its job id — this suite asserts it now frees the lead for a backed-off retry
+ * (`nextRetryAt`) and the job throws instead.
  *
  * NOT run by `npm test` (unit config) — wired into `npm run test:integration`
  * (vitest.integration.config.ts). Skipped automatically if DATABASE_URL isn't set.
@@ -38,7 +39,11 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
     });
     campaignId = campaign.id;
 
-    const domain = await prisma.domain.create({ data: { domainName: 'processor-test.example' } });
+    // A first email only goes from a domain with a mailing address, through a mailbox the
+    // campaign sends from — so the domain has one and the mailbox is ticked below.
+    const domain = await prisma.domain.create({
+      data: { domainName: 'processor-test.example', mailingAddress: '1 Test Street, Springfield' },
+    });
     const mailbox = await prisma.mailbox.create({
       data: {
         domainId: domain.id,
@@ -50,6 +55,7 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
       },
     });
     mailboxId = mailbox.id;
+    await prisma.campaignMailbox.create({ data: { campaignId, mailboxId } });
   });
 
   afterAll(async () => {
@@ -79,7 +85,7 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
     });
   }
 
-  it('reverts the lead to UNTOUCHED and throws when n8n answers 200 with a failed-status body', async () => {
+  it('backs the lead off for a retry and throws when n8n answers 200 with a failed-status body', async () => {
     const lead = await createQueuedLead('failed-200@processor-test.example');
     fetchSpy.mockResolvedValue(
       jsonResponse(200, { status: 'failed', leadId: lead.id, error: 'CAN-SPAM compliance error' }),
@@ -89,10 +95,12 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
       /failed send/i,
     );
 
+    // Back in the queue, but not re-picked on the next tick: it waits out DISPATCH_FAILURE_RETRY_MS.
     const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
-    expect(updated.status).toBe('UNTOUCHED');
+    expect(updated.status).toBe('QUEUED');
     expect(updated.queuedJobId).toBeNull();
     expect(updated.queuedSlotAt).toBeNull();
+    expect(updated.nextRetryAt!.getTime()).toBeGreaterThan(Date.now());
   });
 
   it('leaves the lead alone when n8n answers 200 with a sent-status body (real success)', async () => {
@@ -110,31 +118,34 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
     expect(updated.queuedJobId).not.toBeNull();
   });
 
-  it('reverts the lead to UNTOUCHED and throws on a genuine non-2xx from the webhook call', async () => {
+  it('backs the lead off for a retry and throws on a genuine non-2xx from the webhook call', async () => {
     const lead = await createQueuedLead('http-error@processor-test.example');
     fetchSpy.mockResolvedValue(jsonResponse(502, { error: 'Bad Gateway' }));
 
     await expect(processDispatchJob({ leadId: lead.id, mailboxId })).rejects.toThrow(/502/);
 
     const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
-    expect(updated.status).toBe('UNTOUCHED');
+    expect(updated.status).toBe('QUEUED');
     expect(updated.queuedJobId).toBeNull();
+    expect(updated.nextRetryAt!.getTime()).toBeGreaterThan(Date.now());
   });
 
   it('does not clobber a lead that recordSendFailure already reclassified as BOUNCED', async () => {
     // Simulates the soft/hard-failure paths `sendMail`'s own catch block already handles: by the
     // time this function's `fetch` call returns, `recordSendFailure` has already updated the lead
     // (e.g. to BOUNCED for a hard bounce) server-side, inside the same request. Reproduced here by
-    // updating the lead to BOUNCED before invoking processDispatchJob's failure branch — the
-    // reversion check must be a no-op for a lead that isn't `QUEUED` any more.
+    // updating the lead to BOUNCED inside the stubbed webhook call — the reversion check must be a
+    // no-op for a lead that isn't `QUEUED` any more.
     const lead = await createQueuedLead('hard-bounce@processor-test.example');
-    await prisma.lead.update({ where: { id: lead.id }, data: { status: 'BOUNCED' } });
 
-    fetchSpy.mockResolvedValue(
-      jsonResponse(200, { status: 'failed', leadId: lead.id, error: 'user unknown' }),
+    fetchSpy.mockImplementation(async () => {
+      await prisma.lead.update({ where: { id: lead.id }, data: { status: 'BOUNCED' } });
+      return jsonResponse(200, { status: 'failed', leadId: lead.id, error: 'user unknown' });
+    });
+
+    await expect(processDispatchJob({ leadId: lead.id, mailboxId })).rejects.toThrow(
+      /failed send/i,
     );
-
-    await expect(processDispatchJob({ leadId: lead.id, mailboxId })).rejects.toThrow(/failed send/i);
 
     const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
     expect(updated.status).toBe('BOUNCED'); // untouched — recordSendFailure already had the final say
@@ -160,7 +171,9 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
       jsonResponse(200, { status: 'failed', leadId: lead.id, error: 'connection timed out' }),
     );
 
-    await expect(processDispatchJob({ leadId: lead.id, mailboxId })).rejects.toThrow(/failed send/i);
+    await expect(processDispatchJob({ leadId: lead.id, mailboxId })).rejects.toThrow(
+      /failed send/i,
+    );
 
     const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
     expect(updated.status).toBe('QUEUED');

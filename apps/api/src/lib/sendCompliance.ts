@@ -5,7 +5,7 @@
  * campaign can go out missing them:
  *
  *   1. CAN-SPAM auto-injection: refuse to send a campaign missing a physical mailing address
- *      (instance-wide setting) or an unsubscribe mechanism, and put both in the body as a footer.
+ *      (the sending domain's own, `Domain.mailingAddress`) or an unsubscribe mechanism, and put both in the body as a footer.
  *   2. RFC 8058 one-click unsubscribe headers, generated server-side on every send —
  *      `List-Unsubscribe` + `List-Unsubscribe-Post: One-Click`, not left to template config.
  *   3. EU AI Act Article 50 disclosure marker, auto-appended when the campaign has an AI
@@ -26,7 +26,7 @@ export interface CanSpamCheckInput {
 export function assertCanSpamCompliant(input: CanSpamCheckInput): void {
   if (!input.physicalMailingAddress || input.physicalMailingAddress.trim().length === 0) {
     throw new CanSpamComplianceError(
-      'Cannot send: instance has no configured physical mailing address (CAN-SPAM requires one on every commercial email).',
+      'Cannot send: the sending domain has no mailing address (CAN-SPAM requires one on every commercial email). Add it on the Domains page.',
     );
   }
   if (!input.unsubscribeUrlTemplate || input.unsubscribeUrlTemplate.trim().length === 0) {
@@ -66,7 +66,10 @@ export function appendCanSpamFooter(
 ): { body: string; footerAppended: boolean } {
   const address = input.physicalMailingAddress?.trim();
   const unsubscribeUrl = input.unsubscribeUrl?.trim();
-  assertCanSpamCompliant({ physicalMailingAddress: address, unsubscribeUrlTemplate: unsubscribeUrl });
+  assertCanSpamCompliant({
+    physicalMailingAddress: address,
+    unsubscribeUrlTemplate: unsubscribeUrl,
+  });
 
   const lines: string[] = [];
   if (!normalizeForMatch(body).includes(normalizeForMatch(address as string))) {

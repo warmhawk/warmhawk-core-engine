@@ -6,7 +6,11 @@
  * only documented, not wired to a real send path, before this file existed:
  *
  *   - CAN-SPAM auto-injection gate (`sendCompliance.ts#assertCanSpamCompliant`) and the address +
- *     unsubscribe footer it requires in the body (`appendCanSpamFooter`)
+ *     unsubscribe footer it requires in the body (`appendCanSpamFooter`) — the address is the
+ *     sending domain's own (`Domain.mailingAddress`), so each client domain signs with its own
+ *   - follow-up sequences (`lib/sequence.ts`): a lead's first send pins it to this mailbox and
+ *     keeps the subject; each follow-up must come from that mailbox, threads under the earlier
+ *     Message-IDs, and schedules the next one
  *   - RFC 8058 one-click unsubscribe headers, unconditionally attached
  *   - EU AI Act Article 50 disclosure marker
  *   - Seed-Inbox Placement Test (V12) BCC hook — a sample of campaign sends (1 in 20 by default)
@@ -35,6 +39,7 @@ import { hostedUnsubscribeUrl } from './unsubscribeToken';
 import { isEmailSuppressed } from './leadIngest';
 import { pickSeedBccSample, subjectSha256 } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
+import { nextStepAtAfter } from './sequence';
 import { DEFAULT_BOUNCE_RATE_THRESHOLD, BOUNCE_RATE_MIN_SAMPLE_SIZE } from '../../../../constants';
 
 function encryptionKey() {
@@ -150,7 +155,9 @@ async function applyBounceCircuitBreaker(params: {
     mailboxUpdate.status = 'PAUSED';
     mailboxUpdate.autoFlaggedAt = new Date();
   }
-  await prisma.mailbox.update({ where: { id: mailboxId }, data: mailboxUpdate }).catch(() => undefined);
+  await prisma.mailbox
+    .update({ where: { id: mailboxId }, data: mailboxUpdate })
+    .catch(() => undefined);
 
   if (campaign && !campaign.pausedForBounceRate) {
     const campaignResult = evaluateBounceCircuitBreaker(
@@ -191,11 +198,26 @@ async function recordSendFailure(params: {
   aiOutcome?: AiWriteOutcome;
   aiFallbackReason?: string;
 }): Promise<void> {
-  const { campaignId, leadId, mailboxId, n8nExecutionId, message, code, aiOutcome, aiFallbackReason } = params;
+  const {
+    campaignId,
+    leadId,
+    mailboxId,
+    n8nExecutionId,
+    message,
+    code,
+    aiOutcome,
+    aiFallbackReason,
+  } = params;
   const hard = isHardBounce(message, code);
 
   if (hard) {
-    await prisma.lead.update({ where: { id: leadId }, data: { status: 'BOUNCED' } }).catch(() => undefined);
+    // A bounce ends the sequence too — no follow-up to an address that doesn't exist.
+    await prisma.lead
+      .update({
+        where: { id: leadId },
+        data: { status: 'BOUNCED', nextStepAt: null, queuedJobId: null, queuedSlotAt: null },
+      })
+      .catch(() => undefined);
     await prisma.executionLog
       .create({
         data: {
@@ -217,19 +239,29 @@ async function recordSendFailure(params: {
   const lead = await prisma.lead.findUnique({ where: { id: leadId } }).catch(() => null);
   const priorRetryCount = lead?.retryCount ?? 0;
   const exhausted = priorRetryCount + 1 >= MAX_RETRY_ATTEMPTS;
+  const retryAt = new Date(Date.now() + computeRetryDelaySeconds(priorRetryCount) * 1000);
+
+  // A follow-up that fails keeps the lead as it was (already contacted) and tries the same step
+  // again later; out of retries, the sequence just ends — the first email did go out.
+  const followUpData = exhausted
+    ? { retryCount: 0, nextStepAt: null, queuedJobId: null, queuedSlotAt: null }
+    : { retryCount: { increment: 1 }, nextStepAt: retryAt, queuedJobId: null, queuedSlotAt: null };
 
   await prisma.lead
     .update({
       where: { id: leadId },
-      data: exhausted
-        ? { status: 'SUPPRESSED', retryCount: { increment: 1 }, nextRetryAt: null }
-        : {
-            status: 'QUEUED',
-            retryCount: { increment: 1 },
-            nextRetryAt: new Date(Date.now() + computeRetryDelaySeconds(priorRetryCount) * 1000),
-            queuedJobId: null,
-            queuedSlotAt: null,
-          },
+      data:
+        lead && lead.stepsSent > 0
+          ? followUpData
+          : exhausted
+            ? { status: 'SUPPRESSED', retryCount: { increment: 1 }, nextRetryAt: null }
+            : {
+                status: 'QUEUED',
+                retryCount: { increment: 1 },
+                nextRetryAt: retryAt,
+                queuedJobId: null,
+                queuedSlotAt: null,
+              },
     })
     .catch(() => undefined);
 
@@ -250,14 +282,28 @@ async function recordSendFailure(params: {
 }
 
 export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
-  const { mailboxId, to, subject, campaignId, leadId, countryCode, n8nExecutionId, aiOutcome, aiFallbackReason } =
-    input;
+  const {
+    mailboxId,
+    to,
+    subject,
+    campaignId,
+    leadId,
+    countryCode,
+    n8nExecutionId,
+    aiOutcome,
+    aiFallbackReason,
+  } = input;
   let body = input.body;
 
-  const mailbox = await prisma.mailbox.findUnique({ where: { id: mailboxId } });
+  const mailbox = await prisma.mailbox.findUnique({
+    where: { id: mailboxId },
+    include: { domain: { select: { mailingAddress: true } } },
+  });
   if (!mailbox) throw new MailSendError('Mailbox not found', 404);
 
-  const hasCredential = Boolean(mailbox.oauthRefreshTokenEncrypted || mailbox.authPasswordEncrypted);
+  const hasCredential = Boolean(
+    mailbox.oauthRefreshTokenEncrypted || mailbox.authPasswordEncrypted,
+  );
   if (!mailbox.smtpHost || !mailbox.smtpPort || !mailbox.authUsername || !hasCredential) {
     throw new MailSendError('Mailbox is missing SMTP credentials', 502);
   }
@@ -268,15 +314,44 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
   let canSpamFooterAppended = false;
   let seedBccCount = 0;
   let bccSeeds: Array<{ id: string; emailAddress: string }> = [];
+  // Follow-up bookkeeping: whether this send is one, and the thread it replies in.
+  let isFollowUp = false;
+  let threadMessageIds: string[] = [];
 
   // Campaign sends only — compliance gates + guardrail hooks never apply to a non-campaign send
   // (e.g. the warmup engine's own mailbox-to-mailbox traffic).
   if (campaignId) {
-    const [campaign, instanceSettings] = await Promise.all([
+    const [campaign, lead, isSender] = await Promise.all([
       prisma.campaign.findUnique({ where: { id: campaignId } }),
-      prisma.instanceSettings.findUnique({ where: { id: 'default' } }),
+      leadId ? prisma.lead.findUnique({ where: { id: leadId } }) : null,
+      prisma.campaignMailbox.findUnique({
+        where: { campaignId_mailboxId: { campaignId, mailboxId } },
+      }),
     ]);
     if (!campaign) throw new MailSendError('Campaign not found', 404);
+
+    // Sender rules, enforced here as well as in the worker: a first email only from a mailbox the
+    // campaign sends from; a follow-up only from the mailbox that sent the first email.
+    isFollowUp = Boolean(lead && lead.stepsSent > 0);
+    if (isFollowUp) {
+      if (lead!.mailboxId && lead!.mailboxId !== mailboxId) {
+        throw new MailSendError(
+          "Follow-ups go from the lead's first mailbox",
+          409,
+          'EWRONGMAILBOX',
+        );
+      }
+      threadMessageIds = (
+        await prisma.executionLog.findMany({
+          where: { leadId: lead!.id, status: 'SENT', providerMessageId: { not: null } },
+          orderBy: { createdAt: 'asc' },
+          select: { providerMessageId: true },
+        })
+      ).map((row) => row.providerMessageId as string);
+    } else if (!isSender) {
+      throw new MailSendError('This mailbox is not one the campaign sends from', 409, 'ENOTSENDER');
+    }
+    const physicalMailingAddress = mailbox.domain.mailingAddress;
 
     // The suppression floor, at the last point before a send. The queue only picks leads that
     // aren't suppressed, but a lead can opt out (unsubscribe link, reply) after it was claimed, or
@@ -306,7 +381,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
         ? hostedUnsubscribeUrl(leadId)
         : null;
     assertCanSpamCompliant({
-      physicalMailingAddress: instanceSettings?.physicalMailingAddress,
+      physicalMailingAddress,
       unsubscribeUrlTemplate: unsubscribeUrl,
     });
 
@@ -327,7 +402,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
     // Last, so the address and opt-out close the email whatever wrote the rest.
     const footer = appendCanSpamFooter(body, {
-      physicalMailingAddress: instanceSettings?.physicalMailingAddress,
+      physicalMailingAddress,
       unsubscribeUrl,
     });
     body = footer.body;
@@ -354,8 +429,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
       transporter = nodemailer.createTransport(createGraphTransport(accessToken));
     } else {
       let auth:
-        | { type: 'OAuth2'; user: string; accessToken: string }
-        | { user: string; pass: string };
+        { type: 'OAuth2'; user: string; accessToken: string } | { user: string; pass: string };
 
       if (mailbox.oauthRefreshTokenEncrypted) {
         const accessToken = await mintMailboxAccessToken(
@@ -364,7 +438,10 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
         );
         auth = { type: 'OAuth2', user: mailbox.authUsername, accessToken };
       } else {
-        auth = { user: mailbox.authUsername, pass: decrypt(mailbox.authPasswordEncrypted as string, key) };
+        auth = {
+          user: mailbox.authUsername,
+          pass: decrypt(mailbox.authPasswordEncrypted as string, key),
+        };
       }
 
       transporter = nodemailer.createTransport({
@@ -383,16 +460,25 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
   const headers: Record<string, string> = {};
   if (listUnsubscribeHeader) headers['List-Unsubscribe'] = listUnsubscribeHeader;
   if (listUnsubscribePostHeader) headers['List-Unsubscribe-Post'] = listUnsubscribePostHeader;
+  // A follow-up replies to the latest email in the thread and lists them all, so every mail client
+  // shows one conversation.
+  const threading =
+    threadMessageIds.length > 0
+      ? { inReplyTo: threadMessageIds[threadMessageIds.length - 1], references: threadMessageIds }
+      : {};
 
   try {
     const info = await transporter.sendMail({
       // Graph transport reads the From display name back out of these MIME headers too.
-      from: mailbox.senderName?.trim() ? { name: mailbox.senderName.trim(), address: mailbox.email } : mailbox.email,
+      from: mailbox.senderName?.trim()
+        ? { name: mailbox.senderName.trim(), address: mailbox.email }
+        : mailbox.email,
       to,
       ...(bccSeeds.length > 0 ? { bcc: bccSeeds.map((seed) => seed.emailAddress) } : {}),
       subject,
       text: body,
       headers,
+      ...threading,
     });
 
     if (mailbox.connectionError) await clearConnectionFailure(mailboxId);
@@ -423,12 +509,36 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
       });
 
       if (leadId) {
-        // "Handle success" half of the dispatch pipeline — marks the lead contacted and logs the
-        // execution, done server-side here instead of in n8n Postgres nodes.
+        // "Handle success" half of the dispatch pipeline — marks the lead contacted, counts the
+        // step and schedules the next follow-up, and logs the execution, done server-side here
+        // instead of in n8n Postgres nodes. The first send pins the lead to this mailbox and keeps
+        // the subject its follow-ups reply under.
+        const sentAt = new Date();
+        const [current, steps] = await Promise.all([
+          prisma.lead.findUnique({
+            where: { id: leadId },
+            select: { status: true, stepsSent: true },
+          }),
+          prisma.campaignStep.findMany({
+            where: { campaignId },
+            select: { position: true, waitDays: true },
+          }),
+        ]);
+        const stepsSent = (current?.stepsSent ?? 0) + 1;
         await prisma.lead
           .update({
             where: { id: leadId },
-            data: { status: 'CONTACTED', retryCount: 0, nextRetryAt: null },
+            data: {
+              status: current?.status === 'OPENED' ? 'OPENED' : 'CONTACTED',
+              retryCount: 0,
+              nextRetryAt: null,
+              queuedJobId: null,
+              queuedSlotAt: null,
+              stepsSent,
+              lastStepAt: sentAt,
+              nextStepAt: nextStepAtAfter(steps, stepsSent, sentAt),
+              ...(isFollowUp ? {} : { mailboxId, threadSubject: subject }),
+            },
           })
           .catch(() => undefined);
         await prisma.executionLog

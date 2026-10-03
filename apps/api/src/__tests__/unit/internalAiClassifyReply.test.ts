@@ -97,10 +97,18 @@ describe('POST /internal/ai/classify-reply', () => {
       isActive: true,
     } as never);
     vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'OPT_OUT' });
-    vi.spyOn(prisma.reply, 'update').mockResolvedValue({ ...baseReplyRow, classification: 'OPT_OUT' } as never);
-    vi.spyOn(prisma.lead, 'findUnique').mockResolvedValue({ id: 'lead-1', email: 'lead1@example.com' } as never);
+    vi.spyOn(prisma.reply, 'update').mockResolvedValue({
+      ...baseReplyRow,
+      classification: 'OPT_OUT',
+    } as never);
+    vi.spyOn(prisma.lead, 'findUnique').mockResolvedValue({
+      id: 'lead-1',
+      email: 'lead1@example.com',
+    } as never);
     const upsertSpy = vi.spyOn(prisma.suppressionEntry, 'upsert').mockResolvedValue({} as never);
-    const leadUpdateSpy = vi.spyOn(prisma.lead, 'updateMany').mockResolvedValue({ count: 1 } as never);
+    const leadUpdateSpy = vi
+      .spyOn(prisma.lead, 'updateMany')
+      .mockResolvedValue({ count: 1 } as never);
     const transactionSpy = vi.spyOn(prisma, '$transaction').mockImplementation(async (ops) => {
       return Promise.all(ops as unknown as Promise<unknown>[]);
     });
@@ -124,7 +132,7 @@ describe('POST /internal/ai/classify-reply', () => {
     // By address, not by lead id: the same person can be a lead in several campaigns.
     expect(leadUpdateSpy).toHaveBeenCalledWith({
       where: { email: 'lead1@example.com', status: { not: 'SUPPRESSED' } },
-      data: { status: 'SUPPRESSED', nextRetryAt: null },
+      data: { status: 'SUPPRESSED', nextRetryAt: null, nextStepAt: null },
     });
   });
 
@@ -137,7 +145,10 @@ describe('POST /internal/ai/classify-reply', () => {
       isActive: true,
     } as never);
     vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'OPT_OUT' });
-    vi.spyOn(prisma.reply, 'update').mockResolvedValue({ ...baseReplyRow, classification: 'OPT_OUT' } as never);
+    vi.spyOn(prisma.reply, 'update').mockResolvedValue({
+      ...baseReplyRow,
+      classification: 'OPT_OUT',
+    } as never);
     vi.spyOn(prisma.lead, 'findUnique').mockResolvedValue(null as never);
     const transactionSpy = vi.spyOn(prisma, '$transaction');
 

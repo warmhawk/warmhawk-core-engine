@@ -19,6 +19,11 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
   let domainId: string;
   let mailboxId: string;
   const createdCampaignIds: string[] = [];
+  // What the sending domain prints in every footer — a launch needs it (address is per domain).
+  const address = '100 Example Street, Springfield, ST 00000';
+  /** Ticks the test mailbox as one of the campaign's senders — a launch needs at least one. */
+  const linkSender = (campaignId: string) =>
+    prisma.campaignMailbox.create({ data: { campaignId, mailboxId } });
 
   beforeAll(async () => {
     process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-only-not-a-real-secret-value';
@@ -33,12 +38,17 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     );
 
     const domain = await prisma.domain.create({
-      data: { domainName: `campaigns-test-${Date.now()}.example.com` },
+      data: { domainName: `campaigns-test-${Date.now()}.example.com`, mailingAddress: address },
     });
     domainId = domain.id;
 
     const mailbox = await prisma.mailbox.create({
-      data: { email: `campaigns-sender-${Date.now()}@example.com`, domainId },
+      data: {
+        email: `campaigns-sender-${Date.now()}@example.com`,
+        domainId,
+        status: 'ACTIVE',
+        senderName: 'Sam Sender',
+      },
     });
     mailboxId = mailbox.id;
   });
@@ -93,7 +103,11 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     createdCampaignIds.push(campaign.id);
 
     const lead = await prisma.lead.create({
-      data: { campaignId: campaign.id, email: `agg-lead-${Date.now()}@example.com`, status: 'CONTACTED' },
+      data: {
+        campaignId: campaign.id,
+        email: `agg-lead-${Date.now()}@example.com`,
+        status: 'CONTACTED',
+      },
     });
     await prisma.executionLog.create({
       data: { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT' },
@@ -160,8 +174,11 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
   });
 
   it('launches with no unsubscribe template of its own when the install has a domain for the built-in page', async () => {
-    const campaign = await prisma.campaign.create({ data: { name: 'Built-in Unsubscribe', aiPromptTemplate: '' } });
+    const campaign = await prisma.campaign.create({
+      data: { name: 'Built-in Unsubscribe', aiPromptTemplate: '', template: 'Hi {{firstName}}' },
+    });
     createdCampaignIds.push(campaign.id);
+    await linkSender(campaign.id);
     const savedDomain = process.env.WARMHAWK_DOMAIN;
     process.env.WARMHAWK_DOMAIN = 'api.acme.example';
     try {
@@ -181,6 +198,8 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
   it('refuses to launch without an unsubscribe template on an install with no domain, then launches once one is set; pause works and 404s unknown', async () => {
     const id = createdCampaignIds[0];
     delete process.env.WARMHAWK_DOMAIN;
+    // Sender, domain address and copy are all in place, so the only thing missing is the link.
+    await linkSender(id);
 
     const refused = await app.inject({
       method: 'POST',
@@ -280,7 +299,11 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     expect(created.statusCode).toBe(201);
     const json = created.json();
     createdCampaignIds.push(json.id);
-    expect(json).toMatchObject({ subject: '{Quick idea|An idea} for {{company}}', aiMode: 'PROMPT', aiWritesSubject: true });
+    expect(json).toMatchObject({
+      subject: '{Quick idea|An idea} for {{company}}',
+      aiMode: 'PROMPT',
+      aiWritesSubject: true,
+    });
 
     const defaults = await app.inject({
       method: 'POST',
@@ -289,7 +312,11 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
       payload: { name: 'Compose Defaults', aiPromptTemplate: '' },
     });
     createdCampaignIds.push(defaults.json().id);
-    expect(defaults.json()).toMatchObject({ subject: null, aiMode: 'PERSONALIZE', aiWritesSubject: false });
+    expect(defaults.json()).toMatchObject({
+      subject: null,
+      aiMode: 'PERSONALIZE',
+      aiWritesSubject: false,
+    });
 
     const badMode = await app.inject({
       method: 'PATCH',
@@ -322,7 +349,10 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
       method: 'POST',
       url: '/v1/campaigns/preview',
       headers: auth(),
-      payload: { subject: 'Idea for {{company}}', template: 'Hi {{firstName}}, {{title}} question.' },
+      payload: {
+        subject: 'Idea for {{company}}',
+        template: 'Hi {{firstName}}, {{title}} question.',
+      },
     });
     expect(draft.statusCode).toBe(200);
     expect(draft.json()).toMatchObject({
@@ -334,13 +364,23 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     });
 
     const campaign = await prisma.campaign.create({
-      data: { name: 'Preview Leads', aiPromptTemplate: '', subject: 'Hi {{firstName}}', template: 'Body for {{company}}' },
+      data: {
+        name: 'Preview Leads',
+        aiPromptTemplate: '',
+        subject: 'Hi {{firstName}}',
+        template: 'Body for {{company}}',
+      },
     });
     createdCampaignIds.push(campaign.id);
     await prisma.lead.createMany({
       data: [
         { campaignId: campaign.id, email: 'one@acme.example', firstName: 'Ada', company: 'One Co' },
-        { campaignId: campaign.id, email: 'two@acme.example', firstName: 'Grace', company: 'Two Co' },
+        {
+          campaignId: campaign.id,
+          email: 'two@acme.example',
+          firstName: 'Grace',
+          company: 'Two Co',
+        },
       ],
     });
     const saved = await app.inject({
@@ -349,7 +389,12 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
       headers: auth(),
       payload: { campaignId: campaign.id, leadIndex: 1 },
     });
-    expect(saved.json()).toMatchObject({ sampleLead: false, leadIndex: 1, subject: 'Hi Grace', body: 'Body for Two Co' });
+    expect(saved.json()).toMatchObject({
+      sampleLead: false,
+      leadIndex: 1,
+      subject: 'Hi Grace',
+      body: 'Body for Two Co',
+    });
     expect(saved.json().leads).toHaveLength(2);
 
     const badSpintax = await app.inject({
@@ -362,83 +407,136 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
   });
 
   it('previews the CAN-SPAM footer sends get, or says what is missing when sends would be refused', async () => {
-    const before = await prisma.instanceSettings.findUnique({ where: { id: 'default' } });
-    const address = '100 Example Street, Springfield, ST 00000';
     const preview = (payload: Record<string, unknown>) =>
       app.inject({ method: 'POST', url: '/v1/campaigns/preview', headers: auth(), payload });
-    const draft = { subject: 'Idea for {{company}}', template: 'Hi {{firstName}},' };
+    const draft = {
+      subject: 'Idea for {{company}}',
+      template: 'Hi {{firstName}},',
+      mailboxIds: [mailboxId],
+    };
     const savedDomain = process.env.WARMHAWK_DOMAIN;
     delete process.env.WARMHAWK_DOMAIN;
     try {
-      await prisma.instanceSettings.upsert({
-        where: { id: 'default' },
-        create: { id: 'default', physicalMailingAddress: address },
-        update: { physicalMailingAddress: address },
-      });
-
       // Both set: the body and the if-the-AI-fails body end with the footer, unsubscribe per lead.
-      const complete = await preview({ ...draft, unsubscribeUrlTemplate: 'https://acme.example/u?email={{email}}' });
+      const complete = await preview({
+        ...draft,
+        unsubscribeUrlTemplate: 'https://acme.example/u?email={{email}}',
+      });
       expect(complete.statusCode).toBe(200);
       const footer = `\n\n--\n${address}\nUnsubscribe: https://acme.example/u?email=dana%40acme.example`;
-      expect(complete.json()).toMatchObject({ complianceMissing: [], body: `Hi Dana,${footer}`, fallback: { body: `Hi Dana,${footer}` } });
+      expect(complete.json()).toMatchObject({
+        complianceMissing: [],
+        body: `Hi Dana,${footer}`,
+        fallback: { body: `Hi Dana,${footer}` },
+      });
 
       // No unsubscribe link, or one sends would refuse (not https/mailto): no footer, and why.
       for (const unsubscribeUrlTemplate of [undefined, '', 'ftp://acme.example/u']) {
         const missing = await preview({ ...draft, unsubscribeUrlTemplate });
-        expect(missing.json()).toMatchObject({ complianceMissing: ['unsubscribe'], body: 'Hi Dana,' });
+        expect(missing.json()).toMatchObject({
+          complianceMissing: ['unsubscribe'],
+          body: 'Hi Dana,',
+        });
       }
 
       // A saved campaign's own link is used when the draft doesn't send one; the draft's wins when it does.
       const campaign = await prisma.campaign.create({
-        data: { name: 'Preview Footer', aiPromptTemplate: '', ...draft, unsubscribeUrlTemplate: 'mailto:out@acme.example' },
+        data: {
+          name: 'Preview Footer',
+          aiPromptTemplate: '',
+          subject: draft.subject,
+          template: draft.template,
+          unsubscribeUrlTemplate: 'mailto:out@acme.example',
+        },
       });
       createdCampaignIds.push(campaign.id);
-      expect((await preview({ campaignId: campaign.id })).json().body).toMatch(/Unsubscribe: mailto:out@acme\.example$/);
-      expect((await preview({ campaignId: campaign.id, unsubscribeUrlTemplate: '' })).json().complianceMissing).toEqual([
-        'unsubscribe',
-      ]);
+      await linkSender(campaign.id);
+      expect((await preview({ campaignId: campaign.id })).json().body).toMatch(
+        /Unsubscribe: mailto:out@acme\.example$/,
+      );
+      expect(
+        (await preview({ campaignId: campaign.id, unsubscribeUrlTemplate: '' })).json()
+          .complianceMissing,
+      ).toEqual(['unsubscribe']);
 
       // An install with a domain: no link of the campaign's own means the built-in page, signed
       // for the lead being previewed. A link sends would refuse is still reported, not replaced.
       process.env.WARMHAWK_DOMAIN = 'api.acme.example';
-      const lead = await prisma.lead.create({ data: { campaignId: campaign.id, email: 'dana@acme.example', firstName: 'Dana' } });
-      const builtIn = (await preview({ campaignId: campaign.id, unsubscribeUrlTemplate: '' })).json();
+      const lead = await prisma.lead.create({
+        data: { campaignId: campaign.id, email: 'dana@acme.example', firstName: 'Dana' },
+      });
+      const builtIn = (
+        await preview({ campaignId: campaign.id, unsubscribeUrlTemplate: '' })
+      ).json();
       expect(builtIn.complianceMissing).toEqual([]);
-      expect(builtIn.body.endsWith(`Unsubscribe: https://api.acme.example/unsubscribe/${signUnsubscribeToken(lead.id)}`)).toBe(true);
-      expect((await preview(draft)).json().body).toMatch(/Unsubscribe: https:\/\/api\.acme\.example\/unsubscribe\/sample\./);
-      expect((await preview({ ...draft, unsubscribeUrlTemplate: 'ftp://acme.example/u' })).json().complianceMissing).toEqual([
-        'unsubscribe',
-      ]);
+      expect(
+        builtIn.body.endsWith(
+          `Unsubscribe: https://api.acme.example/unsubscribe/${signUnsubscribeToken(lead.id)}`,
+        ),
+      ).toBe(true);
+      expect((await preview(draft)).json().body).toMatch(
+        /Unsubscribe: https:\/\/api\.acme\.example\/unsubscribe\/sample\./,
+      );
+      expect(
+        (await preview({ ...draft, unsubscribeUrlTemplate: 'ftp://acme.example/u' })).json()
+          .complianceMissing,
+      ).toEqual(['unsubscribe']);
       delete process.env.WARMHAWK_DOMAIN;
 
-      // No instance address: nothing can send, and the preview says so first.
-      await prisma.instanceSettings.delete({ where: { id: 'default' } });
-      expect((await preview({ ...draft, unsubscribeUrlTemplate: 'https://acme.example/u' })).json().complianceMissing).toEqual([
-        'address',
-      ]);
+      // No sender ticked: nothing can send, and the preview says so first.
+      expect(
+        (
+          await preview({
+            ...draft,
+            mailboxIds: [],
+            unsubscribeUrlTemplate: 'https://acme.example/u',
+          })
+        ).json().complianceMissing,
+      ).toEqual(['sender']);
+
+      // The sender's domain has no mailing address: the same, naming the address.
+      await prisma.domain.update({ where: { id: domainId }, data: { mailingAddress: null } });
+      expect(
+        (await preview({ ...draft, unsubscribeUrlTemplate: 'https://acme.example/u' })).json()
+          .complianceMissing,
+      ).toEqual(['address']);
       expect((await preview(draft)).json().complianceMissing).toEqual(['address', 'unsubscribe']);
     } finally {
       if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
       else process.env.WARMHAWK_DOMAIN = savedDomain;
-      await prisma.instanceSettings.deleteMany({ where: { id: 'default' } });
-      if (before) await prisma.instanceSettings.create({ data: before });
+      await prisma.domain.update({ where: { id: domainId }, data: { mailingAddress: address } });
     }
   });
 
   it('field-check flags unknown fields and counts leads missing a custom field', async () => {
-    const campaign = await prisma.campaign.create({ data: { name: 'Field Check', aiPromptTemplate: '' } });
+    const campaign = await prisma.campaign.create({
+      data: { name: 'Field Check', aiPromptTemplate: '' },
+    });
     createdCampaignIds.push(campaign.id);
     await prisma.lead.createMany({
       data: [
-        { campaignId: campaign.id, email: 'a@acme.example', firstName: 'Ada', customFields: { title: 'COO' } },
-        { campaignId: campaign.id, email: 'b@acme.example', firstName: null, customFields: { title: '' } },
+        {
+          campaignId: campaign.id,
+          email: 'a@acme.example',
+          firstName: 'Ada',
+          customFields: { title: 'COO' },
+        },
+        {
+          campaignId: campaign.id,
+          email: 'b@acme.example',
+          firstName: null,
+          customFields: { title: '' },
+        },
       ],
     });
     const response = await app.inject({
       method: 'POST',
       url: '/v1/campaigns/field-check',
       headers: auth(),
-      payload: { campaignId: campaign.id, texts: ['Hi {{firstName}} ({{Title}}) — {{senderName}}', '{{caseStudyResult}}'] },
+      payload: {
+        campaignId: campaign.id,
+        texts: ['Hi {{firstName}} ({{Title}}) — {{senderName}}', '{{caseStudyResult}}'],
+      },
     });
     expect(response.statusCode).toBe(200);
     const json = response.json();
@@ -453,18 +551,52 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
   });
 
   it('reports who wrote the last week of sends, on the list and per campaign', async () => {
-    const campaign = await prisma.campaign.create({ data: { name: 'AI Writing', aiPromptTemplate: '', aiProvider: 'GEMINI' } });
+    const campaign = await prisma.campaign.create({
+      data: { name: 'AI Writing', aiPromptTemplate: '', aiProvider: 'GEMINI' },
+    });
     createdCampaignIds.push(campaign.id);
     const lead = await prisma.lead.create({
-      data: { campaignId: campaign.id, email: 'w@acme.example', firstName: 'Dana', company: 'Acme' },
+      data: {
+        campaignId: campaign.id,
+        email: 'w@acme.example',
+        firstName: 'Dana',
+        company: 'Acme',
+      },
     });
     const old = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
     await prisma.executionLog.createMany({
       data: [
-        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_WRITTEN' },
-        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_WRITTEN' },
-        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_FALLBACK', aiFallbackReason: 'model_unavailable' },
-        { campaignId: campaign.id, leadId: lead.id, mailboxId, status: 'SENT', aiOutcome: 'AI_FALLBACK', aiFallbackReason: 'model_unavailable', createdAt: old },
+        {
+          campaignId: campaign.id,
+          leadId: lead.id,
+          mailboxId,
+          status: 'SENT',
+          aiOutcome: 'AI_WRITTEN',
+        },
+        {
+          campaignId: campaign.id,
+          leadId: lead.id,
+          mailboxId,
+          status: 'SENT',
+          aiOutcome: 'AI_WRITTEN',
+        },
+        {
+          campaignId: campaign.id,
+          leadId: lead.id,
+          mailboxId,
+          status: 'SENT',
+          aiOutcome: 'AI_FALLBACK',
+          aiFallbackReason: 'model_unavailable',
+        },
+        {
+          campaignId: campaign.id,
+          leadId: lead.id,
+          mailboxId,
+          status: 'SENT',
+          aiOutcome: 'AI_FALLBACK',
+          aiFallbackReason: 'model_unavailable',
+          createdAt: old,
+        },
       ],
     });
 
@@ -472,7 +604,11 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     const row = list.json().find((c: { id: string }) => c.id === campaign.id);
     expect(row).toMatchObject({ aiWrittenCount: 2, aiFallbackCount: 1 });
 
-    const detail = await app.inject({ method: 'GET', url: `/v1/campaigns/${campaign.id}/ai-writing`, headers: auth() });
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/v1/campaigns/${campaign.id}/ai-writing`,
+      headers: auth(),
+    });
     expect(detail.statusCode).toBe(200);
     const json = detail.json();
     expect(json.counts).toEqual({ aiWritten: 2, template: 0, aiFallback: 1 });
@@ -480,7 +616,11 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     expect(json.recent).toHaveLength(3);
     expect(json.recent[0].lead).toEqual({ firstName: 'Dana', lastName: null, company: 'Acme' });
 
-    const missing = await app.inject({ method: 'GET', url: '/v1/campaigns/nope/ai-writing', headers: auth() });
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/v1/campaigns/nope/ai-writing',
+      headers: auth(),
+    });
     expect(missing.statusCode).toBe(404);
   });
 

@@ -23,6 +23,7 @@ import {
 } from './aiProviderClient';
 import { renderSpintax } from './spintax';
 import { appendEuAiDisclosureIfNeeded } from './sendCompliance';
+import { followUpSubject } from './sequence';
 
 const PERSONALIZATION_RETRY_DELAY_MS = 1_500;
 export const FALLBACK_SUBJECT = 'Quick question';
@@ -52,7 +53,12 @@ export async function personalizeWithFallback(
     await sleep(PERSONALIZATION_RETRY_DELAY_MS);
     try {
       const { generatedText } = await personalizeContent(request);
-      return { generatedText, aiUsed: true, aiPersonalizationFailed: false, aiFallbackReason: null };
+      return {
+        generatedText,
+        aiUsed: true,
+        aiPersonalizationFailed: false,
+        aiFallbackReason: null,
+      };
     } catch (err) {
       return {
         generatedText: fallbackText,
@@ -72,7 +78,10 @@ export async function personalizeWithFallback(
  *  first is kept anyway, both because it's the more obviously correct order and as defense in
  *  depth: it removes every `{{...}}` pair before spintax's regex runs at all, rather than relying
  *  solely on that regex's exclusion. */
-export function renderFallbackTemplate(template: string, leadContext: Record<string, unknown>): string {
+export function renderFallbackTemplate(
+  template: string,
+  leadContext: Record<string, unknown>,
+): string {
   const merged = fillMergeFields(template, leadContext);
   return renderSpintax(merged);
 }
@@ -80,7 +89,9 @@ export function renderFallbackTemplate(template: string, leadContext: Record<str
 /** The From display name and `{{senderName}}`: the mailbox's own sender name, else the address's
  *  local part tidied into a first name (`dana.reyes@` → `Dana`) so the merge field never goes out
  *  as literal `{{senderName}}`. */
-export function resolveSenderName(mailbox: { email: string; senderName: string | null } | null): string | null {
+export function resolveSenderName(
+  mailbox: { email: string; senderName: string | null } | null,
+): string | null {
   if (!mailbox) return null;
   if (mailbox.senderName?.trim()) return mailbox.senderName.trim();
   const first = mailbox.email.split('@')[0]?.split(/[._+-]/)[0] ?? '';
@@ -88,7 +99,13 @@ export function resolveSenderName(mailbox: { email: string; senderName: string |
 }
 
 export function buildLeadContext(
-  lead: { email: string; firstName: string | null; lastName: string | null; company: string | null; customFields: unknown },
+  lead: {
+    email: string;
+    firstName: string | null;
+    lastName: string | null;
+    company: string | null;
+    customFields: unknown;
+  },
   senderName: string | null,
 ): Record<string, unknown> {
   return {
@@ -97,7 +114,9 @@ export function buildLeadContext(
     company: lead.company,
     email: lead.email,
     ...(senderName ? { senderName } : {}),
-    ...(typeof lead.customFields === 'object' && lead.customFields ? (lead.customFields as object) : {}),
+    ...(typeof lead.customFields === 'object' && lead.customFields
+      ? (lead.customFields as object)
+      : {}),
   };
 }
 
@@ -142,7 +161,9 @@ export interface ComposedEmail {
 
 function renderOwnEmail(campaign: ComposeCampaign, leadContext: Record<string, unknown>) {
   const body = renderFallbackTemplate(campaign.template ?? campaign.aiPromptTemplate, leadContext);
-  const subject = campaign.subject?.trim() ? renderFallbackTemplate(campaign.subject, leadContext).trim() : '';
+  const subject = campaign.subject?.trim()
+    ? renderFallbackTemplate(campaign.subject, leadContext).trim()
+    : '';
   return subject ? { subject, body: body.trim() } : splitLegacySubject(body);
 }
 
@@ -152,15 +173,109 @@ function countryCodeOf(lead: ComposeLead): string | undefined {
     : undefined;
 }
 
+/** A follow-up to compose instead of the first email: its own text, whether AI may rewrite it, and
+ *  the first email's subject it replies under. */
+export interface ComposeFollowUp {
+  position: number;
+  body: string;
+  aiRewrite: boolean;
+  threadSubject: string;
+}
+
+const FOLLOW_UP_INSTRUCTIONS =
+  'This is follow-up email {{position}} in a thread the recipient has not answered. Keep it short and ' +
+  'friendly, do not repeat the first email, and do not apologise for following up.';
+
+/** A follow-up: the step's own text, rendered like the first email, sent as "Re: <first subject>".
+ *  AI only touches it when the campaign has a provider AND the step asks for it — and even then the
+ *  step's text is what goes out when the AI fails. The subject is never AI-written: changing it
+ *  would break the thread. */
+async function composeFollowUp(
+  campaign: ComposeCampaign,
+  lead: ComposeLead,
+  leadContext: Record<string, unknown>,
+  followUp: ComposeFollowUp,
+): Promise<ComposedEmail> {
+  const own = {
+    subject: followUpSubject(followUp.threadSubject),
+    body: renderFallbackTemplate(followUp.body, leadContext).trim(),
+  };
+  const plain = (
+    aiOutcome: AiWriteOutcome,
+    aiFallbackReason: AiFallbackReason | null,
+  ): ComposedEmail => ({
+    ...own,
+    aiOutcome,
+    aiFallbackReason,
+    euAiDisclosureAppended: false,
+    fallback: own,
+  });
+  if (!campaign.aiProvider || !followUp.aiRewrite) return plain('TEMPLATE', null);
+
+  const providerKey = await prisma.aiProviderKey.findUnique({
+    where: { provider: campaign.aiProvider },
+  });
+  if (!providerKey || !providerKey.isActive) return plain('AI_FALLBACK', 'key_missing');
+
+  const apiKey = decrypt(
+    providerKey.apiKeyEncrypted,
+    loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || ''),
+  );
+  const instructions = [
+    FOLLOW_UP_INSTRUCTIONS.replace('{{position}}', String(followUp.position)),
+    campaign.aiPromptTemplate.trim(),
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+  const result = await personalizeWithFallback(
+    {
+      provider: campaign.aiProvider,
+      apiKey,
+      model: providerKey.model,
+      promptTemplate: instructions,
+      leadContext,
+      mode: 'PERSONALIZE',
+      baseEmail: own.body,
+      wantsSubject: false,
+    },
+    '',
+  );
+  if (!result.aiUsed || !result.generatedText.trim())
+    return plain('AI_FALLBACK', result.aiFallbackReason ?? 'provider_error');
+
+  const { body, disclosureAppended } = appendEuAiDisclosureIfNeeded(
+    result.generatedText.trim(),
+    true,
+    {
+      email: lead.email,
+      countryCode: countryCodeOf(lead),
+    },
+  );
+  return {
+    subject: own.subject,
+    body,
+    aiOutcome: 'AI_WRITTEN',
+    aiFallbackReason: null,
+    euAiDisclosureAppended: disclosureAppended,
+    fallback: own,
+  };
+}
+
 export async function composeCampaignEmail(params: {
   campaign: ComposeCampaign;
   lead: ComposeLead;
   senderName: string | null;
+  /** Compose this follow-up instead of the first email. */
+  followUp?: ComposeFollowUp;
 }): Promise<ComposedEmail> {
   const { campaign, lead, senderName } = params;
   const leadContext = buildLeadContext(lead, senderName);
+  if (params.followUp) return composeFollowUp(campaign, lead, leadContext, params.followUp);
   const own = renderOwnEmail(campaign, leadContext);
-  const plain = (aiOutcome: AiWriteOutcome, aiFallbackReason: AiFallbackReason | null): ComposedEmail => ({
+  const plain = (
+    aiOutcome: AiWriteOutcome,
+    aiFallbackReason: AiFallbackReason | null,
+  ): ComposedEmail => ({
     ...own,
     aiOutcome,
     aiFallbackReason,
@@ -170,13 +285,18 @@ export async function composeCampaignEmail(params: {
 
   if (!campaign.aiProvider) return plain('TEMPLATE', null);
 
-  const providerKey = await prisma.aiProviderKey.findUnique({ where: { provider: campaign.aiProvider } });
+  const providerKey = await prisma.aiProviderKey.findUnique({
+    where: { provider: campaign.aiProvider },
+  });
   if (!providerKey || !providerKey.isActive) return plain('AI_FALLBACK', 'key_missing');
 
   // A campaign with no subject of its own has the model write one rather than send its first line.
   const wantsSubject = campaign.aiWritesSubject || !campaign.subject?.trim();
   const ownBody = renderFallbackTemplate(campaign.template ?? '', leadContext).trim();
-  const apiKey = decrypt(providerKey.apiKeyEncrypted, loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || ''));
+  const apiKey = decrypt(
+    providerKey.apiKeyEncrypted,
+    loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || ''),
+  );
   const result = await personalizeWithFallback(
     {
       provider: campaign.aiProvider,
@@ -194,7 +314,9 @@ export async function composeCampaignEmail(params: {
 
   // Subject precedence: the model's when the campaign asked for it, else the campaign's own, else
   // the model's anyway (asked because the campaign has none), else the old first-line rule.
-  const parsed = wantsSubject ? parseGeneratedEmail(result.generatedText) : { subject: null, body: result.generatedText.trim() };
+  const parsed = wantsSubject
+    ? parseGeneratedEmail(result.generatedText)
+    : { subject: null, body: result.generatedText.trim() };
   const hasOwnSubject = Boolean(campaign.subject?.trim());
   let subject: string;
   let aiBody = parsed.body;

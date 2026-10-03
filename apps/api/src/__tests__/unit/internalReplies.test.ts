@@ -58,6 +58,7 @@ describe('GET /internal/replies/pending', () => {
           leadId: 'lead-1',
           campaignId: 'campaign-1',
           email: 'lead1@example.com',
+          providerMessageIds: ['<abc123@warmhawk>'],
           providerMessageId: '<abc123@warmhawk>',
         },
       ],
@@ -118,12 +119,12 @@ describe('GET /internal/replies/pending', () => {
     expect(replyFindManySpy).not.toHaveBeenCalled();
   });
 
-  it('keeps only the most recent send per lead when a lead has multiple SENT logs on this mailbox', async () => {
-    // executionLog.findMany is ordered `createdAt: 'desc'` in the route, so the mock returns the
-    // most-recent log first — the same ordering the route relies on for its `seenLeadIds` dedup.
+  it("returns every Message-ID in a lead's thread, oldest first, so a reply to a follow-up counts", async () => {
+    // executionLog.findMany is ordered `createdAt: 'asc'` in the route: first email, then each
+    // follow-up.
     vi.spyOn(prisma.executionLog, 'findMany').mockResolvedValue([
-      baseLog({ providerMessageId: '<newest@warmhawk>' }),
-      baseLog({ providerMessageId: '<oldest@warmhawk>' }),
+      baseLog({ providerMessageId: '<first@warmhawk>' }),
+      baseLog({ providerMessageId: '<follow-up-1@warmhawk>' }),
     ] as never);
     vi.spyOn(prisma.reply, 'findMany').mockResolvedValue([] as never);
 
@@ -133,15 +134,29 @@ describe('GET /internal/replies/pending', () => {
       headers: { 'x-callback-secret': 'test-secret' },
     });
 
-    const body = response.json() as { pending: { providerMessageId: string }[] };
+    const body = response.json() as {
+      pending: { providerMessageId: string; providerMessageIds: string[] }[];
+    };
     expect(body.pending).toHaveLength(1);
-    expect(body.pending[0]!.providerMessageId).toBe('<newest@warmhawk>');
+    expect(body.pending[0]!.providerMessageIds).toEqual([
+      '<first@warmhawk>',
+      '<follow-up-1@warmhawk>',
+    ]);
+    expect(body.pending[0]!.providerMessageId).toBe('<first@warmhawk> <follow-up-1@warmhawk>');
   });
 
   it('batches the existence check across multiple candidate leads in a single query', async () => {
     vi.spyOn(prisma.executionLog, 'findMany').mockResolvedValue([
-      baseLog({ leadId: 'lead-1', providerMessageId: '<a@warmhawk>', lead: { status: 'CONTACTED', email: 'a@example.com' } }),
-      baseLog({ leadId: 'lead-2', providerMessageId: '<b@warmhawk>', lead: { status: 'CONTACTED', email: 'b@example.com' } }),
+      baseLog({
+        leadId: 'lead-1',
+        providerMessageId: '<a@warmhawk>',
+        lead: { status: 'CONTACTED', email: 'a@example.com' },
+      }),
+      baseLog({
+        leadId: 'lead-2',
+        providerMessageId: '<b@warmhawk>',
+        lead: { status: 'CONTACTED', email: 'b@example.com' },
+      }),
     ] as never);
     const replyFindManySpy = vi
       .spyOn(prisma.reply, 'findMany')

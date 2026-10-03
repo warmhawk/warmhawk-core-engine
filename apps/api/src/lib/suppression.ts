@@ -24,7 +24,8 @@ export async function suppressEmail(
     }),
     prisma.lead.updateMany({
       where: { email, status: { not: 'SUPPRESSED' } },
-      data: { status: 'SUPPRESSED', nextRetryAt: null },
+      // Clearing `nextStepAt` ends any follow-up sequence too.
+      data: { status: 'SUPPRESSED', nextRetryAt: null, nextStepAt: null },
     }),
   ]);
 }

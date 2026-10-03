@@ -40,7 +40,9 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
   /** Reply-poll's correlation search — matches a reply by RFC 5322 threading headers rather than
    *  subject text: a reply's In-Reply-To (and, per RFC 2822 section 3.6.4, its References) header
    *  should carry the original send's Message-ID verbatim. Checked with a single `or` query so
-   *  either header threading it correctly counts as a match. */
+   *  either header threading it correctly counts as a match. With follow-ups a lead has one
+   *  Message-ID per email in the thread; `/internal/replies/pending` sends them space-separated
+   *  and a reply to any of them counts. */
   app.get<{ Querystring: { mailboxId?: string; providerMessageId?: string } }>(
     '/search',
     async (request, reply) => {
@@ -48,6 +50,11 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
       if (!mailboxId || !providerMessageId) {
         return reply.code(422).send({ error: 'mailboxId and providerMessageId are required' });
       }
+
+      const messageIds = providerMessageId.split(/\s+/).filter(Boolean).slice(0, 4);
+      const headerTerms: Array<{ header: Record<string, string> }> = messageIds.flatMap((id) =>
+        ['in-reply-to', 'references'].map((name) => ({ header: { [name]: id } })),
+      );
 
       const client = await openImapClient(mailboxId);
       try {
@@ -60,15 +67,7 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
           const lock = await client.getMailboxLock(folder);
           try {
             const uids = await withTimeout(
-              client.search(
-                {
-                  or: [
-                    { header: { 'in-reply-to': providerMessageId } },
-                    { header: { references: providerMessageId } },
-                  ],
-                },
-                { uid: true },
-              ),
+              client.search({ or: headerTerms }, { uid: true }),
               SEARCH_TIMEOUT_MS,
               'IMAP search',
             );
