@@ -8,6 +8,11 @@
  * the webhook ingest route (`webhookLeads.ts`) — CSV injection defense, email format, blocked
  * domains, suppression/duplicate skip-not-error semantics are identical across both entry
  * points, per the V12 spec's explicit factoring requirement.
+ *
+ * `POST /leads/import-rows` (10-03-26) is the dashboard's 4-step import: the browser parses the
+ * CSV and maps its columns, then sends the rows as JSON — first with `dryRun: true` for the Check
+ * step's counts, then for real. Same validation as the CSV route, plus two optional rules: skip
+ * people already in another campaign, and skip role addresses (info@, sales@ …).
  */
 import type { FastifyInstance } from 'fastify';
 import { parse } from 'csv-parse/sync';
@@ -36,6 +41,60 @@ interface ImportResponse {
 }
 
 const KNOWN_COLUMNS = new Set(['email', 'firstname', 'lastname', 'company']);
+
+/** Shared inboxes rather than a person — the import's "Skip role addresses" rule. */
+const ROLE_LOCAL_PARTS = new Set([
+  'admin',
+  'billing',
+  'contact',
+  'enquiries',
+  'help',
+  'hello',
+  'hi',
+  'info',
+  'inquiries',
+  'jobs',
+  'marketing',
+  'media',
+  'news',
+  'noreply',
+  'no-reply',
+  'office',
+  'press',
+  'sales',
+  'support',
+  'team',
+]);
+
+export function isRoleAddress(email: string): boolean {
+  return ROLE_LOCAL_PARTS.has(email.split('@')[0]?.toLowerCase() ?? '');
+}
+
+interface ImportRowsBody {
+  campaignId?: unknown;
+  rows?: unknown;
+  dryRun?: unknown;
+  rules?: { skipInOtherCampaigns?: unknown; skipRoleAddresses?: unknown };
+}
+
+interface ImportRowsResult {
+  dryRun: boolean;
+  total: number;
+  /** Rows that will be (dry run) or were imported. */
+  imported: number;
+  skippedDuplicate: number;
+  skippedSuppressed: number;
+  skippedOtherCampaign: number;
+  skippedRole: number;
+  rejected: Array<{ row: number; email: string; reason: string }>;
+}
+
+const REJECTION_TEXT: Record<string, string> = {
+  invalid_email: 'Not a valid email address',
+  blocked_domain: 'Disposable or test domain',
+  csv_injection_risk: 'A cell starts like a spreadsheet formula',
+  missing_campaign_id: 'No campaign',
+};
 
 function normalizeHeader(header: string): string {
   return header.trim().toLowerCase();
@@ -184,7 +243,10 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
       }),
     ]);
 
-    const statusCounts = Object.fromEntries(LEAD_STATUSES.map((s) => [s, 0])) as Record<LeadStatus, number>;
+    const statusCounts = Object.fromEntries(LEAD_STATUSES.map((s) => [s, 0])) as Record<
+      LeadStatus,
+      number
+    >;
     for (const row of byStatus) statusCounts[row.status] = row._count._all;
 
     return { leads, total, page: page.value.page, pageSize: page.value.pageSize, statusCounts };
@@ -233,7 +295,10 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
     const lead = await prisma.lead.findUnique({ where: { id: request.params.id } });
     if (!lead) return reply.code(404).send({ error: 'Lead not found' });
 
-    await suppressEmail(lead.email, { source: 'manual', reason: 'Manually suppressed from dashboard' });
+    await suppressEmail(lead.email, {
+      source: 'manual',
+      reason: 'Manually suppressed from dashboard',
+    });
     const updated = await prisma.lead.findUnique({ where: { id: lead.id } });
     return updated;
   });
@@ -354,6 +419,157 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  app.post<{ Body: ImportRowsBody }>(
+    '/import-rows',
+    {
+      bodyLimit: MAX_CSV_FILE_BYTES * 3,
+      config: {
+        rateLimit: {
+          max: RATE_LIMIT_CSV_IMPORT.max * 3,
+          timeWindow: RATE_LIMIT_CSV_IMPORT.timeWindowMs,
+        },
+      },
+    },
+    async (request, reply) => {
+      const body = request.body ?? {};
+      const campaignId = typeof body.campaignId === 'string' ? body.campaignId.trim() : '';
+      if (!campaignId)
+        return reply.code(422).send({ error: 'Pick the campaign these leads are for' });
+      if (!Array.isArray(body.rows)) return reply.code(422).send({ error: 'rows must be a list' });
+      if (body.rows.length > MAX_CSV_ROWS) {
+        return reply
+          .code(413)
+          .send({ error: `At most ${MAX_CSV_ROWS.toLocaleString('en-US')} rows per import` });
+      }
+      const campaign = await prisma.campaign.findUnique({
+        where: { id: campaignId },
+        select: { status: true },
+      });
+      if (!campaign) return reply.code(404).send({ error: 'Campaign not found' });
+      if (campaign.status === 'ARCHIVED')
+        return reply.code(422).send({ error: 'This campaign is archived' });
+      const dryRun = body.dryRun === true;
+      const skipInOtherCampaigns = body.rules?.skipInOtherCampaigns === true;
+      const skipRoleAddresses = body.rules?.skipRoleAddresses === true;
+
+      const result: ImportRowsResult = {
+        dryRun,
+        total: body.rows.length,
+        imported: 0,
+        skippedDuplicate: 0,
+        skippedSuppressed: 0,
+        skippedOtherCampaign: 0,
+        skippedRole: 0,
+        rejected: [],
+      };
+
+      // Validate every row, de-duplicating within the file itself.
+      const valid: Array<{ row: number; lead: RawLeadInput & { email: string } }> = [];
+      const seenInFile = new Set<string>();
+      (body.rows as unknown[]).forEach((raw, i) => {
+        const row = i + 2; // +1 for 0-index, +1 for the header row
+        const input = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+        const text = (value: unknown) =>
+          typeof value === 'string' ? value : value == null ? null : String(value);
+        const customFields =
+          input.customFields &&
+          typeof input.customFields === 'object' &&
+          !Array.isArray(input.customFields)
+            ? Object.fromEntries(
+                Object.entries(input.customFields as Record<string, unknown>)
+                  .filter(([key]) => key.trim())
+                  .map(([key, value]) => [key.trim(), text(value) ?? '']),
+              )
+            : {};
+        const validation = validateLeadFields({
+          campaignId,
+          email: text(input.email) ?? '',
+          firstName: text(input.firstName),
+          lastName: text(input.lastName),
+          company: text(input.company),
+          customFields,
+        });
+        if (!validation.valid) {
+          result.rejected.push({
+            row,
+            email: text(input.email)?.slice(0, 200) ?? '',
+            reason: validation.detail ?? REJECTION_TEXT[validation.reason] ?? validation.reason,
+          });
+          return;
+        }
+        if (seenInFile.has(validation.lead.email)) {
+          result.skippedDuplicate += 1;
+          return;
+        }
+        seenInFile.add(validation.lead.email);
+        if (skipRoleAddresses && isRoleAddress(validation.lead.email)) {
+          result.skippedRole += 1;
+          return;
+        }
+        valid.push({ row, lead: validation.lead });
+      });
+
+      // One query per 1,000 emails for each rule, rather than one per row.
+      const suppressed = new Set<string>();
+      const inThisCampaign = new Set<string>();
+      const inOtherCampaigns = new Set<string>();
+      const emails = valid.map((entry) => entry.lead.email);
+      for (let i = 0; i < emails.length; i += 1_000) {
+        const batch = emails.slice(i, i + 1_000);
+        const [suppressedRows, existingRows] = await Promise.all([
+          prisma.suppressionEntry.findMany({
+            where: { email: { in: batch } },
+            select: { email: true },
+          }),
+          prisma.lead.findMany({
+            where: {
+              email: { in: batch },
+              ...(skipInOtherCampaigns
+                ? { campaign: { status: { not: 'ARCHIVED' } } }
+                : { campaignId }),
+            },
+            select: { email: true, campaignId: true },
+          }),
+        ]);
+        for (const entry of suppressedRows) suppressed.add(entry.email);
+        for (const lead of existingRows)
+          (lead.campaignId === campaignId ? inThisCampaign : inOtherCampaigns).add(lead.email);
+      }
+
+      const toInsert: RawLeadInput[] = [];
+      for (const { lead } of valid) {
+        if (suppressed.has(lead.email)) result.skippedSuppressed += 1;
+        else if (inThisCampaign.has(lead.email)) result.skippedDuplicate += 1;
+        else if (skipInOtherCampaigns && inOtherCampaigns.has(lead.email))
+          result.skippedOtherCampaign += 1;
+        else toInsert.push(lead);
+      }
+
+      if (dryRun) {
+        result.imported = toInsert.length;
+        return reply.send(result);
+      }
+
+      const CHUNK_SIZE = 500;
+      for (let i = 0; i < toInsert.length; i += CHUNK_SIZE) {
+        const { count } = await prisma.lead.createMany({
+          data: toInsert.slice(i, i + CHUNK_SIZE).map((lead) => ({
+            campaignId,
+            email: lead.email,
+            firstName: lead.firstName ?? null,
+            lastName: lead.lastName ?? null,
+            company: lead.company ?? null,
+            customFields: (lead.customFields ?? {}) as Prisma.InputJsonValue,
+            status: 'UNTOUCHED',
+          })),
+          skipDuplicates: true,
+        });
+        result.imported += count;
+      }
+      return reply.send(result);
+    },
+  );
+
   /** `DELETE /v1/leads/erase` (spec, Guardrails) — bulk GDPR erasure by data-subject email,
    *  distinct from the per-ID hard delete below. "Removes PII, preserves anonymized counts": every
    *  Lead row matching this email (across every campaign in this account — a data-subject erasure
@@ -387,6 +603,10 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
           lastName: null,
           company: null,
           customFields: Prisma.DbNull,
+          // The first email's subject can carry merge-field PII, and an erased lead gets no
+          // more follow-ups.
+          threadSubject: null,
+          nextStepAt: null,
           piiErasedAt: new Date(),
         },
       });

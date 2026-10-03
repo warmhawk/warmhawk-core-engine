@@ -72,17 +72,115 @@ export function selectNextMailbox(
   return { chosen: advanced, remaining };
 }
 
+/** What a campaign send needs from a mailbox beyond being ACTIVE: its domain has a mailing address
+ *  for the CAN-SPAM footer. A mailbox without one is never handed a lead — the send would be refused. */
+export const SENDABLE_MAILBOX_WHERE = {
+  status: 'ACTIVE' as const,
+  domain: { mailingAddress: { not: null } },
+};
+
+export function hasMailingAddress(mailbox: { domain: { mailingAddress: string | null } }): boolean {
+  return Boolean(mailbox.domain.mailingAddress?.trim());
+}
+
 /**
- * Runs one enqueuer tick: pulls up to `LEAD_BATCH_SIZE` eligible leads, rotates them across
- * capacity-available ACTIVE mailboxes using `selectNextMailbox`, reserves each assigned slot in
- * Redis (collision avoidance within the tick), schedules the BullMQ dispatch job with the
- * computed delay, and persists `queuedJobId`/`queuedSlotAt` on the Lead row for crash recovery.
+ * Runs one enqueuer tick, in two passes that share the mailboxes' daily capacity:
+ *
+ *   1. Follow-ups that are due (`Lead.nextStepAt` passed), each from the mailbox that sent the
+ *      lead's first email — never another one, so the lead sees one sender in one thread. They go
+ *      first: a sequence someone started should finish on time.
+ *   2. First emails, each rotated (least-recently-used) across only the mailboxes that campaign
+ *      sends from (`CampaignMailbox`) — never every mailbox on the install.
+ *
+ * Only ACTIVE mailboxes under today's cap whose domain has a mailing address are used. Each
+ * assigned slot is reserved in Redis (collision avoidance within the tick), the BullMQ dispatch job
+ * is scheduled with the computed delay, and `queuedJobId`/`queuedSlotAt` are persisted on the Lead
+ * row for crash recovery. A first email moves the lead to QUEUED; a follow-up leaves its status
+ * alone (it stays CONTACTED/OPENED) and is marked queued by `queuedJobId` alone.
  */
 export async function runEnqueuerTick(
   queue: Queue,
   redis: IORedis,
   now: Date = new Date(),
 ): Promise<number> {
+  const mailboxes = await prisma.mailbox.findMany({
+    where: SENDABLE_MAILBOX_WHERE,
+    orderBy: [{ lastSentAt: { sort: 'asc', nulls: 'first' } }],
+    include: { domain: { select: { mailingAddress: true } } },
+  });
+
+  const pool = new Map<string, MailboxCandidate>();
+  for (const m of mailboxes) {
+    if (!hasMailingAddress(m)) continue;
+    const cap = campaignCapToday(m.dailyCap, m.warmupGraduatedAt, now);
+    if (m.sentToday >= cap) continue;
+    pool.set(m.id, {
+      id: m.id,
+      lastSentAt: m.lastSentAt,
+      sentToday: m.sentToday,
+      dailyCap: cap,
+      sortKeyMs: m.lastSentAt ? m.lastSentAt.getTime() : -Infinity,
+    });
+  }
+  if (pool.size === 0) return 0;
+
+  /** Reserves the next slot on `target`, advances its in-memory rotation state (dropping it from
+   *  the pool at its cap), and returns the job's delay and id. */
+  const takeSlot = async (target: MailboxCandidate, leadId: string) => {
+    const reservationKey = mailboxReservationKey(target.id);
+    const existingReservation = await redis.get(reservationKey);
+    const pendingReservationAt = existingReservation ? new Date(Number(existingReservation)) : null;
+
+    const delaySeconds = computeNextSlotSeconds(target.lastSentAt, now, pendingReservationAt);
+    const slotAtMs = now.getTime() + delaySeconds * 1000;
+
+    const { chosen } = selectNextMailbox([target], slotAtMs);
+    if (chosen && chosen.sentToday < chosen.dailyCap) pool.set(target.id, chosen);
+    else pool.delete(target.id);
+
+    await redis.set(
+      reservationKey,
+      String(slotAtMs),
+      'EX',
+      delaySeconds + RESERVATION_TTL_PADDING_SECONDS,
+    );
+    return { delaySeconds, slotAtMs, jobId: `${leadId}:${target.id}:${slotAtMs}` };
+  };
+
+  let enqueued = 0;
+
+  // Pass 1 — due follow-ups, from each lead's own mailbox.
+  const dueFollowUps = await prisma.lead.findMany({
+    where: {
+      status: { in: ['CONTACTED', 'OPENED'] },
+      nextStepAt: { lte: now },
+      queuedJobId: null,
+      mailboxId: { in: [...pool.keys()] },
+      // A reply recorded before replies set REPLIED still ends the sequence.
+      replies: { none: {} },
+      campaign: { status: 'ACTIVE', pausedForBounceRate: false },
+    },
+    orderBy: { nextStepAt: 'asc' },
+    take: LEAD_BATCH_SIZE,
+  });
+  for (const lead of dueFollowUps) {
+    const target = lead.mailboxId ? pool.get(lead.mailboxId) : undefined;
+    if (!target) continue; // its mailbox hit today's cap earlier in this pass; tomorrow
+    const { delaySeconds, slotAtMs, jobId } = await takeSlot(target, lead.id);
+    await prisma.lead.update({
+      where: { id: lead.id },
+      data: { queuedJobId: jobId, queuedSlotAt: new Date(slotAtMs) },
+    });
+    await queue.add(
+      DISPATCH_JOB_NAME,
+      { leadId: lead.id, mailboxId: target.id },
+      { delay: delaySeconds * 1000, jobId },
+    );
+    enqueued += 1;
+  }
+  if (pool.size === 0) return enqueued;
+
+  // Pass 2 — first emails, each from one of its campaign's own mailboxes.
   const leads = await prisma.lead.findMany({
     where: {
       // `pausedForBounceRate: false` — Guardrails circuit breaker (see `lib/mailSender.ts`'s
@@ -91,59 +189,40 @@ export async function runEnqueuerTick(
       // track independent things (is this campaign scheduled to run vs. did reputation protection
       // step in) and a customer resuming from a manual pause shouldn't need to separately clear a
       // stale bounce flag that was never set.
-      campaign: { status: 'ACTIVE', pausedForBounceRate: false },
+      campaign: {
+        status: 'ACTIVE',
+        pausedForBounceRate: false,
+        mailboxes: { some: { mailboxId: { in: [...pool.keys()] } } },
+      },
       OR: [{ status: 'UNTOUCHED' }, { status: 'QUEUED', nextRetryAt: { lte: now } }],
     },
     orderBy: { createdAt: 'asc' },
     take: LEAD_BATCH_SIZE,
   });
-  if (leads.length === 0) return 0;
+  if (leads.length === 0) return enqueued;
 
-  const mailboxes = await prisma.mailbox.findMany({
-    where: { status: 'ACTIVE' },
-    orderBy: [{ lastSentAt: { sort: 'asc', nulls: 'first' } }],
+  const links = await prisma.campaignMailbox.findMany({
+    where: { campaignId: { in: [...new Set(leads.map((l) => l.campaignId))] } },
+    select: { campaignId: true, mailboxId: true },
   });
-
-  let candidates: MailboxCandidate[] = mailboxes
-    .map((m) => ({ m, cap: campaignCapToday(m.dailyCap, m.warmupGraduatedAt, now) }))
-    .filter(({ m, cap }) => m.sentToday < cap)
-    .map(({ m, cap }) => ({
-      id: m.id,
-      lastSentAt: m.lastSentAt,
-      sentToday: m.sentToday,
-      dailyCap: cap,
-      sortKeyMs: m.lastSentAt ? m.lastSentAt.getTime() : -Infinity,
-    }));
-
-  let enqueued = 0;
+  const sendersByCampaign = new Map<string, string[]>();
+  for (const link of links) {
+    sendersByCampaign.set(link.campaignId, [
+      ...(sendersByCampaign.get(link.campaignId) ?? []),
+      link.mailboxId,
+    ]);
+  }
 
   for (const lead of leads) {
-    if (candidates.length === 0) break;
+    if (pool.size === 0) break;
+    const candidates = (sendersByCampaign.get(lead.campaignId) ?? [])
+      .map((id) => pool.get(id))
+      .filter((c): c is MailboxCandidate => Boolean(c));
+    // Least-recently-used of this campaign's mailboxes that still have room today.
+    const target = [...candidates].sort((a, b) => a.sortKeyMs - b.sortKeyMs)[0];
+    if (!target) continue;
 
-    // Peek at the current LRU-first candidate to compute its jittered delay before committing
-    // the in-memory rotation state via selectNextMailbox.
-    const lruSorted = [...candidates].sort((a, b) => a.sortKeyMs - b.sortKeyMs);
-    const target = lruSorted[0];
-
-    const reservationKey = mailboxReservationKey(target.id);
-    const existingReservation = await redis.get(reservationKey);
-    const pendingReservationAt = existingReservation ? new Date(Number(existingReservation)) : null;
-
-    const delaySeconds = computeNextSlotSeconds(target.lastSentAt, now, pendingReservationAt);
-    const slotAtMs = now.getTime() + delaySeconds * 1000;
-
-    const { chosen, remaining } = selectNextMailbox(candidates, slotAtMs);
-    if (!chosen) break;
-    candidates = remaining;
-
-    await redis.set(
-      reservationKey,
-      String(slotAtMs),
-      'EX',
-      delaySeconds + RESERVATION_TTL_PADDING_SECONDS,
-    );
-
-    const jobId = `${lead.id}:${chosen.id}:${slotAtMs}`;
+    const { delaySeconds, slotAtMs, jobId } = await takeSlot(target, lead.id);
 
     await prisma.lead.update({
       where: { id: lead.id },
@@ -157,7 +236,7 @@ export async function runEnqueuerTick(
 
     await queue.add(
       DISPATCH_JOB_NAME,
-      { leadId: lead.id, mailboxId: chosen.id },
+      { leadId: lead.id, mailboxId: target.id },
       { delay: delaySeconds * 1000, jobId },
     );
 

@@ -149,16 +149,13 @@ describe('WarmHawk Connect (install side)', () => {
     );
 
     it('never returns the license from GET /v1/instance-settings', async () => {
-      const findUnique = vi
-        .spyOn(prisma.instanceSettings, 'findUnique')
-        .mockResolvedValue({ id: 'default', physicalMailingAddress: '1 Main St' } as never);
-      await app.inject({
+      const response = await app.inject({
         method: 'GET',
         url: '/v1/instance-settings',
         headers: { authorization: 'Bearer operator-token' },
       });
-      const { select } = findUnique.mock.calls[0]![0] as { select: Record<string, boolean> };
-      expect(select).toEqual({ id: true, physicalMailingAddress: true, updatedAt: true });
+      expect(response.statusCode).toBe(200);
+      expect(Object.keys(response.json() as object).sort()).toEqual(['builtInUnsubscribe', 'id']);
     });
   });
 

@@ -27,7 +27,8 @@ export interface ReconcileResult {
 }
 
 /**
- * Finds Lead rows whose status is QUEUED and whose recorded slot time is overdue by more than
+ * Finds Lead rows queued for a send (a first email: QUEUED; a follow-up: CONTACTED/OPENED with a
+ * `queuedJobId`) and whose recorded slot time is overdue by more than
  * `RECONCILE_OVERDUE_GRACE_MINUTES`, checks whether BullMQ still has a job matching the lead's
  * `queuedJobId`, and re-enqueues (with a fresh short delay) any lead for which no such job exists.
  */
@@ -37,9 +38,10 @@ export async function reconcileStuckLeads(
 ): Promise<ReconcileResult> {
   const cutoff = new Date(now.getTime() - RECONCILE_OVERDUE_GRACE_MINUTES * 60 * 1000);
 
+  // A queued follow-up keeps its CONTACTED/OPENED status — `queuedJobId` alone marks it queued.
   const candidates = await prisma.lead.findMany({
     where: {
-      status: 'QUEUED',
+      status: { in: ['QUEUED', 'CONTACTED', 'OPENED'] },
       queuedSlotAt: { lt: cutoff },
       queuedJobId: { not: null },
     },
