@@ -82,6 +82,8 @@ export async function buildGoogleAuthUrl(state: string): Promise<string> {
 
 export interface ExchangedGoogleTokens {
   refreshToken: string;
+  /** Short-lived; used once at connect to read the Gmail send-as display name. */
+  accessToken: string | null;
   scope: string | null;
 }
 
@@ -93,7 +95,11 @@ export async function exchangeGoogleCode(code: string): Promise<ExchangedGoogleT
       'Google did not return a refresh_token (missing access_type=offline or prompt=consent?)',
     );
   }
-  return { refreshToken: tokens.refresh_token, scope: tokens.scope ?? null };
+  return {
+    refreshToken: tokens.refresh_token,
+    accessToken: tokens.access_token ?? null,
+    scope: tokens.scope ?? null,
+  };
 }
 
 export async function mintGoogleAccessToken(refreshToken: string): Promise<string> {

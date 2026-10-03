@@ -1,12 +1,9 @@
 /**
- * Internal-only domain listing + blocklist re-check, mirroring `internalMailboxes.ts`'s pattern —
- * the new `blocklist-poll` n8n scheduled workflow needs to enumerate domains and re-run
- * `checkBlocklists` on each one continuously (domains.ts's own header comment already describes
- * blocklist/DNSBL status as needing "continuous... monitoring", unlike SPF/DKIM/DMARC which only
- * change when a customer edits DNS records and are checked on-demand via the dashboard's
- * `POST /v1/domains/:domain/check`). Deliberately scoped to blocklist status only — this route
- * does not touch spfStatus/dkimStatus/dmarcStatus, so a scheduled poll can never clobber a more
- * recent on-demand full check with a stale/redundant SPF/DKIM/DMARC result.
+ * Internal-only domain listing + scheduled re-check, mirroring `internalMailboxes.ts`'s pattern —
+ * the `blocklist-poll` n8n scheduled workflow enumerates domains and calls `/check-blocklist` on
+ * each one hourly. Despite the route name (kept so existing installs' n8n workflows keep working),
+ * that is now the full SPF/DKIM/DMARC + blocklist check — see `lib/domainCheck.ts` for why the
+ * blocklist-only version left stale green badges.
  *
  * Also holds `POST /notify-changes` (Item 5, Tier-2-only alert routing) — reads back the
  * `DomainCheckHistory` rows this file's `/check-blocklist` route (and domains.ts's
@@ -22,7 +19,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
-import { checkBlocklists } from '../lib/dnsChecks';
+import { runDomainCheck } from '../lib/domainCheck';
 import { postDomainChangeAlert } from '../lib/alertWebhook';
 import { generateCandidates } from '../lib/lookalikeCandidates';
 import { checkRdapRegistration } from '../lib/rdap';
@@ -72,28 +69,7 @@ export async function internalDomainsRoutes(app: FastifyInstance): Promise<void>
     const domain = await prisma.domain.findUnique({ where: { domainName } });
     if (!domain) return reply.code(404).send({ error: 'Domain not found' });
 
-    const blocklistStatus = await checkBlocklists(domain.domainName);
-
-    // Same pre-update-snapshot pattern as `POST /v1/domains/:domain/check` (domains.ts) — the
-    // history row records the values this write is about to replace. spfStatus/dkimStatus/
-    // dmarcStatus are untouched by this route, so the snapshot's copy of them is also its final
-    // copy (no separate "new" value to diff against for those three fields from this call).
-    const [, updated] = await prisma.$transaction([
-      prisma.domainCheckHistory.create({
-        data: {
-          domainId: domain.id,
-          spfStatus: domain.spfStatus,
-          dkimStatus: domain.dkimStatus,
-          dmarcStatus: domain.dmarcStatus,
-          blocklistStatus: domain.blocklistStatus ?? undefined,
-        },
-      }),
-      prisma.domain.update({
-        where: { id: domain.id },
-        data: { blocklistStatus, lastBlocklistCheckAt: new Date() },
-      }),
-    ]);
-    return updated;
+    return runDomainCheck(domain);
   });
 
   /**

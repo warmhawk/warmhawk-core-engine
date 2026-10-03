@@ -95,6 +95,64 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 
+  it('saves, validates and clears a DKIM selector on create and patch', async () => {
+    const domainName = `domains-selector-test-${Date.now()}.example.com`;
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/domains',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { domainName, dkimSelector: ' S1._domainkey ' },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id;
+    createdDomainIds.push(id);
+    expect(created.json().dkimSelector).toBe('s1');
+
+    const invalid = await app.inject({
+      method: 'PATCH',
+      url: `/v1/domains/${id}`,
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { dkimSelector: 'not a selector' },
+    });
+    expect(invalid.statusCode).toBe(422);
+
+    // A patch that does not mention the selector leaves it alone.
+    const redirectOnly = await app.inject({
+      method: 'PATCH',
+      url: `/v1/domains/${id}`,
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { redirectUrl: 'https://example.org/landing' },
+    });
+    expect(redirectOnly.json().dkimSelector).toBe('s1');
+
+    const cleared = await app.inject({
+      method: 'PATCH',
+      url: `/v1/domains/${id}`,
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { dkimSelector: '' },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().dkimSelector).toBeNull();
+  });
+
+  it(
+    'checks DKIM at the saved selector, where a miss is FAIL rather than PENDING',
+    async () => {
+      const domainName = `domains-selector-check-${Date.now()}.example.com`;
+      const domain = await prisma.domain.create({ data: { domainName, dkimSelector: 'mine' } });
+      createdDomainIds.push(domain.id);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/v1/domains/${domainName}/check`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json().dkimStatus).toBe('FAIL');
+    },
+    20_000,
+  );
+
   it(
     'runs a live SPF/DKIM/DMARC + blocklist check by domain name, and 404s an unknown domain name',
     async () => {
@@ -111,7 +169,7 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
       const json = response.json();
       expect(['PASS', 'FAIL']).toContain(json.spfStatus);
       // 🔑 DKIM is the one check with no verdict to give here. Selectors cannot be enumerated
-      // from DNS, so with none supplied `checkDkim` guesses nine common names, and a miss means
+      // from DNS, so with none supplied `checkDkim` guesses common names, and a miss means
       // "we did not find one" — not "this domain has no DKIM". That is PENDING, and for a
       // synthetic domain that never resolves it is PENDING every time. Allowing only PASS/FAIL
       // encoded the very bug lib/dnsChecks.ts was changed to fix: reporting an absence nobody

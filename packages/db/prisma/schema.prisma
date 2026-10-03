@@ -191,6 +191,11 @@ model Domain {
   dkimStatus  DnsRecordStatus @default(PENDING)
   dmarcStatus DnsRecordStatus @default(PENDING)
 
+  /// The DKIM selector this domain signs with, when the customer has told us. Providers like
+  /// Amazon SES, Postmark and ZeptoMail mint a per-customer selector no guess list can find; with
+  /// one saved, every check looks there and a miss is FAIL rather than PENDING.
+  dkimSelector String?
+
   /// New, V11 — continuous DNSBL/blocklist monitoring. Per-list PASS/FAIL/PENDING, e.g.
   /// `{ "spamhausZen": "PASS", "spamhausDbl": "PASS", "barracuda": "FAIL", "sorbs": "PASS" }`.
   blocklistStatus      Json?
