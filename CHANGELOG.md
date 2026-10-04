@@ -8,6 +8,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-10-04
+
 ### Fixed
 
 - **Deleting a mailbox left its leads' follow-ups stuck.** Follow-ups only ever go from the mailbox
