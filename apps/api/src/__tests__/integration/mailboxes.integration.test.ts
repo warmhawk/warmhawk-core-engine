@@ -238,6 +238,46 @@ describeIntegration('mailboxes routes (integration, real Postgres)', () => {
     expect(again.statusCode).toBe(404);
   });
 
+  it('ends the follow-up sequences of leads pinned to a deleted mailbox', async () => {
+    const stamp = Date.now();
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/mailboxes',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { email: `pinned-${stamp}@example.com`, domainId },
+    });
+    const mailboxId = created.json().id;
+    const campaign = await prisma.campaign.create({
+      data: { name: `Mailbox delete ${stamp}`, aiPromptTemplate: '' },
+    });
+    const lead = await prisma.lead.create({
+      data: {
+        campaignId: campaign.id,
+        email: `lead-${stamp}@example.com`,
+        status: 'CONTACTED',
+        mailboxId,
+        stepsSent: 1,
+        nextStepAt: new Date(Date.now() + 86_400_000),
+      },
+    });
+
+    try {
+      const deleted = await app.inject({
+        method: 'DELETE',
+        url: `/v1/mailboxes/${mailboxId}`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(deleted.statusCode).toBe(204);
+
+      const after = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
+      expect(after.mailboxId).toBeNull();
+      expect(after.nextStepAt).toBeNull();
+      expect(after.status).toBe('CONTACTED');
+    } finally {
+      await prisma.campaign.delete({ where: { id: campaign.id } });
+    }
+  });
+
   it('requires authentication', async () => {
     const response = await app.inject({ method: 'GET', url: '/v1/mailboxes' });
     expect(response.statusCode).toBe(401);

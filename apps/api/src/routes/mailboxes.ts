@@ -131,8 +131,17 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.delete<{ Params: { id: string } }>('/:id', async (request, reply) => {
-    const deleted = await prisma.mailbox
-      .delete({ where: { id: request.params.id } })
+    // Follow-ups only ever go from the lead's own mailbox, so once it's gone the rest of each
+    // sequence can never send. `Lead.mailboxId` is SetNull on delete, which would otherwise leave
+    // `nextStepAt` set and the lead counted as a follow-up due forever — end those sequences here.
+    const deleted = await prisma
+      .$transaction([
+        prisma.lead.updateMany({
+          where: { mailboxId: request.params.id, nextStepAt: { not: null } },
+          data: { nextStepAt: null },
+        }),
+        prisma.mailbox.delete({ where: { id: request.params.id } }),
+      ])
       .catch(() => null);
     if (!deleted) return reply.code(404).send({ error: 'Mailbox not found' });
     return reply.code(204).send();
