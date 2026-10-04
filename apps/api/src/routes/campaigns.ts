@@ -487,6 +487,8 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
             where: {
               campaignId: { in: campaignIds },
               nextStepAt: { not: null },
+              // A lead whose mailbox was deleted has no sender left for its follow-ups.
+              mailboxId: { not: null },
               status: { in: ['CONTACTED', 'OPENED'] },
             },
             _count: { _all: true },
