@@ -91,10 +91,10 @@ describe('evaluateLaunch', () => {
     expect(check.canLaunch).toBe(true);
   });
 
-  it('warns without blocking: no sender name, all warming, no leads, blank fields', () => {
+  it('warns without blocking: no sender name, all warming, no leads', () => {
     const check = evaluateLaunch(
       campaign({
-        template: 'Hi {{firstName}} at {{city}}',
+        template: 'Hi {{firstName|there}}',
         mailboxes: [mailbox({ senderName: null, status: 'WARMUP' })],
       }),
       {
@@ -108,9 +108,24 @@ describe('evaluateLaunch', () => {
       'ALL_WARMING',
       'SENDER_NAME_MISSING',
       'NO_LEADS',
-      'FIELD_BLANK',
-      'FIELD_UNKNOWN',
     ]);
+  });
+
+  it('blocks a merge field that would go out as written, and names the fallback', () => {
+    const check = evaluateLaunch(campaign({ template: 'Hi {{firstName}} at {{city}}' }), {
+      builtInUnsubscribe: true,
+      fieldLeads: [
+        { firstName: null, lastName: null, company: null, customFields: {} },
+        { firstName: 'Ada', lastName: null, company: null, customFields: {} },
+      ],
+    });
+    expect(check.canLaunch).toBe(false);
+    expect(check.problems).toEqual([
+      expect.objectContaining({ code: 'FIELD_BLANK', field: 'firstName', missingCount: 1 }),
+      expect.objectContaining({ code: 'FIELD_UNKNOWN', field: 'city' }),
+    ]);
+    expect(check.problems[0]?.message).toContain('{{firstName|there}}');
+    expect(check.warnings).toEqual([]);
   });
 
   it('accepts a campaign unsubscribe link when there is no built-in page', () => {
@@ -140,5 +155,14 @@ describe('checkFields', () => {
       { name: 'senderName', status: 'ok', missingCount: 0 },
     ]);
     expect(result.available).toContain('city');
+  });
+
+  it('never flags a field written with a fallback', () => {
+    const lead = { firstName: null, lastName: null, company: null, customFields: {} };
+    expect(checkFields(['Hi {{firstName|there}} {{nope|x}}'], [lead]).fields).toEqual([]);
+    // The same field without one, elsewhere in the copy, is still checked.
+    expect(checkFields(['{{firstName|there}}', '{{FirstName}}'], [lead]).fields).toEqual([
+      { name: 'FirstName', status: 'partial', missingCount: 1 },
+    ]);
   });
 });

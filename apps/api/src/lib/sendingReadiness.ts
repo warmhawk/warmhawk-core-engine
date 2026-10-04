@@ -12,6 +12,7 @@
  */
 import type { CampaignStatus, MailboxStatus } from '@warmhawk/db';
 import { prisma } from '@warmhawk/db';
+import { MERGE_TOKEN } from './aiProviderClient';
 
 export const STANDARD_FIELDS = ['firstName', 'lastName', 'company', 'email', 'senderName'];
 
@@ -19,16 +20,23 @@ export function domainHasAddress(domain: { mailingAddress: string | null }): boo
   return Boolean(domain.mailingAddress?.trim());
 }
 
-/** `{{name}}` tokens in the given texts, de-duplicated case-insensitively (merge-field filling is
- *  case-insensitive too), keeping the first spelling seen. */
+/** `{{name}}` tokens in the given texts that need the lead to have a value, de-duplicated
+ *  case-insensitively (merge-field filling is case-insensitive too), keeping the first spelling
+ *  seen. A `{{name|fallback}}` token never needs one, so it isn't listed. */
 export function mergeTokens(texts: string[]): string[] {
   const seen = new Map<string, string>();
   for (const text of texts) {
-    for (const match of text.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)) {
-      if (!seen.has(match[1].toLowerCase())) seen.set(match[1].toLowerCase(), match[1]);
+    for (const [, name, fallback] of text.matchAll(MERGE_TOKEN)) {
+      if (fallback === undefined && !seen.has(name.toLowerCase()))
+        seen.set(name.toLowerCase(), name);
     }
   }
   return [...seen.values()];
+}
+
+/** The fallback a launch problem suggests for a field: "Hi {{firstName|there}}," reads right. */
+function fallbackExample(field: string): string {
+  return `{{${field}|${field.toLowerCase() === 'firstname' ? 'there' : '…'}}}`;
 }
 
 export function isBlank(value: unknown): boolean {
@@ -48,10 +56,11 @@ export interface FieldStatus {
   missingCount: number;
 }
 
-/** Which `{{fields}}` in the texts fill for these leads. Standard fields always resolve
- *  (`senderName` falls back to the mailbox address); a custom field is checked against the leads,
- *  with a count of leads that have it blank; a token no lead has at all is `unknown` — it would go
- *  out as literal `{{token}}` text. */
+/** Which `{{fields}}` in the texts fill for these leads. `email` and `senderName` always resolve
+ *  (`senderName` falls back to the mailbox address); every other field is checked against the
+ *  leads, with a count of leads that have it blank; a token no lead has at all is `unknown`. A
+ *  blank or unknown field goes out as literal `{{token}}` text — unless it has a fallback, and then
+ *  it isn't checked at all. */
 export function checkFields(
   texts: string[],
   leads: FieldLead[],
@@ -106,14 +115,14 @@ export type LaunchProblem =
   | { code: 'NO_UNSUBSCRIBE'; message: string }
   | { code: 'BOUNCE_PAUSED'; message: string }
   | { code: 'EMAIL_EMPTY'; message: string }
-  | { code: 'STEP_EMPTY'; message: string; position: number };
+  | { code: 'STEP_EMPTY'; message: string; position: number }
+  | { code: 'FIELD_BLANK'; message: string; field: string; missingCount: number }
+  | { code: 'FIELD_UNKNOWN'; message: string; field: string };
 
 export type LaunchWarning =
   | { code: 'SENDER_NAME_MISSING'; message: string; mailboxes: { id: string; email: string }[] }
   | { code: 'ALL_WARMING'; message: string }
-  | { code: 'NO_LEADS'; message: string }
-  | { code: 'FIELD_BLANK'; message: string; field: string; missingCount: number }
-  | { code: 'FIELD_UNKNOWN'; message: string; field: string };
+  | { code: 'NO_LEADS'; message: string };
 
 export interface LaunchCheck {
   canLaunch: boolean;
@@ -244,6 +253,8 @@ export function evaluateLaunch(
     });
   }
 
+  // A merge field that would go out as literal `{{token}}` text blocks launch: the fix is a
+  // fallback (`{{firstName|there}}`) or the right column name.
   if (options.fieldLeads && options.fieldLeads.length > 0) {
     const texts = [
       campaign.subject ?? '',
@@ -252,15 +263,15 @@ export function evaluateLaunch(
     ];
     for (const field of checkFields(texts, options.fieldLeads).fields) {
       if (field.status === 'unknown') {
-        warnings.push({
+        problems.push({
           code: 'FIELD_UNKNOWN',
-          message: `{{${field.name}}} isn't a column in your leads — it would go out as written`,
+          message: `{{${field.name}}} isn't a column in your leads, so it would go out as written — fix the name or give it a fallback: ${fallbackExample(field.name)}`,
           field: field.name,
         });
       } else if (field.status === 'partial') {
-        warnings.push({
+        problems.push({
           code: 'FIELD_BLANK',
-          message: `{{${field.name}}} is empty for ${plural(field.missingCount, 'lead')}`,
+          message: `{{${field.name}}} is empty for ${plural(field.missingCount, 'lead')}, so ${field.missingCount === 1 ? 'it' : 'they'} would get it as written — give it a fallback: ${fallbackExample(field.name)}`,
           field: field.name,
           missingCount: field.missingCount,
         });
