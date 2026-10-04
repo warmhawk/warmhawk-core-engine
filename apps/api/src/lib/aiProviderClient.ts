@@ -76,20 +76,37 @@ export async function validateProviderKey(provider: AiProvider, apiKey: string):
   return provider === 'GEMINI' ? validateGeminiKey(apiKey) : validateClaudeKey(apiKey);
 }
 
+/** A merge field: `{{name}}`, or `{{name|fallback}}` to use the fallback text when the lead's value
+ *  is blank (`Hi {{firstName|there}},`). Group 1 is the name, group 2 the fallback when given. */
+export const MERGE_TOKEN = /\{\{\s*([^{}|]+?)\s*(?:\|([^{}]*))?\}\}/g;
+
+function hasValue(value: unknown): boolean {
+  return (
+    value !== null && value !== undefined && (typeof value !== 'string' || Boolean(value.trim()))
+  );
+}
+
 /** Fills `{{fieldName}}` placeholders in `template` from `leadContext` (same mustache-style
  *  convention `lib/mailSender.ts#resolveUnsubscribeUrl` already uses for `{{email}}`). Exported so
  *  the no-AI-provider / inactive-key fallback path in `routes/internalAi.ts` can apply the same
  *  merge-field substitution to `campaign.template` directly, instead of a second implementation —
  *  this was originally private and only reachable via `buildPersonalizationPrompt` below, which
- *  runs solely on the AI-prompt path. */
+ *  runs solely on the AI-prompt path.
+ *
+ *  Names match case-insensitively. A blank value (null, missing, or only spaces) takes the token's
+ *  fallback; with no fallback the token is left as written, never filled with an empty spot — the
+ *  launch check (`lib/sendingReadiness.ts`) blocks a campaign that would send one. */
 export function fillMergeFields(template: string, leadContext: Record<string, unknown>): string {
-  let filled = template;
+  const values = new Map<string, unknown>();
   for (const [key, value] of Object.entries(leadContext)) {
-    if (value === null || value === undefined) continue;
-    const pattern = new RegExp(`\\{\\{\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}\\}`, 'gi');
-    filled = filled.replace(pattern, String(value));
+    const name = key.trim().toLowerCase();
+    if (!hasValue(values.get(name))) values.set(name, value);
   }
-  return filled;
+  return template.replace(MERGE_TOKEN, (token, name: string, fallback: string | undefined) => {
+    const value = values.get(name.toLowerCase());
+    if (hasValue(value)) return String(value);
+    return fallback === undefined ? token : fallback.trim();
+  });
 }
 
 /** Fills merge fields in `promptTemplate` (via `fillMergeFields` above), then appends the full lead

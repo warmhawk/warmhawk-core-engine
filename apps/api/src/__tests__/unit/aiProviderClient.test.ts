@@ -121,6 +121,30 @@ describe('fillMergeFields', () => {
   it('renders plain text with no placeholders unchanged', () => {
     expect(fillMergeFields('Just checking in.', { firstName: 'Ada' })).toBe('Just checking in.');
   });
+
+  it('uses a {{field|fallback}} when the value is missing, null or blank', () => {
+    const text = 'Hi {{firstName|there}}, {{ role | your team }} and {{nickname|friend}}.';
+    expect(fillMergeFields(text, { firstName: null, role: '  ' })).toBe(
+      'Hi there, your team and friend.',
+    );
+    expect(fillMergeFields(text, { firstName: 'Ada', role: 'SDR', nickname: 'A' })).toBe(
+      'Hi Ada, SDR and A.',
+    );
+    expect(fillMergeFields('Hi{{firstName|}},', { firstName: '' })).toBe('Hi,');
+  });
+
+  it('leaves a blank value with no fallback as written, never an empty spot', () => {
+    expect(fillMergeFields('hiring a {{role}}.', { role: '' })).toBe('hiring a {{role}}.');
+  });
+
+  it('keeps the first non-blank value when two keys differ only in case', () => {
+    expect(fillMergeFields('{{city}}', { city: '', City: 'Austin' })).toBe('Austin');
+    expect(fillMergeFields('{{city}}', { city: 'Dallas', City: 'Austin' })).toBe('Dallas');
+  });
+
+  it('fills a field name with spaces, and inserts a value with $ as it is', () => {
+    expect(fillMergeFields('{{Deal Size}}', { 'Deal Size': '$&100' })).toBe('$&100');
+  });
 });
 
 describe('classifyReply', () => {

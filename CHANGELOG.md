@@ -8,6 +8,30 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-04
+
+### Added
+
+- **Merge-field fallbacks.** `{{firstName|there}}` sends "there" to every lead with no first name —
+  in the email, its subject, follow-ups and AI instructions. Works for any field, custom columns
+  included.
+
+### Changed
+
+- **A merge field that would go out as written now blocks launch.** `FIELD_BLANK` (the field is
+  empty for some leads) and `FIELD_UNKNOWN` (no lead has that column) moved from `warnings[]` to
+  `problems[]` on `POST /v1/campaigns/:id/launch` and `GET /v1/campaigns/:id/launch-check`. Each
+  message names the fix: a fallback, or the right column name. A field written with a fallback is
+  never flagged.
+
+### Fixed
+
+- **A blank custom field filled in as an empty spot** ("I saw you're hiring a ."). A value that is
+  empty or only spaces now counts as missing, the same as a missing first name: the fallback is used
+  if there is one, and the launch check stops the campaign if not.
+- **A `$` in a lead's value could be rewritten while filling merge fields** (`$&` became the token
+  itself).
+
 ## [1.9.1] - 2026-10-04
 
 ### Fixed
