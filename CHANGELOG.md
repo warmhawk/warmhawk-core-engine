@@ -15,6 +15,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
   send — but the lead kept its next follow-up date and was counted under *follow-ups due* forever.
   Deleting a mailbox now ends those sequences, and leads with no mailbox left are no longer counted
   as due.
+- **`install.sh` and `warmhawk update` could skip every n8n workflow import on a busy host.** n8n's
+  CLI can still fail for a few seconds after its health check answers, and one failed workflow
+  list skipped the whole import, leaving sending unprovisioned. The list is now tried up to five
+  times first.
 
 ## [1.9.0] - 2026-10-03
 
