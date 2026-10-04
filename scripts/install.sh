@@ -401,8 +401,14 @@ for _ in $(seq 1 60); do
 done
 [ "$N8N_READY" = true ] || log "WARNING: n8n did not report healthy within 2 minutes — trying the import anyway."
 N8N_IMPORT_FAILED=false
-N8N_LIST_OK=true
-EXISTING_N8N_WORKFLOWS=$(docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" exec -T n8n n8n list:workflow 2>/dev/null) || N8N_LIST_OK=false
+# The list boots n8n's own CLI against its DB, which can still fail for a few seconds after
+# /healthz answers on a busy host (an install on a loaded CI runner skipped every import this way),
+# so it gets a few tries before the import is skipped.
+N8N_LIST_OK=false
+for _ in 1 2 3 4 5; do
+  if EXISTING_N8N_WORKFLOWS=$(docker compose --env-file "$REPO_ROOT/.env/.env" -f "$REPO_ROOT/docker/docker-compose.yml" exec -T n8n n8n list:workflow 2>/dev/null); then N8N_LIST_OK=true; break; fi
+  sleep 5
+done
 if [ "$N8N_LIST_OK" = false ]; then
   # Without the list, every existing workflow looks absent and would be imported a second time.
   log "WARNING: could not list the existing n8n workflows — skipping the import so nothing is duplicated."
