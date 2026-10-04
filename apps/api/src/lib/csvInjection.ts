@@ -11,11 +11,19 @@
 
 const DANGEROUS_LEADING_CHARS = ['=', '+', '-', '@'];
 
+/** An `@` followed only by letters, digits and `. _ - /`: a scoped npm package
+ *  (`@supabase/storage-js`) or a social handle (`@acme`). A spreadsheet can only run code through a
+ *  function call `(`, a DDE link `|` or a sheet reference `!`, so this shape can never do more than
+ *  show `#NAME?`. */
+const PLAIN_AT_TOKEN = /^@[A-Za-z0-9._/-]+$/;
+
 /** Returns true if `value` would be interpreted as a formula by a spreadsheet application when
- *  the CSV is opened (i.e. starts with `=`, `+`, `-`, or `@`, ignoring leading whitespace). */
+ *  the CSV is opened (i.e. starts with `=`, `+`, `-`, or `@`, ignoring leading whitespace), except
+ *  for a plain `@` token (see `PLAIN_AT_TOKEN`). */
 export function isCsvInjectionRisk(value: string): boolean {
   const trimmed = value.trimStart();
   if (trimmed.length === 0) return false;
+  if (PLAIN_AT_TOKEN.test(trimmed.trimEnd())) return false;
   return DANGEROUS_LEADING_CHARS.includes(trimmed[0]);
 }
 
