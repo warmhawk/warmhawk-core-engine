@@ -80,6 +80,12 @@ export async function validateProviderKey(provider: AiProvider, apiKey: string):
  *  is blank (`Hi {{firstName|there}},`). Group 1 is the name, group 2 the fallback when given. */
 export const MERGE_TOKEN = /\{\{\s*([^{}|]+?)\s*(?:\|([^{}]*))?\}\}/g;
 
+/** The key a merge-field name matches on: capitals, underscores, dashes and spaces don't count, so
+ *  `{{dns_finding}}`, `{{dnsFinding}}` and `{{DNS Finding}}` all fill from a `dnsFinding` column. */
+export function mergeKey(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
 function hasValue(value: unknown): boolean {
   return (
     value !== null && value !== undefined && (typeof value !== 'string' || Boolean(value.trim()))
@@ -93,17 +99,17 @@ function hasValue(value: unknown): boolean {
  *  this was originally private and only reachable via `buildPersonalizationPrompt` below, which
  *  runs solely on the AI-prompt path.
  *
- *  Names match case-insensitively. A blank value (null, missing, or only spaces) takes the token's
- *  fallback; with no fallback the token is left as written, never filled with an empty spot — the
+ *  Names match by `mergeKey`, so capitals and underscores don't count. A blank value (null,
+ *  missing, or only spaces) takes the token's fallback; with no fallback the token is left as written, never filled with an empty spot — the
  *  launch check (`lib/sendingReadiness.ts`) blocks a campaign that would send one. */
 export function fillMergeFields(template: string, leadContext: Record<string, unknown>): string {
   const values = new Map<string, unknown>();
   for (const [key, value] of Object.entries(leadContext)) {
-    const name = key.trim().toLowerCase();
+    const name = mergeKey(key);
     if (!hasValue(values.get(name))) values.set(name, value);
   }
   return template.replace(MERGE_TOKEN, (token, name: string, fallback: string | undefined) => {
-    const value = values.get(name.toLowerCase());
+    const value = values.get(mergeKey(name));
     if (hasValue(value)) return String(value);
     return fallback === undefined ? token : fallback.trim();
   });

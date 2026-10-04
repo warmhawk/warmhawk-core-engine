@@ -142,6 +142,14 @@ describe('fillMergeFields', () => {
     expect(fillMergeFields('{{city}}', { city: 'Dallas', City: 'Austin' })).toBe('Dallas');
   });
 
+  it('matches a name whatever its capitals and underscores', () => {
+    const context = { dnsFinding: 'No DMARC record.', top_fix: 'Add DMARC.' };
+    expect(fillMergeFields('{{dns_finding}} {{DNS_Finding}} {{topFix}}', context)).toBe(
+      'No DMARC record. No DMARC record. Add DMARC.',
+    );
+    expect(fillMergeFields('{{dnsFinding}}', { dns_finding: '', dnsFinding: 'Set.' })).toBe('Set.');
+  });
+
   it('fills a field name with spaces, and inserts a value with $ as it is', () => {
     expect(fillMergeFields('{{Deal Size}}', { 'Deal Size': '$&100' })).toBe('$&100');
   });
