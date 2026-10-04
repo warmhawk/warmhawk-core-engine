@@ -7,15 +7,28 @@ import {
 } from '../../lib/csvInjection';
 
 describe('CSV injection defense', () => {
-  it.each(['=cmd|"/c calc"!A1', '+1+1', '-2+3', '@SUM(A1:A2)', '  =leadingspace'])(
-    'flags %s as a CSV injection risk',
-    (value) => {
-      expect(isCsvInjectionRisk(value)).toBe(true);
-    },
-  );
+  it.each([
+    '=cmd|"/c calc"!A1',
+    '+1+1',
+    '-2+3',
+    '@SUM(A1:A2)',
+    '  =leadingspace',
+    '@cmd|"/c calc"!A1',
+    '@HYPERLINK("https://evil.example")',
+    '@a b',
+  ])('flags %s as a CSV injection risk', (value) => {
+    expect(isCsvInjectionRisk(value)).toBe(true);
+  });
 
   it.each(['Acme Corp', 'John Doe', 'john@example.com', '123 Main St', ''])(
     'does not flag %s as a risk',
+    (value) => {
+      expect(isCsvInjectionRisk(value)).toBe(false);
+    },
+  );
+
+  it.each(['@supabase/storage-js', '@team-plain/webhooks', '@acme', '  @n8n_io ', '@A1'])(
+    'does not flag the plain @ token %s (npm scope or handle) as a risk',
     (value) => {
       expect(isCsvInjectionRisk(value)).toBe(false);
     },

@@ -8,6 +8,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-10-04
+
+### Fixed
+
+- **Scoped npm packages and @handles were rejected on lead import.** A cell like
+  `@supabase/storage-js` or `@acme` was refused as a spreadsheet formula. A plain `@` token —
+  letters, digits and `. _ - /` only — can't run anything in a spreadsheet, so it now imports. Any
+  `@` value with a function call, DDE link, sheet reference or space is still rejected, as are
+  values starting with `=`, `+` or `-`.
+
 ## [1.10.0] - 2026-10-04
 
 ### Added
