@@ -165,4 +165,24 @@ describe('checkFields', () => {
       { name: 'FirstName', status: 'partial', missingCount: 1 },
     ]);
   });
+
+  it('matches a field whatever its capitals and underscores', () => {
+    const lead = {
+      firstName: 'A',
+      lastName: null,
+      company: null,
+      customFields: { dnsFinding: 'No DMARC record.', top_fix: '' },
+    };
+    // One field, spelled three ways, is listed once; snake_case names a camelCase column.
+    expect(
+      checkFields(
+        ['{{dns_finding}} {{dnsFinding}} {{DNS Finding}} {{topFix}} {{first_name}}'],
+        [lead],
+      ).fields,
+    ).toEqual([
+      { name: 'dns_finding', status: 'ok', missingCount: 0 },
+      { name: 'topFix', status: 'partial', missingCount: 1 },
+      { name: 'first_name', status: 'ok', missingCount: 0 },
+    ]);
+  });
 });

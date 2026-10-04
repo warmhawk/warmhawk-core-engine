@@ -8,6 +8,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/), versions
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-10-04
+
+### Fixed
+
+- **Merge-field names match whatever their capitals and underscores.** `{{dns_finding}}`,
+  `{{dnsFinding}}` and `{{DNS Finding}}` now all fill from the same lead field. The import wizard
+  turns a `dns_finding` CSV column into `dnsFinding`, so copy written with the column's own name
+  used to go out as literal `{{dns_finding}}` text — the launch check blocked it as unknown. Filling,
+  the launch check and its field list all use the same rule.
+
 ## [1.10.1] - 2026-10-04
 
 ### Fixed

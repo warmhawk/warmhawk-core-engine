@@ -12,7 +12,7 @@
  */
 import type { CampaignStatus, MailboxStatus } from '@warmhawk/db';
 import { prisma } from '@warmhawk/db';
-import { MERGE_TOKEN } from './aiProviderClient';
+import { MERGE_TOKEN, mergeKey } from './aiProviderClient';
 
 export const STANDARD_FIELDS = ['firstName', 'lastName', 'company', 'email', 'senderName'];
 
@@ -20,15 +20,14 @@ export function domainHasAddress(domain: { mailingAddress: string | null }): boo
   return Boolean(domain.mailingAddress?.trim());
 }
 
-/** `{{name}}` tokens in the given texts that need the lead to have a value, de-duplicated
- *  case-insensitively (merge-field filling is case-insensitive too), keeping the first spelling
+/** `{{name}}` tokens in the given texts that need the lead to have a value, de-duplicated by
+ *  `mergeKey` (merge-field filling matches that way too), keeping the first spelling
  *  seen. A `{{name|fallback}}` token never needs one, so it isn't listed. */
 export function mergeTokens(texts: string[]): string[] {
   const seen = new Map<string, string>();
   for (const text of texts) {
     for (const [, name, fallback] of text.matchAll(MERGE_TOKEN)) {
-      if (fallback === undefined && !seen.has(name.toLowerCase()))
-        seen.set(name.toLowerCase(), name);
+      if (fallback === undefined && !seen.has(mergeKey(name))) seen.set(mergeKey(name), name);
     }
   }
   return [...seen.values()];
@@ -69,22 +68,22 @@ export function checkFields(
   for (const lead of leads) {
     if (typeof lead.customFields !== 'object' || !lead.customFields) continue;
     for (const key of Object.keys(lead.customFields)) {
-      if (!customKeys.has(key.toLowerCase())) customKeys.set(key.toLowerCase(), key);
+      if (!customKeys.has(mergeKey(key))) customKeys.set(mergeKey(key), key);
     }
   }
   const valueOf = (lead: FieldLead, name: string): unknown => {
-    const lower = name.toLowerCase();
-    if (lower === 'firstname') return lead.firstName;
-    if (lower === 'lastname') return lead.lastName;
-    if (lower === 'company') return lead.company;
+    const key = mergeKey(name);
+    if (key === 'firstname') return lead.firstName;
+    if (key === 'lastname') return lead.lastName;
+    if (key === 'company') return lead.company;
     const custom = (lead.customFields ?? {}) as Record<string, unknown>;
-    const key = Object.keys(custom).find((k) => k.toLowerCase() === lower);
-    return key ? custom[key] : undefined;
+    const customKey = Object.keys(custom).find((k) => mergeKey(k) === key);
+    return customKey ? custom[customKey] : undefined;
   };
 
   const fields = mergeTokens(texts).map((name): FieldStatus => {
-    const lower = name.toLowerCase();
-    const standard = STANDARD_FIELDS.some((field) => field.toLowerCase() === lower);
+    const lower = mergeKey(name);
+    const standard = STANDARD_FIELDS.some((field) => mergeKey(field) === lower);
     if (!standard && !customKeys.has(lower))
       return { name, status: 'unknown', missingCount: leads.length };
     const alwaysSet = lower === 'email' || lower === 'sendername';
