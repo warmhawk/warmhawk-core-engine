@@ -280,6 +280,74 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     expect(again.statusCode).toBe(404);
   });
 
+  it('duplicates a campaign as a draft with its email, follow-ups, AI settings and senders, but none of its leads', async () => {
+    const source = await prisma.campaign.create({
+      data: {
+        name: 'Duplicate Me',
+        status: 'PAUSED',
+        aiPromptTemplate: 'Mention their city',
+        template: 'Hi {{firstName}}, quick question.',
+        subject: 'Quick question',
+        aiProvider: 'GEMINI',
+        aiMode: 'PROMPT',
+        aiWritesSubject: true,
+        unsubscribeUrlTemplate: 'https://example.org/u/{{token}}',
+        bounceRateThreshold: 0.08,
+        pausedForBounceRate: true,
+        steps: {
+          create: [
+            { position: 1, waitDays: 3, body: 'Bumping this up.', aiRewrite: true },
+            { position: 2, waitDays: 5, body: 'Last note from me.' },
+          ],
+        },
+      },
+    });
+    createdCampaignIds.push(source.id);
+    await linkSender(source.id);
+    await prisma.lead.create({
+      data: { campaignId: source.id, email: `dup-lead-${Date.now()}@example.com` },
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/v1/campaigns/${source.id}/duplicate`,
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(response.statusCode).toBe(201);
+    const copy = response.json();
+    createdCampaignIds.push(copy.id);
+    expect(copy.id).not.toBe(source.id);
+    expect(copy).toMatchObject({
+      name: 'Copy of Duplicate Me',
+      status: 'DRAFT',
+      aiPromptTemplate: 'Mention their city',
+      template: 'Hi {{firstName}}, quick question.',
+      subject: 'Quick question',
+      aiProvider: 'GEMINI',
+      aiMode: 'PROMPT',
+      aiWritesSubject: true,
+      unsubscribeUrlTemplate: 'https://example.org/u/{{token}}',
+      bounceRateThreshold: 0.08,
+      pausedForBounceRate: false,
+      mailboxIds: [mailboxId],
+      steps: [
+        { position: 1, waitDays: 3, body: 'Bumping this up.', aiRewrite: true },
+        { position: 2, waitDays: 5, body: 'Last note from me.', aiRewrite: false },
+      ],
+    });
+    expect(await prisma.lead.count({ where: { campaignId: copy.id } })).toBe(0);
+    // The original is untouched.
+    expect(await prisma.lead.count({ where: { campaignId: source.id } })).toBe(1);
+    expect(await prisma.campaignStep.count({ where: { campaignId: source.id } })).toBe(2);
+
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns/does-not-exist/duplicate',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+
   const auth = () => ({ authorization: `Bearer ${authToken}` });
 
   it('stores subject, aiMode and aiWritesSubject, and validates them', async () => {

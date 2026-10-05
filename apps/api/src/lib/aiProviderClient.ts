@@ -187,18 +187,21 @@ export async function personalizeContent(request: PersonalizeRequest): Promise<P
   return { generatedText };
 }
 
-/** Keyword-heuristic classifier — kept as the resilient fallback for `classifyReply` below (used
- *  only when the real provider call itself fails, e.g. a timeout or an expired key on an inbox
- *  that's actively receiving replies) so a transient AI-provider outage never silently drops every
- *  reply to UNCLASSIFIED, including the compliance-sensitive OPT_OUT case. Same patterns as this
- *  file's original stub implementation. */
-function classifyByKeyword(content: string): ReplyClassificationLabel {
+/** Keyword-heuristic classifier — the resilient fallback for `classifyReply` below when the
+ *  provider call fails (a timeout, an expired key), and the whole classifier on an install with no
+ *  AI key at all (`routes/internalAi.ts`), so OPT_OUT auto-suppression never depends on one.
+ *  Callers pass the reply with the quoted original stripped (`lib/replyText.ts`): every email we
+ *  send carries "Unsubscribe:" in its footer, so run on a full reply this reads nearly everything
+ *  as an opt-out. A bare "stop" stays out on purpose — "don't stop" is a live lead. */
+export function classifyByKeyword(content: string): ReplyClassificationLabel {
   const lower = content.toLowerCase();
   if (!lower.trim()) return 'UNCLASSIFIED';
-  if (/unsubscribe|remove me|opt out|stop emailing/.test(lower)) return 'OPT_OUT';
+  if (/unsubscribe|remove me|opt out|stop emailing|take me off|do not contact|don'?t email/.test(lower)) {
+    return 'OPT_OUT';
+  }
   if (/out of office|on vacation|away from my desk/.test(lower)) return 'OUT_OF_OFFICE';
   if (/automatic reply|auto-reply|do not reply/.test(lower)) return 'AUTO_REPLY';
-  if (/not interested|no thanks|please remove/.test(lower)) return 'NOT_INTERESTED';
+  if (/not interested|uninterested|no thanks|please remove/.test(lower)) return 'NOT_INTERESTED';
   if (/interested|let's talk|sounds good|schedule a call|book a time/.test(lower)) return 'INTERESTED';
   return 'UNCLASSIFIED';
 }

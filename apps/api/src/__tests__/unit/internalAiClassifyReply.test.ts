@@ -158,15 +158,30 @@ describe('POST /internal/ai/classify-reply', () => {
     expect(transactionSpy).not.toHaveBeenCalled();
   });
 
-  it('with no AI provider configured anywhere, classifies as UNCLASSIFIED without calling the provider', async () => {
+  /** A reply that quotes our email, footer and all — the shape almost every real reply has. */
+  const quotingReply = (typed: string) =>
+    [
+      typed,
+      '',
+      'On Mon, Oct 5, 2026 at 3:00 PM Santhi T. <sender@example.com> wrote:',
+      '> Hi Ana, quick question about your outbound.',
+      '> --',
+      '> 204 Example St, Austin, TX 78701',
+      '> Unsubscribe: https://warmhawk.example.com/unsubscribe/tok123',
+    ].join('\n');
+
+  function noProviderAnywhere(rawContent: string) {
     vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue({
       ...baseReplyRow,
+      rawContent,
       campaign: { aiProvider: null },
     } as never);
     vi.spyOn(prisma.aiProviderKey, 'findFirst').mockResolvedValue(null as never);
-    const updateSpy = vi
-      .spyOn(prisma.reply, 'update')
-      .mockResolvedValue({ ...baseReplyRow, classification: 'UNCLASSIFIED' } as never);
+    return vi.spyOn(prisma.reply, 'update').mockResolvedValue(baseReplyRow as never);
+  }
+
+  it('with no AI provider configured anywhere, falls back to keywords without calling the provider', async () => {
+    const updateSpy = noProviderAnywhere('Sounds good, can we schedule a call next week?');
 
     const response = await classifyReplyRequest();
 
@@ -174,8 +189,61 @@ describe('POST /internal/ai/classify-reply', () => {
     expect(aiProviderClient.classifyReply).not.toHaveBeenCalled();
     expect(updateSpy).toHaveBeenCalledWith({
       where: { id: 'reply-1' },
-      data: { classification: 'UNCLASSIFIED', classifiedAt: expect.any(Date) },
+      data: { classification: 'INTERESTED', classifiedAt: expect.any(Date) },
     });
+  });
+
+  it('with no AI provider, a "stop emailing me" reply is an opt-out and suppresses the address', async () => {
+    const updateSpy = noProviderAnywhere(quotingReply('Please stop emailing me.'));
+    vi.spyOn(prisma.lead, 'findUnique').mockResolvedValue({
+      id: 'lead-1',
+      email: 'lead1@example.com',
+    } as never);
+    const upsertSpy = vi.spyOn(prisma.suppressionEntry, 'upsert').mockResolvedValue({} as never);
+    vi.spyOn(prisma.lead, 'updateMany').mockResolvedValue({ count: 1 } as never);
+    vi.spyOn(prisma, '$transaction').mockImplementation(async (ops) =>
+      Promise.all(ops as unknown as Promise<unknown>[]),
+    );
+
+    const response = await classifyReplyRequest();
+
+    expect(response.statusCode).toBe(200);
+    expect(updateSpy.mock.calls[0]![0].data).toMatchObject({ classification: 'OPT_OUT' });
+    expect(upsertSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { email: 'lead1@example.com' } }),
+    );
+  });
+
+  it('with no AI provider, the quoted "Unsubscribe:" footer does not make an interested reply an opt-out', async () => {
+    const updateSpy = noProviderAnywhere(quotingReply("Sounds good, let's talk Thursday."));
+    const transactionSpy = vi.spyOn(prisma, '$transaction');
+
+    const response = await classifyReplyRequest();
+
+    expect(response.statusCode).toBe(200);
+    expect(updateSpy.mock.calls[0]![0].data).toMatchObject({ classification: 'INTERESTED' });
+    expect(transactionSpy).not.toHaveBeenCalled();
+  });
+
+  it('sends the provider only what the person typed, not the quoted email and its footer', async () => {
+    vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue({
+      ...baseReplyRow,
+      rawContent: quotingReply('Interested — send pricing.'),
+    } as never);
+    vi.spyOn(prisma.aiProviderKey, 'findUnique').mockResolvedValue({
+      provider: 'GEMINI',
+      apiKeyEncrypted: 'irrelevant',
+      model: 'gemini-2.5-flash',
+      isActive: true,
+    } as never);
+    vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'INTERESTED' });
+    vi.spyOn(prisma.reply, 'update').mockResolvedValue(baseReplyRow as never);
+
+    await classifyReplyRequest();
+
+    expect(aiProviderClient.classifyReply).toHaveBeenCalledWith(
+      expect.objectContaining({ replyContent: 'Interested — send pricing.' }),
+    );
   });
 
   it('404s when the reply does not exist', async () => {

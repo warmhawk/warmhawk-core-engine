@@ -13,7 +13,8 @@ import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { decrypt, loadEncryptionKey } from '../lib/encryption';
-import { classifyReply } from '../lib/aiProviderClient';
+import { classifyByKeyword, classifyReply } from '../lib/aiProviderClient';
+import { stripQuotedReply } from '../lib/replyText';
 import {
   buildLeadContext,
   composeCampaignEmail,
@@ -129,21 +130,23 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
       replyRow.campaign.aiProvider ??
       (await prisma.aiProviderKey.findFirst({ where: { isActive: true } }))?.provider;
 
-    let classification: Awaited<ReturnType<typeof classifyReply>>['classification'] =
-      'UNCLASSIFIED';
+    // Only what the person typed — the quoted original carries our "Unsubscribe:" footer.
+    const replyContent = stripQuotedReply(replyRow.rawContent);
+    const providerKey = provider
+      ? await prisma.aiProviderKey.findUnique({ where: { provider } })
+      : null;
 
-    if (provider) {
-      const providerKey = await prisma.aiProviderKey.findUnique({ where: { provider } });
-      if (providerKey?.isActive) {
-        const apiKey = decrypt(providerKey.apiKeyEncrypted, encryptionKey());
-        const result = await classifyReply({
-          provider,
-          apiKey,
-          model: providerKey.model,
-          replyContent: replyRow.rawContent,
-        });
-        classification = result.classification;
-      }
+    // No usable AI key: keywords, so a "please stop emailing me" is still suppressed below.
+    let classification = classifyByKeyword(replyContent);
+    if (provider && providerKey?.isActive) {
+      const apiKey = decrypt(providerKey.apiKeyEncrypted, encryptionKey());
+      const result = await classifyReply({
+        provider,
+        apiKey,
+        model: providerKey.model,
+        replyContent,
+      });
+      classification = result.classification;
     }
 
     const updated = await prisma.reply.update({
