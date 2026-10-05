@@ -18,6 +18,7 @@ import { Prisma, prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { normalizeDkimSelector } from '../lib/dnsChecks';
 import { runDomainCheck } from '../lib/domainCheck';
+import { isPersonalMailProvider, personalMailProviderName } from '../lib/personalMailProviders';
 
 interface AddressFields {
   /** "Client or brand" — a free-text note shown under the domain name. */
@@ -175,7 +176,11 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       orderBy: { createdAt: 'desc' },
     });
     const usageOf = await campaignUsage(domains.map((domain) => domain.id));
-    return domains.map((domain) => ({ ...domain, usedBy: usageOf(domain.id) }));
+    return domains.map((domain) => ({
+      ...domain,
+      usedBy: usageOf(domain.id),
+      personalProvider: isPersonalMailProvider(domain.domainName),
+    }));
   });
 
   app.post<{ Body: CreateDomainBody }>('/', async (request, reply) => {
@@ -201,7 +206,7 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
         ...address.data,
       },
     });
-    return reply.code(201).send(domain);
+    return reply.code(201).send({ ...domain, personalProvider: isPersonalMailProvider(name) });
   });
 
   /** Only the fields present in the body change; `dkimSelector: null` or `""` clears it, and so
@@ -278,6 +283,11 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       const domainName = request.params.domain.trim().toLowerCase();
       const domain = await prisma.domain.findUnique({ where: { domainName } });
       if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+      if (isPersonalMailProvider(domainName)) {
+        return reply.code(422).send({
+          error: `DNS for ${domainName} is managed by ${personalMailProviderName(domainName)}, so there's nothing to check`,
+        });
+      }
 
       const selector = normalizeDkimSelector(request.query.selector);
       if (selector === undefined) return reply.code(422).send({ error: INVALID_SELECTOR_ERROR });

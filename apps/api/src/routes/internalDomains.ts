@@ -18,6 +18,7 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
+import { personalMailProviderDomains } from '../lib/personalMailProviders';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { runDomainCheck } from '../lib/domainCheck';
 import { postDomainChangeAlert } from '../lib/alertWebhook';
@@ -54,7 +55,10 @@ export async function internalDomainsRoutes(app: FastifyInstance): Promise<void>
   // additive: `blocklist-poll.json`'s existing "Get Active Domains" node only ever reads
   // `domainName` off each item, so this doesn't change that workflow's behavior.
   app.get('/active', async () => {
+    // A personal Gmail's `gmail.com` row is Google's DNS, not the customer's: polling its
+    // blocklists or scanning for its lookalikes is noise and false alerts.
     const domains = await prisma.domain.findMany({
+      where: { domainName: { notIn: personalMailProviderDomains() } },
       select: { id: true, domainName: true },
       orderBy: { domainName: 'asc' },
     });

@@ -843,6 +843,42 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
+  /** `POST /v1/campaigns/:id/duplicate` — a new DRAFT named "Copy of …" with the same email,
+   *  follow-ups, AI settings, unsubscribe link and senders. Leads, replies and send history stay
+   *  with the original, and so does a bounce pause: that judged the original's list, not this one.
+   *  One nested create, so a copy is never left half-written. */
+  app.post<{ Params: { id: string } }>('/:id/duplicate', async (request, reply) => {
+    const source = await prisma.campaign.findUnique({
+      where: { id: request.params.id },
+      include: { steps: { orderBy: { position: 'asc' } }, mailboxes: true },
+    });
+    if (!source) return reply.code(404).send({ error: 'Campaign not found' });
+
+    const copy = await prisma.campaign.create({
+      data: {
+        name: `Copy of ${source.name}`,
+        aiPromptTemplate: source.aiPromptTemplate,
+        template: source.template,
+        subject: source.subject,
+        aiProvider: source.aiProvider,
+        aiMode: source.aiMode,
+        aiWritesSubject: source.aiWritesSubject,
+        unsubscribeUrlTemplate: source.unsubscribeUrlTemplate,
+        bounceRateThreshold: source.bounceRateThreshold,
+        steps: {
+          create: source.steps.map(({ position, waitDays, body, aiRewrite }) => ({
+            position,
+            waitDays,
+            body,
+            aiRewrite,
+          })),
+        },
+        mailboxes: { create: source.mailboxes.map(({ mailboxId }) => ({ mailboxId })) },
+      },
+    });
+    return reply.code(201).send(await loadCampaignDetail(copy.id));
+  });
+
   /** `POST /v1/campaigns/:id/launch` (spec) — the one way a campaign goes live. Runs the full
    *  launch check (`lib/sendingReadiness.ts`): senders picked, every sending domain has a mailing
    *  address, an unsubscribe link (the built-in page counts when `WARMHAWK_DOMAIN` is set), not

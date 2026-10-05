@@ -46,6 +46,23 @@ describeIntegration('/internal/domains routes (integration, real Postgres)', () 
     expect(json.domains).toContainEqual({ id: domainId, domainName });
   });
 
+  it('leaves personal mailbox provider domains out, so they are never polled or scanned', async () => {
+    const existing = await prisma.domain.findUnique({ where: { domainName: 'yandex.com' } });
+    const provider = existing ?? (await prisma.domain.create({ data: { domainName: 'yandex.com' } }));
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/internal/domains/active',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+      });
+      const names = (response.json().domains as { domainName: string }[]).map((d) => d.domainName);
+      expect(names).not.toContain('yandex.com');
+      expect(names).toContain(domainName);
+    } finally {
+      if (!existing) await prisma.domain.delete({ where: { id: provider.id } });
+    }
+  });
+
   it('rejects a request with no callback secret', async () => {
     const response = await app.inject({ method: 'GET', url: '/internal/domains/active' });
     expect(response.statusCode).toBe(401);

@@ -308,6 +308,38 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 
+  it('marks a personal mailbox provider domain and refuses to DNS-check it', async () => {
+    // A provider domain is unique install-wide, so clear one a previous run may have left.
+    await prisma.domain.deleteMany({ where: { domainName: 'gmx.com' } });
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/domains',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { domainName: 'GMX.com' },
+    });
+    expect(created.statusCode).toBe(201);
+    const domain = created.json() as { id: string; personalProvider: boolean };
+    expect(domain.personalProvider).toBe(true);
+    createdDomainIds.push(domain.id);
+
+    const listed = await app.inject({
+      method: 'GET',
+      url: '/v1/domains',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    const rows = listed.json() as { id: string; personalProvider: boolean }[];
+    expect(rows.find((d) => d.id === domain.id)?.personalProvider).toBe(true);
+    expect(rows.find((d) => d.id === createdDomainIds[0])?.personalProvider).toBe(false);
+
+    const check = await app.inject({
+      method: 'POST',
+      url: '/v1/domains/gmx.com/check',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    expect(check.statusCode).toBe(422);
+    expect(check.json().error).toMatch(/managed by gmx\.com/);
+  });
+
   it('requires authentication', async () => {
     const response = await app.inject({ method: 'GET', url: '/v1/domains' });
     expect(response.statusCode).toBe(401);

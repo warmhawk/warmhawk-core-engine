@@ -8,7 +8,7 @@
 import { prisma } from '@warmhawk/db';
 import { findCsvInjectionInRow } from './csvInjection';
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+export const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /** Obviously-disposable/test domains rejected outright. A real deployment may extend this via
  *  env/config in a future iteration, but the baseline list ships as a constant. */
