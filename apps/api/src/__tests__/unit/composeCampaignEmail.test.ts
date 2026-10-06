@@ -68,7 +68,7 @@ describe('buildPersonalizationPrompt', () => {
     expect(prompt).toContain(
       '<sender_email>\nHi Dana, we cut dispatch time by 30%.\n</sender_email>',
     );
-    expect(prompt).toContain("add no product, claim, number or meeting time it doesn't have");
+    expect(prompt).toContain("add no product, claim, number, link or meeting time it doesn't have");
     expect(prompt).not.toContain('word for word');
   });
 
