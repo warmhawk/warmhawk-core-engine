@@ -12,8 +12,8 @@
  * at the call site, exactly as the file header this replaces originally required.
  */
 import type { AiProvider } from '@warmhawk/db';
-import { validateGeminiKey, generateGeminiText } from './aiProviders/gemini';
-import { validateClaudeKey, generateClaudeText } from './aiProviders/claude';
+import { checkGeminiModel, generateGeminiText } from './aiProviders/gemini';
+import { checkClaudeModel, generateClaudeText } from './aiProviders/claude';
 
 export interface PersonalizeRequest {
   provider: AiProvider;
@@ -32,9 +32,41 @@ export interface PersonalizeRequest {
 }
 
 /** What the model is told to do in PERSONALIZE mode when the campaign leaves its instructions
- *  blank — the most common single-mailbox use: keep the written email, tailor its opening. */
+ *  blank — the most common single-mailbox use: keep the written email, tailor its opening. It asks
+ *  for a sentence ADDED, not one "rewritten to speak to the lead": an email that already says
+ *  "Hi Dana" reads as done to a cheap model, and gemini-3.5-flash-lite sent it back unchanged. */
 export const DEFAULT_PERSONALIZE_INSTRUCTIONS =
-  "Rewrite only the opening line so it speaks to this lead's company or role.";
+  "Keep the greeting. Right after it, add one short sentence written for this lead that mentions one specific fact from the lead context (their company, role, city, what they're hiring for, product or news) and leads into the email. Keep it natural, no flattery.";
+
+/** What the model is told in PROMPT mode when the campaign leaves its instructions blank. */
+export const DEFAULT_PROMPT_INSTRUCTIONS =
+  'Write a short, plain cold email to this lead in your own words. Open with one specific fact from the lead context, say what the sender offers in one or two sentences, and end with one question. Under 120 words, no hype words.';
+
+/** A square-bracket placeholder a model leaves for the user to fill (`[Your Name]`, `[Company]`). */
+const PLACEHOLDER = /\[(?:your|my|sender|insert|name|company|title|phone|link)[^\]\n]{0,40}\]/gi;
+
+/** Takes out the placeholders a model was told not to write: `[Your Name]` becomes the sender's
+ *  name when there is one, and a line left with nothing else on it goes. Seen 2026-10-05: AI
+ *  writes with Gemini signed every email "[Your Name]", which would have gone to real leads. */
+export function stripPlaceholders(text: string, senderName?: string | null): string {
+  const name = senderName?.trim();
+  return text
+    .split('\n')
+    .flatMap((line) => {
+      const filled = line.replace(PLACEHOLDER, (p) => (name && /name/i.test(p) ? name : ''));
+      if (filled === line) return [line.replace(/[ \t]+$/, '')];
+      if (!filled.trim()) return [];
+      return [
+        filled
+          .replace(/ {2,}/g, ' ')
+          .replace(/ ([,.!?])/g, '$1')
+          .trimEnd(),
+      ];
+    })
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
 
 export interface PersonalizeResult {
   generatedText: string;
@@ -63,17 +95,28 @@ const CLASSIFICATION_LABELS: ReplyClassificationLabel[] = [
   'UNCLASSIFIED',
 ];
 
-/** One lightweight validation call, per Phase 3: "save (encrypt + one lightweight test call to
- *  validate the key before persisting)". Real, near-zero-cost per-provider calls (model listing,
- *  never a generation) — see `aiProviders/gemini.ts#validateGeminiKey` /
- *  `aiProviders/claude.ts#validateClaudeKey`. Still returns `false` outright for an obviously-empty
- *  key without making a network call at all, so that one unit-testable fast path stays dependency-
- *  free. */
-export async function validateProviderKey(provider: AiProvider, apiKey: string): Promise<boolean> {
+/** The check run before a key is saved: one capped generation on the model the customer picked
+ *  (`aiProviders/gemini.ts#checkGeminiModel` / `aiProviders/claude.ts#checkClaudeModel`). Listing
+ *  models used to be the check, and it passed free Gemini keys for models they get no quota on —
+ *  the key read "Configured" while every send fell back to the template. Returns the same reason
+ *  code a failed send would get, so the route can say what to fix. An obviously-short key is
+ *  refused without a network call. */
+export async function checkProviderKey(
+  provider: AiProvider,
+  apiKey: string,
+  model: string,
+): Promise<{ ok: true } | { ok: false; reason: AiFallbackReason }> {
   if (!apiKey || apiKey.trim().length < 8) {
-    return false;
+    return { ok: false, reason: 'key_rejected' };
   }
-  return provider === 'GEMINI' ? validateGeminiKey(apiKey) : validateClaudeKey(apiKey);
+  try {
+    await (provider === 'GEMINI'
+      ? checkGeminiModel(apiKey, model)
+      : checkClaudeModel(apiKey, model));
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: classifyAiFailure(err) };
+  }
 }
 
 /** A merge field: `{{name}}`, or `{{name|fallback}}` to use the fallback text when the lead's value
@@ -119,17 +162,33 @@ export function fillMergeFields(template: string, leadContext: Record<string, un
  *  context as a JSON block so the model can use fields the customer didn't explicitly template,
  *  without inventing facts not present in it. In PERSONALIZE mode the campaign's rendered email
  *  goes in too, with an instruction to keep everything the customer didn't ask to change. */
-export function buildPersonalizationPrompt(request: Omit<PersonalizeRequest, 'provider' | 'apiKey' | 'model'>): string {
+export function buildPersonalizationPrompt(
+  request: Omit<PersonalizeRequest, 'provider' | 'apiKey' | 'model'>,
+): string {
   const { leadContext, baseEmail, wantsSubject } = request;
-  const personalize = request.mode === 'PERSONALIZE' && Boolean(baseEmail?.trim());
+  const hasEmail = Boolean(baseEmail?.trim());
+  const personalize = request.mode === 'PERSONALIZE' && hasEmail;
   const instructions = fillMergeFields(
-    request.promptTemplate.trim() || (personalize ? DEFAULT_PERSONALIZE_INSTRUCTIONS : ''),
+    request.promptTemplate.trim() ||
+      (personalize
+        ? DEFAULT_PERSONALIZE_INSTRUCTIONS
+        : hasEmail
+          ? DEFAULT_PROMPT_INSTRUCTIONS
+          : ''),
     leadContext,
   );
-  const outputRule = wantsSubject
-    ? 'Start with one line "Subject: <subject line>", then a blank line, then the email body. No preamble, no markdown formatting, no placeholder brackets left unfilled.'
-    : 'Write only the finished email body text — no subject line, no preamble, no markdown formatting, no placeholder brackets left unfilled.';
+  const senderName =
+    typeof leadContext.senderName === 'string' ? leadContext.senderName.trim() : '';
+  const outputRule = [
+    wantsSubject
+      ? 'Start with one line "Subject: <subject line>", then a blank line, then the email body. No preamble, no markdown formatting.'
+      : 'Write only the finished email body text — no subject line, no preamble, no markdown formatting.',
+    'Never write a placeholder in square brackets such as [Your Name] or [Company] — the email goes out exactly as you write it.',
+  ].join(' ');
 
+  // PROMPT mode gets the campaign's own email too, as the source of what the sender offers. Before
+  // 2026-10-05 it got the instructions alone, and with blank instructions the model made up an
+  // offer ("route optimization", "10 minutes next Tuesday") the sender never had.
   const parts = personalize
     ? [
         'Here is a cold email already written for this lead:',
@@ -140,12 +199,29 @@ export function buildPersonalizationPrompt(request: Omit<PersonalizeRequest, 'pr
         `Instructions: ${instructions}`,
         'Change only what the instructions ask for. Keep every other sentence word for word, including the sign-off.',
       ]
-    : [instructions];
+    : hasEmail
+      ? [
+          instructions,
+          '',
+          "The sender's own email to this lead is below. Take what they offer, who they are and what they ask for from it, and add no product, claim, number or meeting time it doesn't have. Write in your own words — don't copy it.",
+          '<sender_email>',
+          baseEmail!.trim(),
+          '</sender_email>',
+        ]
+      : [instructions];
+  const signOff = personalize
+    ? []
+    : [
+        senderName
+          ? `Sign the email as ${senderName}.`
+          : "Sign it with the name the sender's email uses; if there is none, end without a name.",
+      ];
   return [
     ...parts,
     '',
     `Lead context (use only what's relevant; never invent facts not present here): ${JSON.stringify(leadContext)}`,
     '',
+    ...signOff,
     outputRule,
   ].join('\n');
 }
@@ -155,7 +231,9 @@ export function buildPersonalizationPrompt(request: Omit<PersonalizeRequest, 'pr
  *  line comes back as `subject: null` with the whole text as the body. */
 export function parseGeneratedEmail(text: string): { subject: string | null; body: string } {
   const trimmed = text.replace(/^\s+/, '');
-  const match = /^\**\s*subject(?:\s+line)?\**\s*:\s*\**\s*(.*)$/im.exec(trimmed.split('\n')[0] ?? '');
+  const match = /^\**\s*subject(?:\s+line)?\**\s*:\s*\**\s*(.*)$/im.exec(
+    trimmed.split('\n')[0] ?? '',
+  );
   if (!match) return { subject: null, body: text.trim() };
   const subject = match[1].replace(/\*+$/, '').trim();
   const body = trimmed.split('\n').slice(1).join('\n').trim();
@@ -165,12 +243,23 @@ export function parseGeneratedEmail(text: string): { subject: string | null; bod
 /** Why a personalization call failed, as a short stable code stored on the send's ExecutionLog.
  *  Reads the HTTP status out of the provider error message (`aiProviders/*` put it there) rather
  *  than importing their error classes, so this stays callable where those modules are mocked. */
-export type AiFallbackReason = 'provider_error' | 'model_unavailable' | 'key_rejected' | 'key_missing';
+export type AiFallbackReason =
+  'provider_error' | 'model_unavailable' | 'key_rejected' | 'key_missing' | 'quota_exceeded';
 
 export function classifyAiFailure(err: unknown): AiFallbackReason {
-  const status = /HTTP (\d{3})/.exec(err instanceof Error ? err.message : String(err))?.[1];
+  const message = err instanceof Error ? err.message : String(err);
+  const status = /HTTP (\d{3})/.exec(message)?.[1];
   if (status === '404') return 'model_unavailable';
   if (status === '401' || status === '403') return 'key_rejected';
+  // 429 is a quota answer, not an outage: a free Gemini key gets it on every call to a model its
+  // tier doesn't cover, so retrying later doesn't help — picking another model or adding billing does.
+  if (status === '429') return 'quota_exceeded';
+  if (status === '400') {
+    // Gemini answers a bad key with 400 API_KEY_INVALID, not 401; Claude answers an empty
+    // prepaid balance with 400 "credit balance is too low".
+    if (/API_KEY_INVALID|API key not valid/i.test(message)) return 'key_rejected';
+    if (/credit balance is too low/i.test(message)) return 'quota_exceeded';
+  }
   return 'provider_error';
 }
 
@@ -196,13 +285,18 @@ export async function personalizeContent(request: PersonalizeRequest): Promise<P
 export function classifyByKeyword(content: string): ReplyClassificationLabel {
   const lower = content.toLowerCase();
   if (!lower.trim()) return 'UNCLASSIFIED';
-  if (/unsubscribe|remove me|opt out|stop emailing|take me off|do not contact|don'?t email/.test(lower)) {
+  if (
+    /unsubscribe|remove me|opt out|stop emailing|take me off|do not contact|don'?t email/.test(
+      lower,
+    )
+  ) {
     return 'OPT_OUT';
   }
   if (/out of office|on vacation|away from my desk/.test(lower)) return 'OUT_OF_OFFICE';
   if (/automatic reply|auto-reply|do not reply/.test(lower)) return 'AUTO_REPLY';
   if (/not interested|uninterested|no thanks|please remove/.test(lower)) return 'NOT_INTERESTED';
-  if (/interested|let's talk|sounds good|schedule a call|book a time/.test(lower)) return 'INTERESTED';
+  if (/interested|let's talk|sounds good|schedule a call|book a time/.test(lower))
+    return 'INTERESTED';
   return 'UNCLASSIFIED';
 }
 
@@ -219,7 +313,10 @@ Reply content:
 `;
 
 function parseClassificationLabel(raw: string): ReplyClassificationLabel | null {
-  const cleaned = raw.trim().toUpperCase().replace(/[^A-Z_]/g, '');
+  const cleaned = raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z_]/g, '');
   return (CLASSIFICATION_LABELS as string[]).includes(cleaned)
     ? (cleaned as ReplyClassificationLabel)
     : null;

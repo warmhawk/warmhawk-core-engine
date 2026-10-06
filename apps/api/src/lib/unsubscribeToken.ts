@@ -45,6 +45,11 @@ export function verifyUnsubscribeToken(token: string): string | null {
   return leadId;
 }
 
+/** The id a "Send me a test" email (and a sample-lead preview) is signed for instead of a lead's.
+ *  A test goes to the user, not the lead it was written for — with that lead's own link, clicking
+ *  Unsubscribe in the test would opt the real lead out. Lead ids are cuids, so this never is one. */
+export const TEST_SEND_UNSUBSCRIBE_ID = 'test-send';
+
 /** The built-in unsubscribe URL for a lead, or null on an install with no `WARMHAWK_DOMAIN` —
  *  there is no public address to put in the email then, so the campaign needs its own link. */
 export function hostedUnsubscribeUrl(leadId: string): string | null {

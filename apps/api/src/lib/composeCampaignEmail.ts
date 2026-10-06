@@ -5,10 +5,10 @@
  *
  * The campaign's own email (`template`, `subject`) is always rendered first: it is what goes out
  * with no provider, and what goes out when the provider fails. With a provider, PERSONALIZE mode
- * hands that rendered email to the model to adjust; PROMPT mode has the model write from the
- * instructions alone. Every send reports an `aiOutcome` and, on a fall-back, a reason — so a
- * retired model or a removed key shows up as a count on the dashboard instead of silently turning
- * every send into the plain template.
+ * hands that rendered email to the model to adjust; PROMPT mode has the model write a new one from
+ * the instructions, with the rendered email as the source of what the sender offers. Every send
+ * reports an `aiOutcome` and, on a fall-back, a reason — so a retired model or a removed key shows
+ * up as a count on the dashboard instead of silently turning every send into the plain template.
  */
 import type { AiProvider, AiWriteOutcome, CampaignAiMode } from '@warmhawk/db';
 import { prisma } from '@warmhawk/db';
@@ -18,6 +18,7 @@ import {
   fillMergeFields,
   parseGeneratedEmail,
   classifyAiFailure,
+  stripPlaceholders,
   type AiFallbackReason,
   type PersonalizeRequest,
 } from './aiProviderClient';
@@ -60,11 +61,25 @@ export async function personalizeWithFallback(
         aiFallbackReason: null,
       };
     } catch (err) {
+      const reason = classifyAiFailure(err);
+      // The ExecutionLog keeps only the reason code; the provider's own words (which say e.g. which
+      // quota ran out) exist only here, so they go to the container log. Never the key.
+      console.warn(
+        JSON.stringify({
+          level: 40,
+          time: Date.now(),
+          msg: 'AI write fell back to the template',
+          provider: request.provider,
+          model: request.model,
+          reason,
+          detail: (err instanceof Error ? err.message : String(err)).slice(0, 400),
+        }),
+      );
       return {
         generatedText: fallbackText,
         aiUsed: false,
         aiPersonalizationFailed: true,
-        aiFallbackReason: classifyAiFailure(err),
+        aiFallbackReason: reason,
       };
     }
   }
@@ -244,7 +259,7 @@ async function composeFollowUp(
     return plain('AI_FALLBACK', result.aiFallbackReason ?? 'provider_error');
 
   const { body, disclosureAppended } = appendEuAiDisclosureIfNeeded(
-    result.generatedText.trim(),
+    stripPlaceholders(result.generatedText, leadContext.senderName as string | undefined),
     true,
     {
       email: lead.email,
@@ -311,12 +326,11 @@ export async function composeCampaignEmail(params: {
     '',
   );
   if (!result.aiUsed) return plain('AI_FALLBACK', result.aiFallbackReason);
+  const generated = stripPlaceholders(result.generatedText, senderName);
 
   // Subject precedence: the model's when the campaign asked for it, else the campaign's own, else
   // the model's anyway (asked because the campaign has none), else the old first-line rule.
-  const parsed = wantsSubject
-    ? parseGeneratedEmail(result.generatedText)
-    : { subject: null, body: result.generatedText.trim() };
+  const parsed = wantsSubject ? parseGeneratedEmail(generated) : { subject: null, body: generated };
   const hasOwnSubject = Boolean(campaign.subject?.trim());
   let subject: string;
   let aiBody = parsed.body;
