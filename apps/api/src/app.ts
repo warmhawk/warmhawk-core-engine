@@ -36,6 +36,7 @@ import { mailboxesRoutes } from './routes/mailboxes';
 import { queueRoutes } from './routes/queue';
 import { seedAccountsRoutes } from './routes/seedAccounts';
 import { unsubscribeRoutes } from './routes/unsubscribe';
+import { toFriendlyError } from './lib/friendlyError';
 
 /**
  * How many reverse proxies sit between this app and the caller, from `TRUST_PROXY_HOPS`.
@@ -107,7 +108,7 @@ export async function createApp(): Promise<FastifyInstance> {
     app.log.warn(
       'DASHBOARD_APP_URL is not set. If the licensed dashboard is co-located with this instance, ' +
         'mailbox-connect OAuth redirects and dashboard CORS requests will silently target ' +
-        'http://localhost:4610 instead. Set DASHBOARD_APP_URL to the dashboard\'s real URL in .env/.env.',
+        "http://localhost:4610 instead. Set DASHBOARD_APP_URL to the dashboard's real URL in .env/.env.",
     );
   }
   await app.register(cors, {
@@ -144,10 +145,14 @@ export async function createApp(): Promise<FastifyInstance> {
   // (`.catch(() => null)` + `reply.code(404)...`); `routes/imap.ts` is the one file that lets a
   // raw `Error` (e.g. `openImapClient`'s "Mailbox not found") bubble up uncaught, and its new
   // integration test (`imap.integration.test.ts`) is what caught this.
+  //
+  // The reply carries a plain sentence, never `error.message` itself — the dashboard shows this
+  // text in its popups, and Prisma/Fastify messages ("Unique constraint failed on the fields…")
+  // mean nothing to the person reading them. See lib/friendlyError.ts.
   app.setErrorHandler((error: FastifyError, _request, reply) => {
     app.log.error(error);
-    const statusCode = error.statusCode ?? 500;
-    reply.status(statusCode).send({ error: error.message || 'Internal server error' });
+    const { statusCode, message } = toFriendlyError(error);
+    reply.status(statusCode).send({ error: message });
   });
 
   // Unversioned, infra-facing — Docker healthcheck / Uptime Kuma probe this directly and must not

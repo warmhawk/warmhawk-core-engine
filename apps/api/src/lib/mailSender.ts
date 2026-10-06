@@ -444,11 +444,16 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
         };
       }
 
+      // The name sent in EHLO. Left unset, nodemailer falls back to "[127.0.0.1]" inside a
+      // container, and the receiving server stamps that into the Received header, where it
+      // reads like a bot. The install's own public domain is the honest name.
+      const clientName = process.env.WARMHAWK_DOMAIN?.trim();
       transporter = nodemailer.createTransport({
         host: mailbox.smtpHost,
         port: mailbox.smtpPort,
         secure: mailbox.smtpPort === 465,
         auth,
+        ...(clientName ? { name: clientName } : {}),
       });
     }
   } catch (err) {

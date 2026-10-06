@@ -43,10 +43,17 @@ describe('spintax parser/renderer', () => {
 
   it('throws SpintaxParseError on unbalanced braces (missing close)', () => {
     expect(() => renderSpintax('{unclosed|group')).toThrow(SpintaxParseError);
+    // The message lands in a dashboard popup, so it says what to fix in plain words.
+    expect(() => renderSpintax('{unclosed|group')).toThrow(
+      'This email has a "{" that is never closed with "}". Word choices are written like {Hi|Hello} — fix the braces and try again.',
+    );
   });
 
   it('throws SpintaxParseError on unbalanced braces (stray close)', () => {
     expect(() => renderSpintax('stray}brace')).toThrow(SpintaxParseError);
+    expect(() => renderSpintax('stray}brace')).toThrow(
+      /^This email has a "}" without a matching "{"/,
+    );
   });
 
   it('hasSpintax detects presence/absence of a real variation group', () => {

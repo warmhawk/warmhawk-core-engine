@@ -2,13 +2,15 @@
  * Mailbox management — minimal CRUD. OAuth-connected mailboxes get their credentials populated
  * by `oauthCallback.ts`, not this route; this route creates the Mailbox row itself (so a
  * `mailboxId` exists to pass to `GET /oauth/:provider/authorize?mailboxId=`) and handles the
- * SMTP/IMAP-password fallback path directly (encrypting the password server-side before it's
- * ever persisted).
+ * SMTP/IMAP-password fallback path directly (signing in to the SMTP and IMAP servers once — see
+ * lib/mailSignInCheck.ts — then encrypting the password server-side before it's ever persisted).
  */
 import type { FastifyInstance } from 'fastify';
 import { prisma, type MailboxProvider, type MailboxStatus } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { encrypt, loadEncryptionKey } from '../lib/encryption';
+import { MAILBOX_ALREADY_CONNECTED } from '../lib/friendlyError';
+import { checkMailboxSignIn } from '../lib/mailSignInCheck';
 
 interface CreateMailboxBody {
   email: string;
@@ -69,13 +71,43 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
     const senderName = body.senderName === undefined ? { ok: true as const, value: null } : parseSenderName(body.senderName);
     if (!senderName.ok) return reply.code(422).send({ error: senderName.error });
 
+    const email = body.email.trim().toLowerCase();
+
+    const smtpHost = body.smtpHost?.trim();
+    const imapHost = body.imapHost?.trim();
+    if (body.authPassword && (smtpHost || imapHost)) {
+      // Checked first: it's instant, and "already connected" is the useful answer for a second
+      // try — not a sign-in error from dialing the servers again.
+      const existing = await prisma.mailbox.findUnique({ where: { email }, select: { id: true } });
+      if (existing) return reply.code(409).send({ error: MAILBOX_ALREADY_CONNECTED });
+
+      const username = body.authUsername || email;
+      const password = body.authPassword;
+      const refused = await checkMailboxSignIn({
+        smtp: smtpHost ? { host: smtpHost, port: body.smtpPort, username, password } : undefined,
+        imap: imapHost ? { host: imapHost, port: body.imapPort, username, password } : undefined,
+      });
+      if (refused) {
+        request.log.info(
+          {
+            err: refused.cause,
+            server: refused.kind,
+            host: refused.kind === 'SMTP' ? smtpHost : imapHost,
+            port: refused.kind === 'SMTP' ? body.smtpPort : body.imapPort,
+          },
+          'Mail server sign-in check refused a new mailbox',
+        );
+        return reply.code(422).send({ error: refused.message });
+      }
+    }
+
     const authPasswordEncrypted = body.authPassword
       ? encrypt(body.authPassword, encryptionKey())
       : undefined;
 
     const created = await prisma.mailbox.create({
       data: {
-        email: body.email.trim().toLowerCase(),
+        email,
         domainId: body.domainId,
         provider: body.provider ?? 'SMTP_CUSTOM',
         dailyCap: body.dailyCap ?? 25,

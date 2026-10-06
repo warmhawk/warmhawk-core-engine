@@ -350,16 +350,19 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
       }
 
       if (buffer.byteLength > MAX_CSV_FILE_BYTES) {
-        return reply
-          .code(413)
-          .send({ error: `CSV file exceeds the ${MAX_CSV_FILE_BYTES}-byte limit` });
+        return reply.code(413).send({
+          error: `That file is too large. The limit is ${MAX_CSV_FILE_BYTES / (1024 * 1024)} MB.`,
+        });
       }
 
       let rawLeads: RawLeadInput[];
       try {
         rawLeads = parseLeadsCsv(buffer, campaignId);
       } catch (err) {
-        return reply.code(422).send({ error: `Failed to parse CSV: ${(err as Error).message}` });
+        const line = (err as { lines?: number }).lines;
+        return reply.code(422).send({
+          error: `This file couldn't be read as a CSV${line ? ` (the problem is near line ${line})` : ''}. Save it as CSV with a header row, and make sure every row has the same number of columns.`,
+        });
       }
 
       if (rawLeads.length > MAX_CSV_ROWS) {

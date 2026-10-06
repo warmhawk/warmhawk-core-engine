@@ -40,6 +40,7 @@ import {
 } from '../lib/sendingReadiness';
 import { MAX_FOLLOW_UPS, parseStepsInput, type SequenceStep } from '../lib/sequence';
 import { sendMail, MailSendError } from '../lib/mailSender';
+import { describeMailFailure } from '../lib/friendlyError';
 
 interface CreateCampaignBody {
   name: string;
@@ -191,8 +192,7 @@ async function buildPreview(body: PreviewBody): Promise<PreviewResult> {
   try {
     evaluateContentQuality(campaign.template, campaign.subject);
   } catch (err) {
-    if (err instanceof SpintaxParseError)
-      return { error: `Invalid spintax: ${err.message}`, code: 422 };
+    if (err instanceof SpintaxParseError) return { error: err.message, code: 422 };
     throw err;
   }
 
@@ -611,7 +611,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
       contentQuality = evaluateContentQuality(template, subject);
     } catch (err) {
       if (err instanceof SpintaxParseError) {
-        return reply.code(422).send({ error: `Invalid spintax in template: ${err.message}` });
+        return reply.code(422).send({ error: err.message });
       }
       throw err;
     }
@@ -675,7 +675,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
           contentQuality = evaluateContentQuality(request.body.template, request.body.subject);
         } catch (err) {
           if (err instanceof SpintaxParseError) {
-            return reply.code(422).send({ error: `Invalid spintax in template: ${err.message}` });
+            return reply.code(422).send({ error: err.message });
           }
           throw err;
         }
@@ -750,7 +750,10 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
         });
         return { status: 'sent', to, from: built.mailbox.email, messageId: sent.messageId };
       } catch (err) {
-        if (err instanceof MailSendError) return reply.code(502).send({ error: err.message });
+        if (err instanceof MailSendError) {
+          request.log.warn({ err }, 'test send failed');
+          return reply.code(502).send({ error: describeMailFailure(err) });
+        }
         throw err;
       }
     },
