@@ -10,15 +10,21 @@ import { decrypt, loadEncryptionKey } from './encryption';
 import { mintMailboxAccessToken } from './mailboxAccessToken';
 import { recordConnectionFailure } from './mailboxConnectionHealth';
 
+/** A failure the caller caused (unknown mailbox, bad id), tagged with its HTTP status so the global
+ *  error handler passes the message through instead of hiding it as a 500. */
+function requestError(message: string, statusCode: number): Error {
+  return Object.assign(new Error(message), { statusCode });
+}
+
 function encryptionKey() {
   return loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
 }
 
 export async function openImapClient(mailboxId: string): Promise<ImapFlow> {
   const mailbox = await prisma.mailbox.findUnique({ where: { id: mailboxId } });
-  if (!mailbox) throw new Error('Mailbox not found');
+  if (!mailbox) throw requestError('Mailbox not found', 404);
   if (!mailbox.imapHost || !mailbox.imapPort || !mailbox.authUsername) {
-    throw new Error('Mailbox is missing IMAP connection details');
+    throw requestError('Mailbox is missing IMAP connection details', 422);
   }
 
   const key = encryptionKey();
@@ -42,7 +48,10 @@ export async function openImapClient(mailboxId: string): Promise<ImapFlow> {
   }
 
   if (!auth) {
-    throw new Error('Mailbox is missing IMAP credentials (no OAuth token or password on file)');
+    throw requestError(
+      'Mailbox is missing IMAP credentials (no OAuth token or password on file)',
+      422,
+    );
   }
 
   const client = new ImapFlow({
@@ -86,9 +95,9 @@ export function encodeMessageId(folder: string, uid: number): string {
 
 export function decodeMessageId(messageId: string): { folder: string; uid: number } {
   const separatorIndex = messageId.lastIndexOf('::');
-  if (separatorIndex === -1) throw new Error('Malformed messageId');
+  if (separatorIndex === -1) throw requestError('Malformed messageId', 422);
   const folder = messageId.slice(0, separatorIndex);
   const uid = Number(messageId.slice(separatorIndex + 2));
-  if (!folder || !Number.isFinite(uid)) throw new Error('Malformed messageId');
+  if (!folder || !Number.isFinite(uid)) throw requestError('Malformed messageId', 422);
   return { folder, uid };
 }
