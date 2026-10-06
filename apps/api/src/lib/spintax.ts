@@ -47,7 +47,7 @@ export function renderSpintax(template: string, rng: () => number = Math.random)
   while (innermostGroupRegex.test(result)) {
     if (++iterations > maxIterations) {
       throw new SpintaxParseError(
-        'Spintax resolution did not terminate — check for malformed input',
+        'The { | } word choices in this email are nested too deeply to read. Simplify them and try again.',
       );
     }
     result = result.replace(innermostGroupRegex, (_match, optionsRaw: string) => {
@@ -88,10 +88,14 @@ function assertBalanced(template: string): void {
     if (char === '{') depth++;
     if (char === '}') depth--;
     if (depth < 0) {
-      throw new SpintaxParseError('Unbalanced spintax: unexpected "}" with no matching "{"');
+      throw new SpintaxParseError(
+        'This email has a "}" without a matching "{". Word choices are written like {Hi|Hello} — fix the braces and try again.',
+      );
     }
   }
   if (depth !== 0) {
-    throw new SpintaxParseError('Unbalanced spintax: unclosed "{" group');
+    throw new SpintaxParseError(
+      'This email has a "{" that is never closed with "}". Word choices are written like {Hi|Hello} — fix the braces and try again.',
+    );
   }
 }

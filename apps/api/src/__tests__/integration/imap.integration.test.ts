@@ -74,7 +74,7 @@ describeIntegration('/internal/imap routes (integration, real Postgres)', () => 
         url: `/internal/imap/search?mailboxId=${mailboxNoImapId}&providerMessageId=<abc@x>`,
         headers: { 'x-callback-secret': CALLBACK_SECRET },
       });
-      expect(response.statusCode).toBe(500);
+      expect(response.statusCode).toBe(422);
       expect(response.json().error).toMatch(/missing IMAP connection details/i);
     });
 
@@ -84,14 +84,18 @@ describeIntegration('/internal/imap routes (integration, real Postgres)', () => 
         url: '/internal/imap/search?mailboxId=does-not-exist&providerMessageId=<abc@x>',
         headers: { 'x-callback-secret': CALLBACK_SECRET },
       });
-      expect(response.statusCode).toBe(500);
+      expect(response.statusCode).toBe(404);
       expect(response.json().error).toMatch(/mailbox not found/i);
     });
   });
 
   describe('POST /flag', () => {
     it('rejects without a callback secret', async () => {
-      const response = await app.inject({ method: 'POST', url: '/internal/imap/flag', payload: {} });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/imap/flag',
+        payload: {},
+      });
       expect(response.statusCode).toBe(401);
     });
 
@@ -110,9 +114,13 @@ describeIntegration('/internal/imap routes (integration, real Postgres)', () => 
         method: 'POST',
         url: '/internal/imap/flag',
         headers: { 'x-callback-secret': CALLBACK_SECRET },
-        payload: { mailboxId: mailboxNoImapId, messageId: 'not-a-valid-message-id', flags: ['\\Seen'] },
+        payload: {
+          mailboxId: mailboxNoImapId,
+          messageId: 'not-a-valid-message-id',
+          flags: ['\\Seen'],
+        },
       });
-      expect(response.statusCode).toBe(500);
+      expect(response.statusCode).toBe(422);
       expect(response.json().error).toMatch(/malformed messageid/i);
     });
   });
@@ -144,7 +152,7 @@ describeIntegration('/internal/imap routes (integration, real Postgres)', () => 
         headers: { 'x-callback-secret': CALLBACK_SECRET },
         payload: { mailboxId: mailboxNoImapId, messageId: 'INBOX::1' },
       });
-      expect(response.statusCode).toBe(500);
+      expect(response.statusCode).toBe(422);
       expect(response.json().error).toMatch(/missing IMAP connection details/i);
     });
   });

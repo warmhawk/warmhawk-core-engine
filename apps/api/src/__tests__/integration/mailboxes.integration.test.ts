@@ -64,6 +64,23 @@ describeIntegration('mailboxes routes (integration, real Postgres)', () => {
     expect(stored.authPasswordEncrypted).not.toBe('super-secret-pw');
   });
 
+  it('says plainly that a mailbox is already connected, not what Prisma said', async () => {
+    const email = `dupe-${Date.now()}@example.com`;
+    const create = () =>
+      app.inject({
+        method: 'POST',
+        url: '/v1/mailboxes',
+        headers: { authorization: `Bearer ${authToken}` },
+        payload: { email, domainId },
+      });
+    const first = await create();
+    createdMailboxIds.push(first.json().id);
+
+    const second = await create();
+    expect(second.statusCode).toBe(409);
+    expect(second.json()).toEqual({ error: 'This mailbox is already connected.' });
+  });
+
   it('rejects a create missing email or domainId', async () => {
     const response = await app.inject({
       method: 'POST',
