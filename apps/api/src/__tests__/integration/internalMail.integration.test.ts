@@ -28,10 +28,13 @@ interface FakeSmtpServer {
   close: () => Promise<void>;
   /** Raw DATA of every message received, oldest first — for asserting on sent headers. */
   messages: string[];
+  /** Every EHLO/HELO line the client sent, oldest first. */
+  greetings: string[];
 }
 
 function startFakeSmtpServer(): Promise<FakeSmtpServer> {
   const messages: string[] = [];
+  const greetings: string[] = [];
   return new Promise((resolve) => {
     const server = net.createServer((socket) => {
       let buffer = '';
@@ -58,6 +61,7 @@ function startFakeSmtpServer(): Promise<FakeSmtpServer> {
 
           const upper = line.toUpperCase();
           if (upper.startsWith('EHLO') || upper.startsWith('HELO')) {
+            greetings.push(line);
             socket.write('250-fake-smtp.test\r\n250 AUTH PLAIN\r\n');
           } else if (upper.startsWith('AUTH PLAIN')) {
             socket.write('235 2.7.0 Authentication successful\r\n');
@@ -81,7 +85,12 @@ function startFakeSmtpServer(): Promise<FakeSmtpServer> {
     server.listen(0, '127.0.0.1', () => {
       const address = server.address();
       const port = address && typeof address === 'object' ? address.port : 0;
-      resolve({ port, messages, close: () => new Promise((res) => server.close(() => res())) });
+      resolve({
+        port,
+        messages,
+        greetings,
+        close: () => new Promise((res) => server.close(() => res())),
+      });
     });
   });
 }
@@ -422,6 +431,8 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
       expect(textOf(fakeSmtp.messages.at(-1) as string).trim()).toBe(
         `Hi\n\n--\n123 Test St, Testville\nUnsubscribe: ${url}`,
       );
+      // The SMTP greeting names the install, not nodemailer's "[127.0.0.1]" fallback.
+      expect(fakeSmtp.greetings.at(-1)).toBe('EHLO api.acme.example');
 
       // The link that went out is a live one: following it takes the lead off the list.
       const clicked = await app.inject({ method: 'POST', url: new URL(url).pathname });
