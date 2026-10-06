@@ -29,7 +29,7 @@ import {
   type ComposeLead,
 } from '../lib/composeCampaignEmail';
 import { appendCanSpamFooter, resolveUnsubscribeUrl } from '../lib/sendCompliance';
-import { hostedUnsubscribeUrl } from '../lib/unsubscribeToken';
+import { hostedUnsubscribeUrl, TEST_SEND_UNSUBSCRIBE_ID } from '../lib/unsubscribeToken';
 import {
   builtInUnsubscribeAvailable,
   checkCampaignLaunch,
@@ -167,8 +167,12 @@ type PreviewResult =
 
 /** One email exactly as a lead gets it — the right sender, that sender's domain address in the
  *  footer, and, for a follow-up, the "Re:" subject and backup text. Shared by `/preview` and
- *  `/:id/test-send`. */
-async function buildPreview(body: PreviewBody): Promise<PreviewResult> {
+ *  `/:id/test-send`; a test passes `testRecipient`, so its unsubscribe link is the tester's, never
+ *  the lead's. */
+async function buildPreview(
+  body: PreviewBody,
+  { testRecipient }: { testRecipient?: string } = {},
+): Promise<PreviewResult> {
   const fieldsError = composeFieldsError(body);
   if (fieldsError) return { error: fieldsError, code: 422 };
 
@@ -284,11 +288,12 @@ async function buildPreview(body: PreviewBody): Promise<PreviewResult> {
       ? body.unsubscribeUrlTemplate
       : saved?.unsubscribeUrlTemplate
     )?.trim() ?? '';
-  // No link of the campaign's own means the built-in page, signed per lead at send time; the
-  // sample lead has no id, so its link is only the right shape.
+  // No link of the campaign's own means the built-in page, signed per lead at send time. A test
+  // email gets a link that unsubscribes nobody (the real lead never got it), and so does the sample
+  // lead, which has no id.
   const unsubscribeUrl = unsubscribeTemplate
-    ? resolveUnsubscribeUrl(unsubscribeTemplate, lead.email)
-    : hostedUnsubscribeUrl('id' in lead ? lead.id : 'sample');
+    ? resolveUnsubscribeUrl(unsubscribeTemplate, testRecipient ?? lead.email)
+    : hostedUnsubscribeUrl(!testRecipient && 'id' in lead ? lead.id : TEST_SEND_UNSUBSCRIBE_ID);
   const complianceMissing: Array<'sender' | 'address' | 'unsubscribe'> = [];
   if (!mailbox) complianceMissing.push('sender');
   else if (!address) complianceMissing.push('address');
@@ -725,11 +730,14 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
       const to = typeof request.body?.to === 'string' ? request.body.to.trim() : '';
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to))
         return reply.code(422).send({ error: 'A valid "to" address is required' });
-      const built = await buildPreview({
-        campaignId: request.params.id,
-        step: request.body?.step,
-        leadIndex: request.body?.leadIndex,
-      });
+      const built = await buildPreview(
+        {
+          campaignId: request.params.id,
+          step: request.body?.step,
+          leadIndex: request.body?.leadIndex,
+        },
+        { testRecipient: to },
+      );
       if ('error' in built) return reply.code(built.code).send({ error: built.error });
       if (!built.mailbox)
         return reply.code(422).send({ error: 'Pick a mailbox to send from first' });
@@ -748,7 +756,15 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
           subject: `[Test] ${built.subject}`,
           body: built.body,
         });
-        return { status: 'sent', to, from: built.mailbox.email, messageId: sent.messageId };
+        // Whether the AI wrote this one or the backup text went out — the email alone can't say.
+        return {
+          status: 'sent',
+          to,
+          from: built.mailbox.email,
+          messageId: sent.messageId,
+          aiOutcome: built.aiOutcome,
+          aiFallbackReason: built.aiFallbackReason,
+        };
       } catch (err) {
         if (err instanceof MailSendError) {
           request.log.warn({ err }, 'test send failed');
