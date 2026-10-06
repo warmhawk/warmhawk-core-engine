@@ -14,6 +14,7 @@
 import type { AiProvider } from '@warmhawk/db';
 import { checkGeminiModel, generateGeminiText } from './aiProviders/gemini';
 import { checkClaudeModel, generateClaudeText } from './aiProviders/claude';
+import { isFreeMailCompany } from './aiOutputChecks';
 
 export interface PersonalizeRequest {
   provider: AiProvider;
@@ -29,18 +30,26 @@ export interface PersonalizeRequest {
   baseEmail?: string;
   /** Ask for a `Subject:` first line — see `parseGeneratedEmail`. */
   wantsSubject?: boolean;
+  /** Parts of `baseEmail` the model's last draft left out or changed (`lib/aiOutputChecks.ts`);
+   *  the retry is told to include each one as written. */
+  mustKeep?: string[];
+  /** Links the last draft added that `baseEmail` doesn't have; the retry is told to leave them out. */
+  mustDrop?: string[];
 }
 
 /** What the model is told to do in PERSONALIZE mode when the campaign leaves its instructions
  *  blank — the most common single-mailbox use: keep the written email, tailor its opening. It asks
  *  for a sentence ADDED, not one "rewritten to speak to the lead": an email that already says
- *  "Hi Dana" reads as done to a cheap model, and gemini-3.5-flash-lite sent it back unchanged. */
+ *  "Hi Dana" reads as done to a cheap model, and gemini-3.5-flash-lite sent it back unchanged.
+ *  The don'ts are what the 2026-10-06 six-campaign test turned up: Claude made up how the sender
+ *  found the lead ("came across X while looking at…") and repeated facts the email already had;
+ *  Gemini wrote filler ("As B2B consultants…, getting your emails delivered is crucial"). */
 export const DEFAULT_PERSONALIZE_INSTRUCTIONS =
-  "Keep the greeting. Right after it, add one short sentence written for this lead that mentions one specific fact from the lead context (their company, role, city, what they're hiring for, product or news) and leads into the email. Keep it natural, no flattery.";
+  'Keep the greeting. Right after it, as its own paragraph, add one short sentence for this lead built on one specific fact from the lead context that the email doesn\'t already say (their company, role, city, what they\'re hiring for, product or news), leading into the email. Start with the fact itself: no "As a…", no saying how you found them, no guessing what they think or feel, no flattery. If the lead context has no such fact, send the email back unchanged.';
 
 /** What the model is told in PROMPT mode when the campaign leaves its instructions blank. */
 export const DEFAULT_PROMPT_INSTRUCTIONS =
-  'Write a short, plain cold email to this lead in your own words. Open with one specific fact from the lead context, say what the sender offers in one or two sentences, and end with one question. Under 120 words, no hype words.';
+  "Write a short, plain cold email to this lead in your own words. Open with one specific fact from the lead context, stated plainly — don't guess what they have read or need. Say what the sender offers in one or two sentences, and end with one question. Under 120 words, no hype words.";
 
 /** A square-bracket placeholder a model leaves for the user to fill (`[Your Name]`, `[Company]`). */
 const PLACEHOLDER = /\[(?:your|my|sender|insert|name|company|title|phone|link)[^\]\n]{0,40}\]/gi;
@@ -158,6 +167,14 @@ export function fillMergeFields(template: string, leadContext: Record<string, un
   });
 }
 
+/** The lead context as the model sees it: a company that is only an email provider ("Gmail") is
+ *  left out, so the model doesn't write "your team at Gmail". Merge fields still see it as stored. */
+function promptLeadContext(leadContext: Record<string, unknown>): Record<string, unknown> {
+  if (!isFreeMailCompany(leadContext.company)) return leadContext;
+  const { company: _company, ...rest } = leadContext;
+  return rest;
+}
+
 /** Fills merge fields in `promptTemplate` (via `fillMergeFields` above), then appends the full lead
  *  context as a JSON block so the model can use fields the customer didn't explicitly template,
  *  without inventing facts not present in it. In PERSONALIZE mode the campaign's rendered email
@@ -165,7 +182,7 @@ export function fillMergeFields(template: string, leadContext: Record<string, un
 export function buildPersonalizationPrompt(
   request: Omit<PersonalizeRequest, 'provider' | 'apiKey' | 'model'>,
 ): string {
-  const { leadContext, baseEmail, wantsSubject } = request;
+  const { leadContext, baseEmail, wantsSubject, mustKeep, mustDrop } = request;
   const hasEmail = Boolean(baseEmail?.trim());
   const personalize = request.mode === 'PERSONALIZE' && hasEmail;
   const instructions = fillMergeFields(
@@ -197,13 +214,15 @@ export function buildPersonalizationPrompt(
         '</email>',
         '',
         `Instructions: ${instructions}`,
-        'Change only what the instructions ask for. Keep every other sentence word for word, including the sign-off.',
+        'Change only what the instructions ask for. Keep every other sentence word for word, including the sign-off and the blank lines between paragraphs.',
       ]
     : hasEmail
       ? [
           instructions,
           '',
-          "The sender's own email to this lead is below. Take what they offer, who they are and what they ask for from it, and add no product, claim, number or meeting time it doesn't have. Write in your own words — don't copy it.",
+          // Before 2026-10-06 the model was free to leave things out, and both providers dropped
+          // the price, the signup link and, once, the product's name.
+          "The sender's own email to this lead is below. Take what they offer, who they are and what they ask for from it, and add no product, claim, number, link or meeting time it doesn't have. Write in your own words — don't copy it — but keep its greeting as written, and copy every link, web address, price, number and product name in it exactly: leaving one out changes the offer. Don't soften or reword what it promises.",
           '<sender_email>',
           baseEmail!.trim(),
           '</sender_email>',
@@ -216,11 +235,30 @@ export function buildPersonalizationPrompt(
           ? `Sign the email as ${senderName}.`
           : "Sign it with the name the sender's email uses; if there is none, end without a name.",
       ];
+  const retry = [
+    ...(mustKeep?.length
+      ? [
+          "Your last draft left out or changed these parts of the sender's email. This time include each one exactly as written:",
+          ...mustKeep.map((part) => `- ${part}`),
+          '',
+        ]
+      : []),
+    ...(mustDrop?.length
+      ? [
+          "Your last draft added links the sender's email doesn't have. This time leave them out:",
+          ...mustDrop.map((link) => `- ${link}`),
+          '',
+        ]
+      : []),
+  ];
   return [
     ...parts,
     '',
-    `Lead context (use only what's relevant; never invent facts not present here): ${JSON.stringify(leadContext)}`,
+    `Lead context (use only what's relevant; never invent facts not present here): ${JSON.stringify(promptLeadContext(leadContext))}`,
+    // Lead lists often build the company name from the web address ("Thecatalysisgroup").
+    'A company name run together from a web address is written the way the business writes it ("The Catalysis Group", not "Thecatalysisgroup").',
     '',
+    ...retry,
     ...signOff,
     outputRule,
   ].join('\n');
@@ -243,8 +281,15 @@ export function parseGeneratedEmail(text: string): { subject: string | null; bod
 /** Why a personalization call failed, as a short stable code stored on the send's ExecutionLog.
  *  Reads the HTTP status out of the provider error message (`aiProviders/*` put it there) rather
  *  than importing their error classes, so this stays callable where those modules are mocked. */
+/** `content_dropped`: the model answered, but twice left out a link, price or line of the sender's
+ *  email (`lib/aiOutputChecks.ts`), so the sender's own email went out instead. */
 export type AiFallbackReason =
-  'provider_error' | 'model_unavailable' | 'key_rejected' | 'key_missing' | 'quota_exceeded';
+  | 'provider_error'
+  | 'model_unavailable'
+  | 'key_rejected'
+  | 'key_missing'
+  | 'quota_exceeded'
+  | 'content_dropped';
 
 export function classifyAiFailure(err: unknown): AiFallbackReason {
   const message = err instanceof Error ? err.message : String(err);
