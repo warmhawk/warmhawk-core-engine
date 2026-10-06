@@ -4,8 +4,8 @@
  * make a live call to a paid provider API.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { validateGeminiKey, generateGeminiText, GeminiApiError } from '../../lib/aiProviders/gemini';
-import { validateClaudeKey, generateClaudeText, ClaudeApiError } from '../../lib/aiProviders/claude';
+import { checkGeminiModel, generateGeminiText, GeminiApiError } from '../../lib/aiProviders/gemini';
+import { checkClaudeModel, generateClaudeText, ClaudeApiError } from '../../lib/aiProviders/claude';
 
 describe('aiProviders/gemini', () => {
   const originalFetch = global.fetch;
@@ -14,19 +14,45 @@ describe('aiProviders/gemini', () => {
     vi.restoreAllMocks();
   });
 
-  it('validateGeminiKey returns true on a 2xx models-list response', async () => {
-    global.fetch = vi.fn().mockResolvedValue({ ok: true } as Response);
-    await expect(validateGeminiKey('fake-key')).resolves.toBe(true);
+  it('checkGeminiModel calls the chosen model with the key in a header, never the URL', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+    global.fetch = fetchMock;
+    await expect(checkGeminiModel('fake-key', 'gemini-3.5-flash-lite')).resolves.toBeUndefined();
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/\/models\/gemini-3\.5-flash-lite:generateContent$/);
+    expect(url).not.toContain('fake-key');
+    expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe('fake-key');
+    expect(JSON.parse(init.body as string).generationConfig.maxOutputTokens).toBeLessThanOrEqual(
+      16,
+    );
   });
 
-  it('validateGeminiKey returns false on a non-2xx response', async () => {
-    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 403 } as Response);
-    await expect(validateGeminiKey('fake-key')).resolves.toBe(false);
+  it('checkGeminiModel throws with the HTTP status when the model refuses (free-tier 429)', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: async () => 'RESOURCE_EXHAUSTED',
+    } as Response);
+    await expect(checkGeminiModel('fake-key', 'gemini-3.8-flash')).rejects.toThrow(/HTTP 429/);
   });
 
-  it('validateGeminiKey returns false (not throws) on a network failure', async () => {
+  it('checkGeminiModel throws GeminiApiError on a network failure', async () => {
     global.fetch = vi.fn().mockRejectedValue(new Error('network down'));
-    await expect(validateGeminiKey('fake-key')).resolves.toBe(false);
+    await expect(checkGeminiModel('fake-key', 'gemini-3.5-flash-lite')).rejects.toBeInstanceOf(
+      GeminiApiError,
+    );
+  });
+
+  it('generateGeminiText sends the key in a header, never the URL', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'Hi' }] } }] }),
+    } as Response);
+    global.fetch = fetchMock;
+    await generateGeminiText({ apiKey: 'fake-key', model: 'gemini-pro', prompt: 'hi' });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).not.toContain('fake-key');
+    expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe('fake-key');
   });
 
   it('generateGeminiText returns the candidate text on success', async () => {
@@ -50,7 +76,9 @@ describe('aiProviders/gemini', () => {
   });
 
   it('generateGeminiText throws GeminiApiError when the response has no usable text', async () => {
-    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ candidates: [] }) } as Response);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ candidates: [] }) } as Response);
     await expect(
       generateGeminiText({ apiKey: 'k', model: 'gemini-pro', prompt: 'hi' }),
     ).rejects.toBeInstanceOf(GeminiApiError);
@@ -64,14 +92,19 @@ describe('aiProviders/claude', () => {
     vi.restoreAllMocks();
   });
 
-  it('validateClaudeKey returns true on a 2xx models-list response', async () => {
-    global.fetch = vi.fn().mockResolvedValue({ ok: true } as Response);
-    await expect(validateClaudeKey('fake-key')).resolves.toBe(true);
+  it('checkClaudeModel makes a one-token call to the chosen model', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as Response);
+    global.fetch = fetchMock;
+    await expect(checkClaudeModel('fake-key', 'claude-haiku-4-5')).resolves.toBeUndefined();
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({ model: 'claude-haiku-4-5', max_tokens: 1 });
   });
 
-  it('validateClaudeKey returns false on a non-2xx response', async () => {
-    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 401 } as Response);
-    await expect(validateClaudeKey('fake-key')).resolves.toBe(false);
+  it('checkClaudeModel throws with the HTTP status on a non-2xx response', async () => {
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 401, text: async () => '' } as Response);
+    await expect(checkClaudeModel('fake-key', 'claude-haiku-4-5')).rejects.toThrow(/HTTP 401/);
   });
 
   it('generateClaudeText returns the text block on success', async () => {
@@ -95,7 +128,9 @@ describe('aiProviders/claude', () => {
   });
 
   it('generateClaudeText throws ClaudeApiError when no text block is present', async () => {
-    global.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ content: [] }) } as Response);
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, json: async () => ({ content: [] }) } as Response);
     await expect(
       generateClaudeText({ apiKey: 'k', model: 'claude-3', prompt: 'hi' }),
     ).rejects.toBeInstanceOf(ClaudeApiError);

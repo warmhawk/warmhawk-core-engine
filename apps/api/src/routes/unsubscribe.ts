@@ -15,7 +15,7 @@
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { prisma } from '@warmhawk/db';
-import { verifyUnsubscribeToken } from '../lib/unsubscribeToken';
+import { TEST_SEND_UNSUBSCRIBE_ID, verifyUnsubscribeToken } from '../lib/unsubscribeToken';
 import { suppressEmail } from '../lib/suppression';
 import { RATE_LIMIT_UNSUBSCRIBE } from '../../../../constants';
 
@@ -83,6 +83,17 @@ function sendUnsubscribed(reply: FastifyReply, email: string | null) {
   );
 }
 
+/** A test email's link: it says so and suppresses nobody — not the lead it was written for, and
+ *  not the user who sent it to themselves. */
+function sendTestSendPage(reply: FastifyReply) {
+  return sendPage(
+    reply,
+    200,
+    'This was a test email',
+    '<p>Nobody was unsubscribed. In the real email, this link unsubscribes the lead it was sent to.</p>',
+  );
+}
+
 /** The lead behind a token. An erased lead (GDPR) keeps its row but not its address — it is
  *  already gone from every send, so it counts as unsubscribed with nothing left to do. */
 async function resolveLead(token: string) {
@@ -107,6 +118,8 @@ export async function unsubscribeRoutes(app: FastifyInstance): Promise<void> {
   };
 
   app.get<{ Params: { token: string } }>('/:token', { config }, async (request, reply) => {
+    if (verifyUnsubscribeToken(request.params.token) === TEST_SEND_UNSUBSCRIBE_ID)
+      return sendTestSendPage(reply);
     const lead = await resolveLead(request.params.token);
     if (!lead) return sendNotFound(reply);
     if (lead.piiErasedAt) return sendUnsubscribed(reply, null);
@@ -122,6 +135,8 @@ export async function unsubscribeRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post<{ Params: { token: string } }>('/:token', { config }, async (request, reply) => {
+    if (verifyUnsubscribeToken(request.params.token) === TEST_SEND_UNSUBSCRIBE_ID)
+      return sendTestSendPage(reply);
     const lead = await resolveLead(request.params.token);
     if (!lead) return sendNotFound(reply);
     if (lead.piiErasedAt) return sendUnsubscribed(reply, null);

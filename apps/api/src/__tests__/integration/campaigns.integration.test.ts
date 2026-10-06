@@ -543,7 +543,7 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
         ),
       ).toBe(true);
       expect((await preview(draft)).json().body).toMatch(
-        /Unsubscribe: https:\/\/api\.acme\.example\/unsubscribe\/sample\./,
+        /Unsubscribe: https:\/\/api\.acme\.example\/unsubscribe\/test-send\./,
       );
       expect(
         (await preview({ ...draft, unsubscribeUrlTemplate: 'ftp://acme.example/u' })).json()
