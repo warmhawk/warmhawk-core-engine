@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
-  validateProviderKey,
+  checkProviderKey,
   personalizeContent,
   classifyReply,
   fillMergeFields,
@@ -15,35 +15,56 @@ import * as gemini from '../../lib/aiProviders/gemini';
 import * as claude from '../../lib/aiProviders/claude';
 
 vi.mock('../../lib/aiProviders/gemini', () => ({
-  validateGeminiKey: vi.fn(),
+  checkGeminiModel: vi.fn(),
   generateGeminiText: vi.fn(),
 }));
 vi.mock('../../lib/aiProviders/claude', () => ({
-  validateClaudeKey: vi.fn(),
+  checkClaudeModel: vi.fn(),
   generateClaudeText: vi.fn(),
 }));
 
-describe('validateProviderKey', () => {
+describe('checkProviderKey', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('returns false for an obviously-short key without calling either provider', async () => {
-    const result = await validateProviderKey('GEMINI', 'short');
-    expect(result).toBe(false);
-    expect(gemini.validateGeminiKey).not.toHaveBeenCalled();
+  it('refuses an obviously-short key without calling either provider', async () => {
+    const result = await checkProviderKey('GEMINI', 'short', 'gemini-3.5-flash-lite');
+    expect(result).toEqual({ ok: false, reason: 'key_rejected' });
+    expect(gemini.checkGeminiModel).not.toHaveBeenCalled();
   });
 
-  it('dispatches to validateGeminiKey for provider GEMINI', async () => {
-    vi.mocked(gemini.validateGeminiKey).mockResolvedValue(true);
-    await expect(validateProviderKey('GEMINI', 'a-real-looking-key')).resolves.toBe(true);
-    expect(gemini.validateGeminiKey).toHaveBeenCalledWith('a-real-looking-key');
-    expect(claude.validateClaudeKey).not.toHaveBeenCalled();
+  it('checks the chosen Gemini model for provider GEMINI', async () => {
+    vi.mocked(gemini.checkGeminiModel).mockResolvedValue(undefined);
+    await expect(
+      checkProviderKey('GEMINI', 'a-real-looking-key', 'gemini-3.5-flash-lite'),
+    ).resolves.toEqual({
+      ok: true,
+    });
+    expect(gemini.checkGeminiModel).toHaveBeenCalledWith(
+      'a-real-looking-key',
+      'gemini-3.5-flash-lite',
+    );
+    expect(claude.checkClaudeModel).not.toHaveBeenCalled();
   });
 
-  it('dispatches to validateClaudeKey for provider CLAUDE', async () => {
-    vi.mocked(claude.validateClaudeKey).mockResolvedValue(false);
-    await expect(validateProviderKey('CLAUDE', 'a-real-looking-key')).resolves.toBe(false);
-    expect(claude.validateClaudeKey).toHaveBeenCalledWith('a-real-looking-key');
-    expect(gemini.validateGeminiKey).not.toHaveBeenCalled();
+  it('checks the chosen Claude model for provider CLAUDE', async () => {
+    vi.mocked(claude.checkClaudeModel).mockResolvedValue(undefined);
+    await expect(
+      checkProviderKey('CLAUDE', 'a-real-looking-key', 'claude-haiku-4-5'),
+    ).resolves.toEqual({ ok: true });
+    expect(claude.checkClaudeModel).toHaveBeenCalledWith('a-real-looking-key', 'claude-haiku-4-5');
+    expect(gemini.checkGeminiModel).not.toHaveBeenCalled();
+  });
+
+  it('returns the failure reason a send would get — a free key on a paid model is quota_exceeded', async () => {
+    vi.mocked(gemini.checkGeminiModel).mockRejectedValue(
+      new Error('Gemini key check failed with HTTP 429: RESOURCE_EXHAUSTED'),
+    );
+    await expect(
+      checkProviderKey('GEMINI', 'a-real-looking-key', 'gemini-3.8-flash'),
+    ).resolves.toEqual({
+      ok: false,
+      reason: 'quota_exceeded',
+    });
   });
 });
 
@@ -101,9 +122,9 @@ describe('personalizeContent', () => {
  */
 describe('fillMergeFields', () => {
   it('fills every matching {{field}} placeholder, case-insensitively', () => {
-    expect(fillMergeFields('Hi {{FirstName}} at {{company}}', { firstName: 'Ada', company: 'Acme' })).toBe(
-      'Hi Ada at Acme',
-    );
+    expect(
+      fillMergeFields('Hi {{FirstName}} at {{company}}', { firstName: 'Ada', company: 'Acme' }),
+    ).toBe('Hi Ada at Acme');
   });
 
   it('leaves a placeholder with no matching field as literal text', () => {
@@ -159,7 +180,12 @@ describe('classifyReply', () => {
   beforeEach(() => vi.clearAllMocks());
 
   it('returns UNCLASSIFIED for empty content without calling the provider', async () => {
-    const result = await classifyReply({ provider: 'GEMINI', apiKey: 'k', model: 'm', replyContent: '   ' });
+    const result = await classifyReply({
+      provider: 'GEMINI',
+      apiKey: 'k',
+      model: 'm',
+      replyContent: '   ',
+    });
     expect(result.classification).toBe('UNCLASSIFIED');
     expect(gemini.generateGeminiText).not.toHaveBeenCalled();
   });
