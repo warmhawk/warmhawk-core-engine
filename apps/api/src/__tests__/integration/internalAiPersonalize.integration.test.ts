@@ -18,7 +18,8 @@ const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
 const CALLBACK_SECRET = process.env.NEXTJS_CALLBACK_SECRET || 'test-only-callback-secret';
 
-const TEMPLATE = 'Hi {{firstName}}, {Quick question|One thing I noticed} about {{company}} — got a minute?';
+const TEMPLATE =
+  'Hi {{firstName}}, {Quick question|One thing I noticed} about {{company}} — got a minute?';
 
 describeIntegration('/internal/ai/personalize (integration, real Postgres)', () => {
   let app: FastifyInstance;
@@ -63,7 +64,9 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
   }
 
   async function mailbox(senderName: string | null) {
-    const domain = await prisma.domain.create({ data: { domainName: `compose-${Date.now()}.example` } });
+    const domain = await prisma.domain.create({
+      data: { domainName: `compose-${Date.now()}.example` },
+    });
     domainIds.push(domain.id);
     return prisma.mailbox.create({
       data: { email: `sam.patel@${domain.domainName}`, domainId: domain.id, senderName },
@@ -73,7 +76,12 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
   async function activeGeminiKey() {
     const key = loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
     await prisma.aiProviderKey.create({
-      data: { provider: 'GEMINI', apiKeyEncrypted: encrypt('test-gemini-key', key), model: 'gemini-2.5-flash', isActive: true },
+      data: {
+        provider: 'GEMINI',
+        apiKeyEncrypted: encrypt('test-gemini-key', key),
+        model: 'gemini-2.5-flash',
+        isActive: true,
+      },
     });
   }
 
@@ -83,7 +91,9 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
     for (const r of replies) {
       spy.mockResolvedValueOnce(
         new Response(
-          r.status === 200 ? JSON.stringify({ candidates: [{ content: { parts: [{ text: r.text }] } }] }) : 'error',
+          r.status === 200
+            ? JSON.stringify({ candidates: [{ content: { parts: [{ text: r.text }] } }] })
+            : 'error',
           { status: r.status },
         ),
       );
@@ -134,7 +144,12 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
 
   it('an inactive key reports AI_FALLBACK with reason key_missing', async () => {
     await prisma.aiProviderKey.create({
-      data: { provider: 'GEMINI', apiKeyEncrypted: 'unused', model: 'gemini-2.5-flash', isActive: false },
+      data: {
+        provider: 'GEMINI',
+        apiKeyEncrypted: 'unused',
+        model: 'gemini-2.5-flash',
+        isActive: false,
+      },
     });
     const { campaign, lead } = await fixture({
       name: 'Key Missing Test',
@@ -160,17 +175,21 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
       aiProvider: 'GEMINI',
       aiMode: 'PERSONALIZE',
     });
-    const spy = geminiReplies({ status: 200, text: 'Hi Dana, running ops at Acme is no small job.\n\nWe cut dispatch time by 30%.' });
+    const spy = geminiReplies({
+      status: 200,
+      text: 'Hi Dana, running ops at Acme is no small job.\n\nWe cut dispatch time by 30%.',
+    });
 
     const json = await personalize({ campaignId: campaign.id, leadId: lead.id });
-    const prompt = JSON.parse(String(spy.mock.calls[0][1]?.body)).contents[0].parts[0].text as string;
+    const prompt = JSON.parse(String(spy.mock.calls[0][1]?.body)).contents[0].parts[0]
+      .text as string;
     expect(prompt).toContain('<email>\nHi Dana,\n\nWe cut dispatch time by 30%.\n</email>');
     expect(json.aiOutcome).toBe('AI_WRITTEN');
     expect(json.subject).toBe('Faster dispatch at Acme Logistics');
     expect(json.body).toContain('running ops at Acme');
   });
 
-  it('aiWritesSubject takes the model\'s Subject: line over the campaign subject', async () => {
+  it("aiWritesSubject takes the model's Subject: line over the campaign subject", async () => {
     await activeGeminiKey();
     const { campaign, lead } = await fixture({
       name: 'AI Subject Test',
@@ -186,6 +205,31 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
     const json = await personalize({ campaignId: campaign.id, leadId: lead.id });
     expect(json.subject).toBe('Dispatch at Acme');
     expect(json.body).toBe('Hi Dana, short intro.');
+  });
+
+  it("AI Writes that twice leaves out the sender's price sends the sender's email, reason content_dropped", async () => {
+    await activeGeminiKey();
+    const { campaign, lead } = await fixture({
+      name: 'Dropped Price Test',
+      aiPromptTemplate: '',
+      subject: 'Dispatch',
+      template: 'Hi {{firstName}},\n\nIt costs $99.50 a month.',
+      aiProvider: 'GEMINI',
+      aiMode: 'PROMPT',
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spy = geminiReplies(
+      { status: 200, text: 'Hi Dana, want faster dispatch?' },
+      { status: 200, text: 'Hi Dana, it is cheap. Want faster dispatch?' },
+    );
+
+    const json = await personalize({ campaignId: campaign.id, leadId: lead.id });
+    const retryPrompt = JSON.parse(String(spy.mock.calls[1][1]?.body)).contents[0].parts[0]
+      .text as string;
+    expect(retryPrompt).toContain('This time include each one exactly as written:\n- $99.50');
+    expect(json.aiOutcome).toBe('AI_FALLBACK');
+    expect(json.aiFallbackReason).toBe('content_dropped');
+    expect(json.body).toBe('Hi Dana,\n\nIt costs $99.50 a month.');
   });
 
   it('a retired model falls back to the template and says model_unavailable', async () => {
@@ -254,10 +298,20 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
 
   it('AI provider configured but the key is inactive: same merge-field + spintax rendering, not the raw template', async () => {
     await prisma.aiProviderKey.create({
-      data: { provider: 'GEMINI', apiKeyEncrypted: 'unused-in-this-test', model: 'gemini-2.5-flash', isActive: false },
+      data: {
+        provider: 'GEMINI',
+        apiKeyEncrypted: 'unused-in-this-test',
+        model: 'gemini-2.5-flash',
+        isActive: false,
+      },
     });
     const campaign = await prisma.campaign.create({
-      data: { name: 'Inactive-Key Personalize Test', aiPromptTemplate: '', template: TEMPLATE, aiProvider: 'GEMINI' },
+      data: {
+        name: 'Inactive-Key Personalize Test',
+        aiPromptTemplate: '',
+        template: TEMPLATE,
+        aiProvider: 'GEMINI',
+      },
     });
     campaignIds.push(campaign.id);
     const lead = await prisma.lead.create({
@@ -288,11 +342,18 @@ describeIntegration('/internal/ai/personalize (integration, real Postgres)', () 
 
   it('falls back to campaign.aiPromptTemplate (rendered, not raw) when template is null', async () => {
     const campaign = await prisma.campaign.create({
-      data: { name: 'No-Template Fallback Test', aiPromptTemplate: 'Hey {{firstName}}, {short note|quick note}.' },
+      data: {
+        name: 'No-Template Fallback Test',
+        aiPromptTemplate: 'Hey {{firstName}}, {short note|quick note}.',
+      },
     });
     campaignIds.push(campaign.id);
     const lead = await prisma.lead.create({
-      data: { campaignId: campaign.id, email: `personalize-lead-notpl-${Date.now()}@example.com`, firstName: 'Lin' },
+      data: {
+        campaignId: campaign.id,
+        email: `personalize-lead-notpl-${Date.now()}@example.com`,
+        firstName: 'Lin',
+      },
     });
     leadIds.push(lead.id);
 

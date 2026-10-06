@@ -25,6 +25,7 @@ import {
 import { renderSpintax } from './spintax';
 import { appendEuAiDisclosureIfNeeded } from './sendCompliance';
 import { followUpSubject } from './sequence';
+import { addedLinks, changedLines, missingFacts, restoreParagraphBreaks } from './aiOutputChecks';
 
 const PERSONALIZATION_RETRY_DELAY_MS = 1_500;
 export const FALLBACK_SUBJECT = 'Quick question';
@@ -83,6 +84,76 @@ export async function personalizeWithFallback(
       };
     }
   }
+}
+
+/** What `outputCheck` found wrong with an AI email: parts of the sender's email it left out or
+ *  changed, and links it added that the sender's email doesn't have. */
+export interface OutputProblems {
+  missing: string[];
+  added: string[];
+}
+
+const hasProblems = (found: OutputProblems) => found.missing.length > 0 || found.added.length > 0;
+
+/** `personalizeWithFallback`, then a check of what came back against the sender's own email. A
+ *  miss gets one retry that names what to put back and what to leave out; a second miss sends the
+ *  sender's own email, reason `content_dropped` — the offer as they wrote it beats an AI email
+ *  without its price, or with a link they didn't put in. */
+export async function personalizeChecked(
+  request: PersonalizeRequest,
+  check: (generatedText: string) => OutputProblems,
+): ReturnType<typeof personalizeWithFallback> {
+  const first = await personalizeWithFallback(request, '');
+  if (!first.aiUsed) return first;
+  const found = check(first.generatedText);
+  if (!hasProblems(found)) return first;
+  const second = await personalizeWithFallback(
+    { ...request, mustKeep: found.missing, mustDrop: found.added },
+    '',
+  );
+  if (!second.aiUsed) return second;
+  const stillFound = check(second.generatedText);
+  if (!hasProblems(stillFound)) return second;
+  console.warn(
+    JSON.stringify({
+      level: 40,
+      time: Date.now(),
+      msg: "AI write changed the sender's email twice; sent the sender's email",
+      provider: request.provider,
+      model: request.model,
+      mode: request.mode,
+      missing: stillFound.missing.slice(0, 5).map((part) => part.slice(0, 80)),
+      added: stillFound.added.slice(0, 5).map((link) => link.slice(0, 80)),
+    }),
+  );
+  return {
+    generatedText: '',
+    aiUsed: false,
+    aiPersonalizationFailed: true,
+    aiFallbackReason: 'content_dropped',
+  };
+}
+
+/** What `personalizeChecked` checks. Only with blank instructions: the defaults promise to keep
+ *  the sender's links, prices and (AI Adjusts) sentences, while custom instructions may ask to
+ *  change exactly those. */
+function outputCheck(
+  mode: CampaignAiMode | 'PERSONALIZE',
+  instructions: string,
+  baseEmail: string,
+  senderName: string | null,
+): (generatedText: string) => OutputProblems {
+  if (instructions.trim() || !baseEmail.trim()) return () => ({ missing: [], added: [] });
+  return (generatedText) => {
+    const written = stripPlaceholders(generatedText, senderName);
+    return {
+      missing:
+        mode === 'PERSONALIZE'
+          ? changedLines(baseEmail, written)
+          : missingFacts(baseEmail, written),
+      added: addedLinks(baseEmail, written),
+    };
+  };
 }
 
 /** Renders the campaign's own literal template for the no-AI-provider / inactive-key fallback
@@ -242,7 +313,9 @@ async function composeFollowUp(
   ]
     .filter(Boolean)
     .join('\n\n');
-  const result = await personalizeWithFallback(
+  // A follow-up may come back shorter, so only its links and prices are checked, not every line.
+  const senderName = (leadContext.senderName as string | undefined) ?? null;
+  const result = await personalizeChecked(
     {
       provider: campaign.aiProvider,
       apiKey,
@@ -253,13 +326,13 @@ async function composeFollowUp(
       baseEmail: own.body,
       wantsSubject: false,
     },
-    '',
+    outputCheck('PROMPT', campaign.aiPromptTemplate, own.body, senderName),
   );
   if (!result.aiUsed || !result.generatedText.trim())
     return plain('AI_FALLBACK', result.aiFallbackReason ?? 'provider_error');
 
   const { body, disclosureAppended } = appendEuAiDisclosureIfNeeded(
-    stripPlaceholders(result.generatedText, leadContext.senderName as string | undefined),
+    stripPlaceholders(result.generatedText, senderName),
     true,
     {
       email: lead.email,
@@ -312,7 +385,7 @@ export async function composeCampaignEmail(params: {
     providerKey.apiKeyEncrypted,
     loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || ''),
   );
-  const result = await personalizeWithFallback(
+  const result = await personalizeChecked(
     {
       provider: campaign.aiProvider,
       apiKey,
@@ -323,10 +396,14 @@ export async function composeCampaignEmail(params: {
       baseEmail: ownBody,
       wantsSubject,
     },
-    '',
+    outputCheck(campaign.aiMode, campaign.aiPromptTemplate, ownBody, senderName),
   );
   if (!result.aiUsed) return plain('AI_FALLBACK', result.aiFallbackReason);
-  const generated = stripPlaceholders(result.generatedText, senderName);
+  const stripped = stripPlaceholders(result.generatedText, senderName);
+  const generated =
+    campaign.aiMode === 'PERSONALIZE' && ownBody
+      ? restoreParagraphBreaks(ownBody, stripped)
+      : stripped;
 
   // Subject precedence: the model's when the campaign asked for it, else the campaign's own, else
   // the model's anyway (asked because the campaign has none), else the old first-line rule.
