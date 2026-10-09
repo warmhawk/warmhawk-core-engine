@@ -17,6 +17,7 @@ const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 
 const RESULTS = [
   'inbox',
+  'promotions',
   'spam',
   'moved',
   'missing',
@@ -39,6 +40,7 @@ const PERIOD_MS: Record<Exclude<PeriodFilter, 'all'>, number> = {
 /** `moved` is spam that warmup moved back to the inbox; `spam` includes it. */
 const RESULT_WHERE: Record<ResultFilter, Prisma.WarmupMessageWhereInput> = {
   inbox: { placement: 'INBOX' },
+  promotions: { placement: 'PROMOTIONS' },
   spam: { placement: 'SPAM' },
   moved: { rescued: true },
   missing: { placement: 'MISSING' },

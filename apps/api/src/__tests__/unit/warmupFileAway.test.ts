@@ -75,3 +75,61 @@ describe('ImapInboxReader.rescue', () => {
     expect(inbox).toBeUndefined();
   });
 });
+
+describe('ImapInboxReader.inPromotions', () => {
+  function gmail(opts: { gmail: boolean; promoUids: number[]; fail?: boolean }) {
+    const searches: unknown[] = [];
+    const client = {
+      capabilities: new Map(opts.gmail ? [['X-GM-EXT-1', true]] : []),
+      getMailboxLock: async () => ({ release: () => undefined }),
+      search: async (query: { uid: string; gmraw: string }) => {
+        searches.push(query);
+        if (opts.fail) throw new Error('NO search failed');
+        return opts.promoUids.includes(Number(query.uid)) ? [Number(query.uid)] : [];
+      },
+    };
+    return { client: client as unknown as ImapFlow, searches };
+  }
+
+  it('is true for a Gmail INBOX copy filed under the Promotions tab', async () => {
+    const { client, searches } = gmail({ gmail: true, promoUids: [9] });
+    const reader = new ImapInboxReader(client);
+    expect(await reader.inPromotions({ folder: 'INBOX', uid: 9, inSpam: false })).toBe(true);
+    expect(searches).toEqual([{ uid: '9', gmraw: 'category:promotions' }]);
+  });
+
+  it('is false for a Gmail INBOX copy in the Primary tab', async () => {
+    const { client } = gmail({ gmail: true, promoUids: [] });
+    expect(
+      await new ImapInboxReader(client).inPromotions({ folder: 'INBOX', uid: 4, inSpam: false }),
+    ).toBe(false);
+  });
+
+  it('never asks a server without Gmail extensions, or about a spam copy', async () => {
+    const plain = gmail({ gmail: false, promoUids: [1] });
+    expect(
+      await new ImapInboxReader(plain.client).inPromotions({
+        folder: 'INBOX',
+        uid: 1,
+        inSpam: false,
+      }),
+    ).toBe(false);
+    const spam = gmail({ gmail: true, promoUids: [1] });
+    expect(
+      await new ImapInboxReader(spam.client).inPromotions({
+        folder: '[Gmail]/Spam',
+        uid: 1,
+        inSpam: true,
+      }),
+    ).toBe(false);
+    expect(plain.searches).toEqual([]);
+    expect(spam.searches).toEqual([]);
+  });
+
+  it('passes a search error up, for the engine to treat as inbox', async () => {
+    const { client } = gmail({ gmail: true, promoUids: [], fail: true });
+    await expect(
+      new ImapInboxReader(client).inPromotions({ folder: 'INBOX', uid: 2, inSpam: false }),
+    ).rejects.toThrow(/search failed/);
+  });
+});

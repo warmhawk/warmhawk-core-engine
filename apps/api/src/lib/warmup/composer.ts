@@ -7,7 +7,7 @@
 
 export type Rng = () => number;
 
-const SUBJECTS = [
+export const WARMUP_SUBJECTS = [
   'Quick question about next week',
   'Following up on our chat',
   'Notes from today',
@@ -71,10 +71,13 @@ export interface WarmupEmail {
   body: string;
 }
 
+/** `avoidSubjects`: subjects the recipient saw recently. They're skipped while any other subject
+ *  is left, so one inbox doesn't collect the same subject from several senders. */
 export function composeWarmupEmail(params: {
   fromEmail: string;
   toEmail: string;
   rng?: Rng;
+  avoidSubjects?: ReadonlySet<string>;
 }): WarmupEmail {
   const rng = params.rng ?? Math.random;
   const toName = displayNameFromEmail(params.toEmail);
@@ -94,5 +97,7 @@ export function composeWarmupEmail(params: {
   ];
   if (fromName) lines.push(fromName);
 
-  return { subject: pick(SUBJECTS, rng), body: lines.join('\n') };
+  const avoid = params.avoidSubjects;
+  const fresh = avoid ? WARMUP_SUBJECTS.filter((s) => !avoid.has(s)) : WARMUP_SUBJECTS;
+  return { subject: pick(fresh.length > 0 ? fresh : WARMUP_SUBJECTS, rng), body: lines.join('\n') };
 }

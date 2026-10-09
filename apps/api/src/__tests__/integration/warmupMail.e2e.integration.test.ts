@@ -2,7 +2,9 @@
  * End-to-end warmup test over REAL SMTP and IMAP — a GreenMail server in Docker — plus a real
  * Postgres. Nothing about mail is faked: `runWarmupTick` with the production `defaultWarmupDeps`
  * sends through `sendMail()` (nodemailer SMTP), then reads the recipient mailbox over IMAPS
- * (`openImapClient`), marks inbox mail read and rescues spam back to the inbox.
+ * (`openImapClient`), marks inbox mail read, rescues spam back to the inbox, then files both into
+ * the WarmHawk warmup folder. GreenMail has no Gmail extensions, so the Promotions check must
+ * answer no and every inbox landing stays INBOX.
  *
  * Self-skips unless both DATABASE_URL and WARMUP_E2E_SMTP_PORT are set. To run locally:
  *
@@ -25,6 +27,7 @@ import { ImapFlow } from 'imapflow';
 import { prisma } from '@warmhawk/db';
 import { encrypt, loadEncryptionKey } from '../../lib/encryption';
 import { defaultWarmupDeps, runWarmupTick, type WarmupDeps } from '../../lib/warmup/engine';
+import { WARMUP_FOLDER } from '../../lib/warmup/placement';
 import { sendMail } from '../../lib/mailSender';
 import { encryptSeedImapConfig } from '../../lib/seedAccounts';
 import { checkSampledPlacements } from '../../lib/seedPlacementPoller';
@@ -213,13 +216,19 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
       error: null,
     });
 
-    // The real mailboxes now look the way a person would have left them.
-    const beaInbox = (await listFolder(bea, 'INBOX')).find((m) => m.messageId === toBea.messageId)!;
-    expect(beaInbox.flags).toContain('\\Seen');
+    // The real mailboxes now look the way a person would have left them: read, the rescued one
+    // starred, and both filed out of the inbox into the warmup folder.
+    const beaFiled = (await listFolder(bea, WARMUP_FOLDER)).find(
+      (m) => m.messageId === toBea.messageId,
+    )!;
+    expect(beaFiled.flags).toContain('\\Seen');
+    expect((await listFolder(bea, 'INBOX')).some((m) => m.messageId === toBea.messageId)).toBe(
+      false,
+    );
     expect((await listFolder(alex, 'Junk')).some((m) => m.messageId === toAlex.messageId)).toBe(
       false,
     );
-    const rescued = (await listFolder(alex, 'INBOX')).find(
+    const rescued = (await listFolder(alex, WARMUP_FOLDER)).find(
       (m) => m.messageId === toAlex.messageId,
     )!;
     expect(rescued.flags).toEqual(expect.arrayContaining(['\\Seen', '\\Flagged']));
@@ -264,10 +273,12 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
     const seedEmail = `seed${stamp}@gamma.e2e.test`;
     await withImap(seedEmail, (c) => c.mailboxCreate('Junk').catch(() => undefined));
     const realRate = process.env.SEED_BCC_SAMPLE_RATE;
-    const realSettings = await prisma.instanceSettings.findUnique({ where: { id: 'default' } });
     process.env.SEED_BCC_SAMPLE_RATE = '1';
     // Only our seed may be BCC'd during this test.
-    const otherActiveSeeds = await prisma.seedAccount.findMany({ where: { isActive: true }, select: { id: true } });
+    const otherActiveSeeds = await prisma.seedAccount.findMany({
+      where: { isActive: true },
+      select: { id: true },
+    });
     await prisma.seedAccount.updateMany({ data: { isActive: false } });
 
     const seed = await prisma.seedAccount.create({
@@ -282,10 +293,10 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
         }),
       },
     });
-    await prisma.instanceSettings.upsert({
-      where: { id: 'default' },
-      create: { id: 'default', physicalMailingAddress: '1 Test Way, Testville' },
-      update: { physicalMailingAddress: '1 Test Way, Testville' },
+    // CAN-SPAM: every campaign email prints its sending domain's postal address.
+    await prisma.domain.update({
+      where: { id: domainId },
+      data: { mailingAddress: '1 Test Way, Testville' },
     });
     const campaign = await prisma.campaign.create({
       data: {
@@ -294,6 +305,10 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
         aiPromptTemplate: '',
         unsubscribeUrlTemplate: 'https://example.com/u?e={{email}}',
       },
+    });
+    // A first email only goes out from a mailbox the campaign sends from.
+    await prisma.campaignMailbox.create({
+      data: { campaignId: campaign.id, mailboxId: mailboxIds[0] },
     });
     const lead = await prisma.lead.create({
       data: { campaignId: campaign.id, email: bea, status: 'QUEUED' },
@@ -311,15 +326,22 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
       });
       expect(result.seedBccCount).toBe(1);
 
-      const [row] = await prisma.seedPlacementResult.findMany({ where: { campaignId: campaign.id } });
-      expect(row).toMatchObject({ seedAccountId: seed.id, mailboxId: mailboxIds[0], checkedAt: null });
+      const [row] = await prisma.seedPlacementResult.findMany({
+        where: { campaignId: campaign.id },
+      });
+      expect(row).toMatchObject({
+        seedAccountId: seed.id,
+        mailboxId: mailboxIds[0],
+        checkedAt: null,
+      });
       expect(row.messageId).toMatch(/^<.+@.+>$/);
       expect(row.subjectSha256).toMatch(/^[0-9a-f]{64}$/);
 
       // The seed's provider files the campaign copy under Junk, then a newer unrelated email
       // arrives in its INBOX — the old poller would have reported that one.
       const copy = await waitFor(
-        async () => (await listFolder(seedEmail, 'INBOX')).find((m) => m.messageId === row.messageId),
+        async () =>
+          (await listFolder(seedEmail, 'INBOX')).find((m) => m.messageId === row.messageId),
         'seed delivery',
       );
       await withImap(seedEmail, async (c) => {
@@ -331,7 +353,15 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
         }
         await c.append(
           'INBOX',
-          [`From: ${bea}`, `To: ${seedEmail}`, 'Subject: Unrelated', `Message-ID: <later-${stamp}@beta.e2e.test>`, '', 'hi', ''].join('\r\n'),
+          [
+            `From: ${bea}`,
+            `To: ${seedEmail}`,
+            'Subject: Unrelated',
+            `Message-ID: <later-${stamp}@beta.e2e.test>`,
+            '',
+            'hi',
+            '',
+          ].join('\r\n'),
         );
       });
 
@@ -345,7 +375,9 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
       expect(after.checkedAt).not.toBeNull();
 
       // Looked at, never touched: the campaign copy stays unread in Junk.
-      const junk = (await listFolder(seedEmail, 'Junk')).find((m) => m.messageId === row.messageId)!;
+      const junk = (await listFolder(seedEmail, 'Junk')).find(
+        (m) => m.messageId === row.messageId,
+      )!;
       expect(junk.flags).not.toContain('\\Seen');
     } finally {
       if (realRate === undefined) delete process.env.SEED_BCC_SAMPLE_RATE;
@@ -359,14 +391,6 @@ describeE2e('warmup over real SMTP + IMAP (GreenMail e2e)', () => {
         where: { id: { in: otherActiveSeeds.map((s) => s.id) } },
         data: { isActive: true },
       });
-      if (realSettings) {
-        await prisma.instanceSettings.update({
-          where: { id: 'default' },
-          data: { physicalMailingAddress: realSettings.physicalMailingAddress },
-        });
-      } else {
-        await prisma.instanceSettings.delete({ where: { id: 'default' } });
-      }
     }
   });
 });
