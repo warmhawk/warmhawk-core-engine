@@ -305,17 +305,39 @@ export async function exchangeGoogleCodeViaRelay(
   };
 }
 
+/** A refresh that hits a network blip (timeout, dropped connection, a 502/503/504 from the edge)
+ *  waits this long and tries once more before the send fails. Only the refresh retries: a sign-in
+ *  code is single-use, so a second exchange of it can't succeed. */
+export const REFRESH_RETRY_DELAY_MS = 2_000;
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+
+export type SleepFn = (ms: number) => Promise<void>;
+const defaultSleep: SleepFn = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A 503 `provider_not_configured` is the relay's deliberate answer, not an outage. */
+function isTransient({ status, json }: RelayResponse): boolean {
+  return RETRYABLE_STATUSES.has(status) && json.error !== 'provider_not_configured';
+}
+
 export async function refreshGoogleViaRelay(
   refreshToken: string,
   fetchImpl: FetchLike = fetch,
+  sleep: SleepFn = defaultSleep,
 ): Promise<{ accessToken: string; expiresInSeconds: number }> {
   const license = await requireLicense();
-  const response = await relayPost(
-    license,
-    '/api/connect/google/token',
-    { grant: 'refresh', refreshToken },
-    fetchImpl,
-  );
+  const post = () =>
+    relayPost(license, '/api/connect/google/token', { grant: 'refresh', refreshToken }, fetchImpl);
+  let response: RelayResponse | null = null;
+  try {
+    response = await post();
+  } catch (err) {
+    // relayPost throws only relay_unreachable (timeout or no connection); retry that.
+    if (!(err instanceof ConnectRelayError)) throw err;
+  }
+  if (!response || isTransient(response)) {
+    await sleep(REFRESH_RETRY_DELAY_MS);
+    response = await post();
+  }
   const { json } = response;
   if (response.status === 400 && json.error === 'invalid_grant') {
     throw new ConnectRelayError(
