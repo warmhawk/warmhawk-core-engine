@@ -28,6 +28,14 @@ export const CHECK_AFTER_MS = 3 * 60 * 1000;
 export const CHECK_GIVE_UP_MS = 2 * 60 * 60 * 1000;
 export const UNCHECKED_AFTER_MS = 6 * 60 * 60 * 1000;
 
+/** Spreading sends across partners: an inbox that got a warmup email in the last
+ *  RECIPIENT_GAP_MS isn't sent another (several senders hitting one inbox in the same minute reads
+ *  as automated mail), and a subject an inbox saw in the last SUBJECT_REPEAT_DAYS isn't reused.
+ *  The gap is under the 10-minute tick, so an inbox gets at most one per tick and is free again
+ *  on the next. */
+export const RECIPIENT_GAP_MS = 5 * 60 * 1000;
+export const SUBJECT_REPEAT_DAYS = 3;
+
 export const HEALTH_WINDOW_DAYS = 7;
 export const GRADUATE_MIN_HEALTH = 90;
 export const GRADUATE_MIN_DAY = 14;
@@ -87,6 +95,8 @@ export function isSendDue(params: {
 export interface PlacementCounts {
   sent: number;
   inbox: number;
+  /** Reached the inbox under Gmail's Promotions tab; checked, but not counted as inbox. */
+  promotions: number;
   spam: number;
   missing: number;
   /** A delivery-failure report came back; it never reached the partner. */
@@ -101,6 +111,7 @@ export function emptyCounts(): PlacementCounts {
   return {
     sent: 0,
     inbox: 0,
+    promotions: 0,
     spam: 0,
     missing: 0,
     bounced: 0,
@@ -122,6 +133,9 @@ export function tallyPlacements(
     switch (m.placement) {
       case 'INBOX':
         c.inbox += 1;
+        break;
+      case 'PROMOTIONS':
+        c.promotions += 1;
         break;
       case 'SPAM':
         c.spam += 1;
@@ -148,11 +162,12 @@ export function tallyPlacements(
 
 /** Emails with a real placement answer — the health score's denominator. */
 export function checkedCount(c: PlacementCounts): number {
-  return c.inbox + c.spam + c.missing + c.bounced;
+  return c.inbox + c.promotions + c.spam + c.missing + c.bounced;
 }
 
 /** 7-day inbox rate, 0-100, or null before anything has been checked. A rescued email still
- *  counts as spam here: it landed there, rescuing it doesn't change that. */
+ *  counts as spam here: it landed there, rescuing it doesn't change that. A Promotions-tab landing
+ *  isn't the inbox either. */
 export function healthScore(c: PlacementCounts): number | null {
   const checked = checkedCount(c);
   if (checked === 0) return null;

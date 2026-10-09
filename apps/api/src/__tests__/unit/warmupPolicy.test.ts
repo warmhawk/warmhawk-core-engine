@@ -6,6 +6,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DAY_MS,
+  RECIPIENT_GAP_MS,
   campaignCapToday,
   checkedCount,
   dailyWarmupTarget,
@@ -96,6 +97,13 @@ describe('send spacing', () => {
   });
 });
 
+describe('recipient gap', () => {
+  it('is shorter than the 10-minute tick, so an inbox is free again on the next tick', () => {
+    expect(RECIPIENT_GAP_MS).toBeGreaterThan(0);
+    expect(RECIPIENT_GAP_MS).toBeLessThan(10 * 60 * 1000);
+  });
+});
+
 describe('health score', () => {
   it('is null before anything is checked', () => {
     expect(healthScore(counts({ pending: 3, failed: 1, sent: 4 }))).toBeNull();
@@ -110,6 +118,22 @@ describe('health score', () => {
     expect(checkedCount(c)).toBe(4);
     expect(healthScore(c)).toBe(75);
   });
+  it('counts a Promotions-tab email as checked but not in the inbox', () => {
+    const c = tallyPlacements([
+      { placement: 'INBOX', rescued: false },
+      { placement: 'INBOX', rescued: false },
+      { placement: 'INBOX', rescued: false },
+      { placement: 'PROMOTIONS', rescued: false },
+    ]);
+    expect(c.promotions).toBe(1);
+    expect(c.inbox).toBe(3);
+    expect(checkedCount(c)).toBe(4);
+    expect(healthScore(c)).toBe(75);
+  });
+  it('lets Promotions landings hold back graduation like spam does', () => {
+    const c = counts({ inbox: 17, promotions: 3 });
+    expect(decideStatus({ status: 'WARMUP', day: 20, counts: c })).toBe('none');
+  });
   it('counts a rescued email as spam', () => {
     const c = tallyPlacements([
       { placement: 'INBOX', rescued: false },
@@ -121,6 +145,7 @@ describe('health score', () => {
   it('tallies every placement kind', () => {
     const c = tallyPlacements([
       { placement: 'INBOX', rescued: false },
+      { placement: 'PROMOTIONS', rescued: false },
       { placement: 'SPAM', rescued: false },
       { placement: 'MISSING', rescued: false },
       { placement: 'BOUNCED', rescued: false },
@@ -129,8 +154,9 @@ describe('health score', () => {
       { placement: 'FAILED', rescued: false },
     ]);
     expect(c).toEqual({
-      sent: 7,
+      sent: 8,
       inbox: 1,
+      promotions: 1,
       spam: 1,
       missing: 1,
       bounced: 1,
