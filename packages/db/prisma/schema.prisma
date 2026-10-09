@@ -157,6 +157,9 @@ enum WarmupPlacement {
   FAILED
   /// The sender got a delivery-failure report (DSN) back for it; `error` says why.
   BOUNCED
+  /// Reached the inbox but under Gmail's Promotions tab. Not counted as inbox in the health score,
+  /// the same rule seed placement checks use.
+  PROMOTIONS
 }
 
 // ---------------------------------------------------------------------------------------------

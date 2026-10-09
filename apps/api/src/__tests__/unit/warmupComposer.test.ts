@@ -3,7 +3,11 @@
  * notes, vary between sends, and carry no fixed marker a provider could learn to filter on.
  */
 import { describe, it, expect } from 'vitest';
-import { composeWarmupEmail, displayNameFromEmail } from '../../lib/warmup/composer';
+import {
+  WARMUP_SUBJECTS,
+  composeWarmupEmail,
+  displayNameFromEmail,
+} from '../../lib/warmup/composer';
 
 function seeded(seed: number) {
   let s = seed;
@@ -75,5 +79,53 @@ describe('composeWarmupEmail', () => {
       rng: () => 0.9999999,
     });
     expect(e.subject).toBe('Next steps');
+  });
+
+  it('skips subjects the recipient saw recently', () => {
+    const avoid = new Set(WARMUP_SUBJECTS.slice(0, -1));
+    const rng = seeded(3);
+    for (let i = 0; i < 20; i++) {
+      const e = composeWarmupEmail({
+        fromEmail: 'a@x.com',
+        toEmail: 'b@y.com',
+        rng,
+        avoidSubjects: avoid,
+      });
+      expect(e.subject).toBe(WARMUP_SUBJECTS[WARMUP_SUBJECTS.length - 1]);
+    }
+  });
+
+  it('never picks an avoided subject while others are left', () => {
+    const avoid = new Set(['A small update', 'Catching up', 'Quick question about next week']);
+    const rng = seeded(11);
+    for (let i = 0; i < 200; i++) {
+      const e = composeWarmupEmail({
+        fromEmail: 'a@x.com',
+        toEmail: 'b@y.com',
+        rng,
+        avoidSubjects: avoid,
+      });
+      expect(avoid.has(e.subject)).toBe(false);
+    }
+  });
+
+  it('falls back to the full list once the recipient has seen every subject', () => {
+    const e = composeWarmupEmail({
+      fromEmail: 'a@x.com',
+      toEmail: 'b@y.com',
+      rng: () => 0,
+      avoidSubjects: new Set(WARMUP_SUBJECTS),
+    });
+    expect(e.subject).toBe(WARMUP_SUBJECTS[0]);
+  });
+
+  it('ignores avoided subjects that are not in the list', () => {
+    const e = composeWarmupEmail({
+      fromEmail: 'a@x.com',
+      toEmail: 'b@y.com',
+      rng: () => 0,
+      avoidSubjects: new Set(['Something else entirely']),
+    });
+    expect(e.subject).toBe(WARMUP_SUBJECTS[0]);
   });
 });

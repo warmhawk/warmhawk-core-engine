@@ -5,8 +5,9 @@
  * (`PATCH /v1/mailboxes/:id { warmupEnabled }`) and the n8n trigger (`POST /internal/warmup/tick`).
  *
  * Mail I/O goes through a small in-memory "mail world" passed in as `WarmupDeps` — every Postgres
- * read and write is real. Real SMTP/IMAP is covered separately by the GreenMail e2e test
- * (`warmupMail.e2e.integration.test.ts`).
+ * read and write is real. A second block covers how sends spread across inboxes (one per inbox
+ * per tick, no repeated subjects) and Gmail's Promotions tab. Real SMTP/IMAP is covered
+ * separately by the GreenMail e2e test (`warmupMail.e2e.integration.test.ts`).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { FastifyInstance } from 'fastify';
@@ -36,9 +37,20 @@ type Folder = 'INBOX' | 'Junk' | typeof WARMUP_FOLDER;
 class MailWorld {
   delivered = new Map<
     string,
-    { to: string; uid: number; folder: Folder; seen: boolean; flagged: boolean }
+    {
+      to: string;
+      uid: number;
+      folder: Folder;
+      seen: boolean;
+      flagged: boolean;
+      promotions: boolean;
+    }
   >();
   spamFor = new Set<string>();
+  /** Recipients whose (Gmail) inbox sorts warmup mail under the Promotions tab. */
+  promotionsFor = new Set<string>();
+  /** Recipients whose Promotions lookup fails, the way a Gmail search can time out. */
+  promotionsErrorFor = new Set<string>();
   dropFor = new Set<string>();
   brokenReaders = new Set<string>();
   /** Message-ID -> sender email: a delivery-failure report sits in the sender's mailbox. */
@@ -69,6 +81,7 @@ class MailWorld {
             folder: this.spamFor.has(input.to) ? 'Junk' : 'INBOX',
             seen: false,
             flagged: false,
+            promotions: this.promotionsFor.has(input.to),
           });
         }
         return { messageId };
@@ -81,6 +94,10 @@ class MailWorld {
             const d = t.messageId ? this.delivered.get(t.messageId) : undefined;
             if (!d || d.to !== owner) return null;
             return { folder: d.folder, uid: d.uid, inSpam: d.folder === 'Junk' };
+          },
+          inPromotions: async (f: FoundMessage) => {
+            if (this.promotionsErrorFor.has(owner)) throw new Error('IMAP search timed out');
+            return !f.inSpam && Boolean(this.at(owner, f)?.promotions);
           },
           markRead: async (f: FoundMessage) => {
             const d = this.at(owner, f);
@@ -566,5 +583,245 @@ describeIntegration('warmup engine + routes (integration, real Postgres)', () =>
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ sent: expect.any(Number), checked: expect.any(Number) });
+  });
+});
+
+describeIntegration('warmup sends spread across inboxes + Promotions tab (integration)', () => {
+  let app: FastifyInstance;
+  let authToken: string;
+  let domainId: string;
+  const ids: string[] = [];
+  const emailById = new Map<string, string>();
+  const stamp = Date.now() + 1;
+  // Its own day, well clear of the first block's clock.
+  const t0 = new Date(Math.floor(Date.now() / DAY) * DAY + 3 * DAY + HOUR);
+  const clock = { now: t0 };
+  let world: MailWorld;
+
+  async function makeMailbox(local: string, extra: Record<string, unknown> = {}) {
+    const email = `${local}-${stamp}@${local}-spread.test`;
+    const m = await prisma.mailbox.create({
+      data: {
+        email,
+        domainId,
+        smtpHost: 'smtp.fake.test',
+        imapHost: 'imap.fake.test',
+        imapPort: 993,
+        authUsername: email,
+        authPasswordEncrypted: 'placeholder-never-decrypted',
+        ...extra,
+      },
+    });
+    ids.push(m.id);
+    emailById.set(m.id, email);
+    return { id: m.id, email };
+  }
+
+  const ours = (since: Date) =>
+    prisma.warmupMessage.findMany({
+      where: { senderMailboxId: { in: ids }, sentAt: { gte: since } },
+      orderBy: { sentAt: 'asc' },
+    });
+  const auth = () => ({ authorization: `Bearer ${authToken}` });
+
+  beforeAll(async () => {
+    process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-only-not-a-real-secret-value';
+    process.env.MAILBOX_CREDENTIAL_KEY =
+      process.env.MAILBOX_CREDENTIAL_KEY || Buffer.from('m'.repeat(32)).toString('base64');
+    app = await createApp();
+    await app.ready();
+    const jwt = await import('jsonwebtoken');
+    authToken = jwt.default.sign(
+      { sub: 'test-user', email: 'test@example.org', role: 'ADMIN' },
+      process.env.JWT_SECRET,
+      { algorithm: 'HS256', expiresIn: '1h' },
+    );
+    const domain = await prisma.domain.create({
+      data: { domainName: `warmup-spread-${stamp}.example.com` },
+    });
+    domainId = domain.id;
+    world = new MailWorld(emailById);
+  });
+
+  afterAll(async () => {
+    await prisma.warmupMessage.deleteMany({ where: { senderMailboxId: { in: ids } } });
+    await prisma.mailbox.deleteMany({ where: { id: { in: ids } } });
+    await prisma.domain.deleteMany({ where: { id: domainId } });
+    await app.close();
+    await prisma.$disconnect();
+  });
+
+  it('never sends two warmup emails to one inbox in the same tick, and the one left out sends next tick', async () => {
+    // Four mailboxes on four domains: with no spreading, three of them pick the same first
+    // partner (the 10-09 burst: three senders hitting one Gmail inbox in the same second).
+    const boxes = await Promise.all(['ana', 'ben', 'cal', 'dot'].map((l) => makeMailbox(l)));
+    const ourEmails = new Set(boxes.map((b) => b.email));
+
+    await runWarmupTick(world.deps(clock));
+    const first = (await ours(t0)).filter((m) => ourEmails.has(m.recipientEmail));
+    const recipients = first.map((m) => m.recipientEmail);
+    expect(new Set(recipients).size).toBe(recipients.length);
+    expect(first.length).toBeGreaterThanOrEqual(boxes.length - 1);
+    for (const m of first) {
+      expect(m.recipientEmail).not.toBe(emailById.get(m.senderMailboxId));
+    }
+
+    // Next tick: every mailbox has sent, and still no inbox got two in one tick.
+    clock.now = new Date(t0.getTime() + 10 * MIN);
+    await runWarmupTick(world.deps(clock));
+    const all = await ours(t0);
+    expect(new Set(all.map((m) => m.senderMailboxId))).toEqual(new Set(boxes.map((b) => b.id)));
+    const tick2 = all.filter((m) => m.sentAt.getTime() === clock.now.getTime());
+    expect(new Set(tick2.map((m) => m.recipientEmail)).size).toBe(tick2.length);
+  });
+
+  it('skips an inbox that got a warmup email from anyone in the last 5 minutes', async () => {
+    const eve = await makeMailbox('eve');
+    const fay = await makeMailbox('fay');
+    const busyAt = new Date(clock.now.getTime() + 20 * MIN);
+    // eve wrote to everyone but fay this morning, so fay is the partner she'd pick next...
+    await prisma.warmupMessage.createMany({
+      data: ids
+        .filter((id) => id !== eve.id && id !== fay.id)
+        .map((id, i) => ({
+          senderMailboxId: eve.id,
+          recipientMailboxId: id,
+          recipientEmail: emailById.get(id)!,
+          subject: 'Morning',
+          messageId: `<morning-${stamp}-${i}@fake.test>`,
+          sentAt: new Date(busyAt.getTime() - 12 * HOUR),
+          placement: 'INBOX' as const,
+          checkedAt: new Date(busyAt.getTime() - 12 * HOUR),
+        })),
+    });
+    // ...but fay got a warmup email from another mailbox 2 minutes before the tick.
+    await prisma.warmupMessage.create({
+      data: {
+        senderMailboxId: ids[0],
+        recipientMailboxId: fay.id,
+        recipientEmail: fay.email,
+        subject: 'Earlier',
+        messageId: `<busy-${stamp}@fake.test>`,
+        sentAt: new Date(busyAt.getTime() - 2 * MIN),
+      },
+    });
+    clock.now = busyAt;
+    await runWarmupTick(world.deps(clock));
+    const tick = (await ours(busyAt)).filter((m) => m.sentAt.getTime() === busyAt.getTime());
+    expect(tick.some((m) => m.recipientEmail === fay.email)).toBe(false);
+    const fromEve = tick.find((m) => m.senderMailboxId === eve.id);
+    expect(fromEve).toBeDefined();
+    expect(fromEve!.recipientEmail).not.toBe(fay.email);
+  });
+
+  it('does not reuse a subject the inbox got from any sender in the last 3 days', async () => {
+    const { WARMUP_SUBJECTS } = await import('../../lib/warmup/composer');
+    // History comes from a paused mailbox, so it neither sends nor counts as a partner.
+    const hist = await makeMailbox('hist', { status: 'PAUSED' });
+    const at = new Date(clock.now.getTime() + 20 * HOUR);
+    const left = WARMUP_SUBJECTS[0];
+    const recipients = ids.filter((id) => id !== hist.id).map((id) => emailById.get(id)!);
+    await prisma.warmupMessage.createMany({
+      data: recipients.flatMap((to, r) =>
+        WARMUP_SUBJECTS.filter((s) => s !== left).map((subject, i) => ({
+          senderMailboxId: hist.id,
+          recipientEmail: to,
+          subject,
+          messageId: `<hist-${stamp}-${r}-${i}@fake.test>`,
+          sentAt: new Date(at.getTime() - 2 * DAY + i * MIN),
+          placement: 'INBOX' as const,
+          checkedAt: at,
+        })),
+      ),
+    });
+    clock.now = at;
+    await runWarmupTick(world.deps(clock));
+    const sent = (await ours(at)).filter(
+      (m) => m.sentAt.getTime() === at.getTime() && m.senderMailboxId !== hist.id,
+    );
+    expect(sent.length).toBeGreaterThan(0);
+    for (const m of sent) {
+      if (recipients.includes(m.recipientEmail)) expect(m.subject).toBe(left);
+    }
+  });
+
+  it('records a Gmail Promotions-tab landing as PROMOTIONS, files it away, and counts it against the inbox rate', async () => {
+    const gil = await makeMailbox('gil');
+    world.promotionsFor.add(gil.email);
+    clock.now = new Date(clock.now.getTime() + 20 * HOUR);
+    const sentAt = clock.now;
+    await runWarmupTick(world.deps(clock));
+    const toGil = (await ours(sentAt)).filter((m) => m.recipientEmail === gil.email);
+    expect(toGil).toHaveLength(1);
+
+    clock.now = new Date(sentAt.getTime() + 10 * MIN);
+    await runWarmupTick(world.deps(clock));
+    const after = await prisma.warmupMessage.findUniqueOrThrow({ where: { id: toGil[0].id } });
+    expect(after.placement).toBe('PROMOTIONS');
+    expect(after.foundFolder).toBe('INBOX');
+    expect(after.rescued).toBe(false);
+    expect(world.delivered.get(after.messageId!)).toMatchObject({
+      folder: WARMUP_FOLDER,
+      seen: true,
+      flagged: false,
+    });
+
+    const sender = after.senderMailboxId;
+    const log = await app.inject({
+      method: 'GET',
+      url: `/v1/warmup/${sender}/messages?result=promotions`,
+      headers: auth(),
+    });
+    expect(log.statusCode).toBe(200);
+    expect(log.json().messages.map((m: { id: string }) => m.id)).toContain(after.id);
+    const inboxOnly = await app.inject({
+      method: 'GET',
+      url: `/v1/warmup/${sender}/messages?result=inbox`,
+      headers: auth(),
+    });
+    expect(inboxOnly.json().messages.map((m: { id: string }) => m.id)).not.toContain(after.id);
+
+    const overview = (
+      await app.inject({ method: 'GET', url: '/v1/warmup', headers: auth() })
+    ).json();
+    const row = overview.mailboxes.find((m: { mailboxId: string }) => m.mailboxId === sender);
+    expect(row.counts.promotions).toBeGreaterThanOrEqual(1);
+    expect(row.checked).toBe(
+      row.counts.inbox +
+        row.counts.promotions +
+        row.counts.spam +
+        row.counts.missing +
+        row.counts.bounced,
+    );
+    expect(row.health).toBe(Math.round((row.counts.inbox / row.checked) * 100));
+    expect(row.health).toBeLessThan(100);
+    world.promotionsFor.delete(gil.email);
+  });
+
+  it('falls back to INBOX when the Promotions lookup fails', async () => {
+    const hal = await makeMailbox('hal');
+    world.promotionsFor.add(hal.email);
+    world.promotionsErrorFor.add(hal.email);
+    clock.now = new Date(clock.now.getTime() + 20 * HOUR);
+    const sentAt = clock.now;
+    await runWarmupTick(world.deps(clock));
+    const toHal = (await ours(sentAt)).filter((m) => m.recipientEmail === hal.email);
+    expect(toHal).toHaveLength(1);
+
+    clock.now = new Date(sentAt.getTime() + 10 * MIN);
+    await runWarmupTick(world.deps(clock));
+    const after = await prisma.warmupMessage.findUniqueOrThrow({ where: { id: toHal[0].id } });
+    expect(after.placement).toBe('INBOX');
+    expect(after.error).toBeNull();
+    expect(world.delivered.get(after.messageId!)?.folder).toBe(WARMUP_FOLDER);
+  });
+
+  it('rejects an unknown result filter', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v1/warmup/${ids[0]}/messages?result=primary`,
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(400);
   });
 });

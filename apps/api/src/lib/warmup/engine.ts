@@ -2,15 +2,17 @@
  * Warmup engine — one tick, run every 10 minutes by the n8n `warmup-tick` workflow via
  * `POST /internal/warmup/tick`. Three steps, in this order so decisions use fresh data:
  *
- *   1. check  — find recently sent warmup emails on the recipient side, record INBOX / SPAM /
- *               MISSING, rescue spam back to INBOX, then file it under WARMUP_FOLDER; before
+ *   1. check  — find recently sent warmup emails on the recipient side, record INBOX /
+ *               PROMOTIONS / SPAM / MISSING, rescue spam back to INBOX, then file it under
+ *               WARMUP_FOLDER; before
  *               giving up on one, look on the sender side for a delivery-failure report and
  *               record BOUNCED with its reason
  *   2. decide — recompute each mailbox's 7-day health; graduate WARMUP -> ACTIVE or demote
  *               ACTIVE -> WARMUP (rules in policy.ts)
  *   3. send   — each due mailbox sends one warmup email to its next partner through the same
  *               `sendMail()` campaigns use (no campaignId, so no compliance footer, BCC or
- *               ExecutionLog — see mailSender.ts)
+ *               ExecutionLog — see mailSender.ts); an inbox gets at most one warmup email per
+ *               RECIPIENT_GAP_MS, so senders never pile onto it in the same minute
  *
  * Network I/O (SMTP/Graph send, IMAP read) comes in through `WarmupDeps` so integration tests can
  * run the real Postgres bookkeeping against a real or fake mail server.
@@ -39,6 +41,8 @@ import {
   CHECK_GIVE_UP_MS,
   DAY_MS,
   HEALTH_WINDOW_DAYS,
+  RECIPIENT_GAP_MS,
+  SUBJECT_REPEAT_DAYS,
   UNCHECKED_AFTER_MS,
   campaignCapToday,
   checkedCount,
@@ -112,6 +116,16 @@ function countSentThisWarmupDay(
     counts.set(r.senderMailboxId, (counts.get(r.senderMailboxId) ?? 0) + 1);
   }
   return counts;
+}
+
+/** Fisher-Yates on a copy. */
+function shuffle<T>(items: readonly T[], rng: Rng): T[] {
+  const out = [...items];
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.min(i, Math.floor(rng() * (i + 1)));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
 }
 
 function truncateError(err: unknown): string {
@@ -239,7 +253,13 @@ export async function checkPendingPlacements(
             continue;
           }
 
-          const placement: WarmupPlacement = found.inSpam ? 'SPAM' : 'INBOX';
+          // Gmail keeps tabs as categories inside INBOX, so `find` reports Promotions as INBOX.
+          // Ask before filing the email away; a failed ask leaves it INBOX.
+          const placement: WarmupPlacement = found.inSpam
+            ? 'SPAM'
+            : (await reader.inPromotions?.(found).catch(() => false))
+              ? 'PROMOTIONS'
+              : 'INBOX';
           let wasRescued = false;
           let actionError: string | null = null;
           try {
@@ -362,24 +382,42 @@ async function recentRecipientCounts(
   return new Map(rows.map((r) => [r.recipientEmail, r._count._all]));
 }
 
+/** Subjects `recipientEmail` got from any warmup sender in the last SUBJECT_REPEAT_DAYS. */
+async function recentSubjectsTo(recipientEmail: string, now: Date): Promise<Set<string>> {
+  const rows = await prisma.warmupMessage.findMany({
+    where: {
+      recipientEmail,
+      sentAt: { gte: new Date(now.getTime() - SUBJECT_REPEAT_DAYS * DAY_MS) },
+    },
+    select: { subject: true },
+  });
+  return new Set(rows.map((r) => r.subject));
+}
+
 export type SendOneResult =
   | { status: 'sent'; messageId: string; to: string }
   | { status: 'failed'; error: string; to: string }
-  | { status: 'no_partner' };
+  | { status: 'no_partner' }
+  /** Every partner got a warmup email too recently; the mailbox tries again next tick. */
+  | { status: 'busy' };
 
-/** Sends one warmup email from `mailbox` to its next partner and records it. */
+/** Sends one warmup email from `mailbox` to its next partner and records it. Partners in
+ *  `busyRecipients` (lower-case emails) are skipped. */
 export async function sendOneWarmup(
   mailbox: Mailbox,
   pool: WarmupPartner[],
   deps: WarmupDeps,
+  busyRecipients: ReadonlySet<string> = new Set(),
 ): Promise<SendOneResult> {
   const now = deps.now();
+  const partners = partnersFor(mailbox.email, pool);
+  if (partners.length === 0) return { status: 'no_partner' };
   const partner = choosePartner({
     senderEmail: mailbox.email,
-    partners: partnersFor(mailbox.email, pool),
+    partners: partners.filter((p) => !busyRecipients.has(p.email.toLowerCase())),
     recentCounts: await recentRecipientCounts(mailbox.id, now),
   });
-  if (!partner) return { status: 'no_partner' };
+  if (!partner) return { status: 'busy' };
 
   if (!mailbox.warmupStartedAt) {
     await prisma.mailbox.update({ where: { id: mailbox.id }, data: { warmupStartedAt: now } });
@@ -389,6 +427,7 @@ export async function sendOneWarmup(
     fromEmail: mailbox.email,
     toEmail: partner.email,
     rng: deps.rng,
+    avoidSubjects: await recentSubjectsTo(partner.email, now),
   });
   const base = {
     senderMailboxId: mailbox.id,
@@ -413,7 +452,7 @@ export async function sendOneWarmup(
 
 export async function sendDueWarmups(deps: WarmupDeps): Promise<{ sent: number; failed: number }> {
   const now = deps.now();
-  const [mailboxes, pool, todayRows, lastRows] = await Promise.all([
+  const [mailboxes, pool, todayRows, lastRows, recentRows] = await Promise.all([
     prisma.mailbox.findMany({
       where: { warmupEnabled: true, status: { in: ['WARMUP', 'ACTIVE'] } },
     }),
@@ -427,13 +466,23 @@ export async function sendDueWarmups(deps: WarmupDeps): Promise<{ sent: number; 
       where: { sentAt: { gte: new Date(now.getTime() - 2 * DAY_MS) } },
       _max: { sentAt: true },
     }),
+    prisma.warmupMessage.findMany({
+      where: {
+        sentAt: { gt: new Date(now.getTime() - RECIPIENT_GAP_MS) },
+        placement: { not: 'FAILED' },
+      },
+      select: { recipientEmail: true },
+    }),
   ]);
   const today = countSentThisWarmupDay(mailboxes, todayRows, now);
   const last = new Map(lastRows.map((r) => [r.senderMailboxId, r._max.sentAt]));
+  // Inboxes that already got a warmup email inside the gap, plus each one this tick picks.
+  const busy = new Set(recentRows.map((r) => r.recipientEmail.toLowerCase()));
 
   let sent = 0;
   let failed = 0;
-  for (const m of mailboxes) {
+  // A fresh order each tick, so the same mailbox isn't always the one left without a free partner.
+  for (const m of shuffle(mailboxes, deps.rng)) {
     if (!mailboxCanWarm(m) || m.autoFlaggedAt) continue;
     const day = warmupDay(m.warmupStartedAt ?? now, now);
     const target = dailyWarmupTarget(day, m.status);
@@ -447,9 +496,11 @@ export async function sendDueWarmups(deps: WarmupDeps): Promise<{ sent: number; 
     ) {
       continue;
     }
-    const result = await sendOneWarmup(m, pool, deps);
-    if (result.status === 'sent') sent += 1;
-    else if (result.status === 'failed') failed += 1;
+    const result = await sendOneWarmup(m, pool, deps, busy);
+    if (result.status === 'sent') {
+      busy.add(result.to.toLowerCase());
+      sent += 1;
+    } else if (result.status === 'failed') failed += 1;
   }
   return { sent, failed };
 }
