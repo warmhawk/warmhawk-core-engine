@@ -8,6 +8,11 @@ import { prisma } from '@warmhawk/db';
 import { encrypt, decrypt, loadEncryptionKey } from '../../lib/encryption';
 import { mintMailboxAccessToken, type OAuthMailbox } from '../../lib/mailboxAccessToken';
 import { cachedAccessToken, clearAccessTokenCache } from '../../lib/accessTokenCache';
+import {
+  exchangeGoogleCodeViaRelay,
+  refreshGoogleViaRelay,
+  REFRESH_RETRY_DELAY_MS,
+} from '../../lib/connectRelay';
 
 const KEY_B64 = Buffer.alloc(32, 9).toString('base64');
 const RELAY = 'https://relay.test';
@@ -151,5 +156,114 @@ describe('mintMailboxAccessToken', () => {
     );
     const { data } = update.mock.calls[0]![0] as { data: { oauthRefreshTokenEncrypted: string } };
     expect(decrypt(data.oauthRefreshTokenEncrypted, key())).toBe('refresh-2');
+  });
+});
+
+describe('refreshGoogleViaRelay retry', () => {
+  const saved = { ...process.env };
+  const ok = () => jsonResponse({ access_token: 'ya29.fresh', expires_in: 3599 });
+
+  beforeEach(() => {
+    process.env.MAILBOX_CREDENTIAL_KEY = KEY_B64;
+    vi.spyOn(prisma.instanceSettings, 'findUnique').mockResolvedValue({
+      connectLicenseEncrypted: encrypt('license-token', key()),
+      connectRelayBaseUrl: RELAY,
+    } as never);
+  });
+
+  afterEach(() => {
+    process.env = { ...saved };
+    vi.restoreAllMocks();
+  });
+
+  it('does not wait or retry when the first call works', async () => {
+    const fetchMock = vi.fn(async () => ok());
+    const sleep = vi.fn(async () => {});
+    expect(await refreshGoogleViaRelay('refresh-1', fetchMock, sleep)).toEqual({
+      accessToken: 'ya29.fresh',
+      expiresInSeconds: 3599,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('retries once after a timeout or dropped connection', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new DOMException('The operation was aborted', 'TimeoutError'))
+      .mockResolvedValueOnce(ok());
+    const sleep = vi.fn(async () => {});
+    expect((await refreshGoogleViaRelay('refresh-1', fetchMock, sleep)).accessToken).toBe(
+      'ya29.fresh',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledExactlyOnceWith(REFRESH_RETRY_DELAY_MS);
+    // The retry sends the same request.
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String(call[1].body)));
+    expect(bodies[1]).toEqual(bodies[0]);
+  });
+
+  it.each([502, 503, 504])('retries once after a %i from the edge', async (status) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('bad gateway', { status }))
+      .mockResolvedValueOnce(ok());
+    const sleep = vi.fn(async () => {});
+    expect((await refreshGoogleViaRelay('refresh-1', fetchMock, sleep)).accessToken).toBe(
+      'ya29.fresh',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails as relay_unreachable when the retry fails too', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response('', { status: 502 }));
+    const sleep = vi.fn(async () => {});
+    await expect(refreshGoogleViaRelay('refresh-1', fetchMock, sleep)).rejects.toMatchObject({
+      code: 'relay_unreachable',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('tries at most twice when the network stays down', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const sleep = vi.fn(async () => {});
+    await expect(refreshGoogleViaRelay('refresh-1', fetchMock, sleep)).rejects.toMatchObject({
+      code: 'relay_unreachable',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['invalid_grant', 400, { error: 'invalid_grant' }],
+    ['license', 401, { error: 'license_invalid' }],
+    ['license', 402, { error: 'license_expired' }],
+    ['rate_limited', 429, {}],
+    ['not_configured', 503, { error: 'provider_not_configured' }],
+    ['relay_unreachable', 500, {}],
+  ])('does not retry a %s answer (%i)', async (code, status, body) => {
+    const fetchMock = vi.fn(async () => jsonResponse(body, status));
+    const sleep = vi.fn(async () => {});
+    await expect(refreshGoogleViaRelay('refresh-1', fetchMock, sleep)).rejects.toMatchObject({
+      code,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('never retries the single-use sign-in code exchange', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    await expect(exchangeGoogleCodeViaRelay('code-1', fetchMock)).rejects.toMatchObject({
+      code: 'relay_unreachable',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
