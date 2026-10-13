@@ -174,6 +174,14 @@ interface CreateLeadBody {
   customFields?: Record<string, unknown>;
 }
 
+interface UpdateLeadBody {
+  email?: string;
+  firstName?: string | null;
+  lastName?: string | null;
+  company?: string | null;
+  customFields?: Record<string, unknown>;
+}
+
 interface EraseLeadsBody {
   email: string;
 }
@@ -616,6 +624,54 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({ email, leadsErased: matches.length });
+  });
+
+  /** Fix a lead before it's emailed: a broken address, a wrong name, a merge field. Only an
+   *  UNTOUCHED lead changes; once email 1 is queued or sent, the thread carries what went out.
+   *  Same validation, suppression and duplicate checks as a create, and the lead keeps its
+   *  place in the send order (`createdAt`), unlike a delete and re-add. */
+  app.patch<{ Params: { id: string }; Body: UpdateLeadBody }>('/:id', async (request, reply) => {
+    const current = await prisma.lead.findUnique({ where: { id: request.params.id } });
+    if (!current || current.piiErasedAt) return reply.code(404).send({ error: 'Lead not found' });
+    const body = request.body ?? {};
+    const validation = validateLeadFields({
+      campaignId: current.campaignId,
+      email: body.email ?? current.email,
+      firstName: body.firstName !== undefined ? body.firstName : current.firstName,
+      lastName: body.lastName !== undefined ? body.lastName : current.lastName,
+      company: body.company !== undefined ? body.company : current.company,
+      customFields:
+        body.customFields ?? (current.customFields as Record<string, unknown> | null) ?? {},
+    });
+    if (!validation.valid) return reply.code(422).send({ error: validation.reason });
+    const { lead } = validation;
+
+    if (lead.email !== current.email) {
+      if (await isEmailSuppressed(lead.email)) {
+        return reply.code(409).send({ error: 'This email address is on the suppression list' });
+      }
+      if (await isDuplicateLead(lead.campaignId, lead.email)) {
+        return reply.code(409).send({ error: 'This email is already a lead on this campaign' });
+      }
+    }
+
+    // The status check is part of the update, so the worker can't queue the lead in between.
+    const { count } = await prisma.lead.updateMany({
+      where: { id: current.id, status: 'UNTOUCHED' },
+      data: {
+        email: lead.email,
+        firstName: lead.firstName,
+        lastName: lead.lastName,
+        company: lead.company,
+        customFields: lead.customFields as Prisma.InputJsonValue,
+      },
+    });
+    if (count === 0) {
+      return reply
+        .code(409)
+        .send({ error: 'This lead has already been emailed, so it can no longer be edited' });
+    }
+    return reply.send(await prisma.lead.findUnique({ where: { id: current.id } }));
   });
 
   /** Guardrails — GDPR right-to-erasure: hard delete, not a status flag. */
