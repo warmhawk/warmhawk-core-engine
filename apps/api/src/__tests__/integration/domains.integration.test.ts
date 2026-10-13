@@ -95,6 +95,35 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 
+  it('prints the country on the city line, the US as "USA", other countries as typed', async () => {
+    const address = (country: string) =>
+      app.inject({
+        method: 'PATCH',
+        url: `/v1/domains/${createdDomainIds[0]}`,
+        headers: { authorization: `Bearer ${authToken}` },
+        payload: {
+          mailingAddressParts: {
+            businessName: 'KS Eminance',
+            street: '2655 Ranch Road 1869',
+            suite: '#376',
+            city: 'Liberty Hill',
+            region: 'TX',
+            postalCode: '78642',
+            country,
+          },
+        },
+      });
+    const us = await address('United States');
+    expect(us.statusCode).toBe(200);
+    expect(us.json().mailingAddress).toBe(
+      'KS Eminance\n2655 Ranch Road 1869, #376\nLiberty Hill, TX 78642, USA',
+    );
+    expect(us.json().mailingAddressParts.country).toBe('United States');
+    expect((await address('Canada')).json().mailingAddress).toMatch(
+      /\nLiberty Hill, TX 78642, Canada$/,
+    );
+  });
+
   it('saves, validates and clears a DKIM selector on create and patch', async () => {
     const domainName = `domains-selector-test-${Date.now()}.example.com`;
     const created = await app.inject({

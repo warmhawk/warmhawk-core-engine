@@ -54,6 +54,13 @@ const ADDRESS_PARTS = [
 const MAX_ADDRESS_LENGTH = 500;
 const MAX_LABEL_LENGTH = 80;
 
+/** The country as the footer prints it: the US spelled any common way is "USA", the rest as typed. */
+function footerCountry(country: string): string {
+  return /^(us|usa|u\.s\.a?\.?|united states( of america)?)$/i.test(country.trim())
+    ? 'USA'
+    : country;
+}
+
 type AddressPatch = {
   label?: string | null;
   mailingAddress?: string | null;
@@ -92,14 +99,19 @@ function parseAddressFields(
     } else {
       const missing = (['street', 'city', 'country'] as const).filter((key) => !parts[key]);
       if (missing.length) return { ok: false, error: `The address needs ${missing.join(', ')}` };
-      const cityLine = [parts.city, [parts.region, parts.postalCode].filter(Boolean).join(' ')]
+      // "Liberty Hill, TX 78642, USA": the country rides on the city line, the way a US letter is
+      // addressed, instead of taking a footer line of its own.
+      const cityLine = [
+        parts.city,
+        [parts.region, parts.postalCode].filter(Boolean).join(' '),
+        footerCountry(parts.country!),
+      ]
         .filter(Boolean)
         .join(', ');
       data.mailingAddress = [
         parts.businessName,
         [parts.street, parts.suite].filter(Boolean).join(', '),
         cityLine,
-        parts.country,
       ]
         .filter(Boolean)
         .join('\n');

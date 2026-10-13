@@ -46,6 +46,13 @@ export function parsePage(query: PageQuery, defaultPageSize = DEFAULT_PAGE_SIZE)
   return { ok: true, value: { page: current, pageSize: size, skip: (current - 1) * size, take: size } };
 }
 
+/** A search term for Prisma's `contains`, which hands it to SQL `LIKE` as is: escapes the
+ *  wildcards (`%`, `_`) and the escape character (`\`) so `%20` finds that literal text instead of
+ *  every value with "20" in it. */
+export function likeLiteral(term: string): string {
+  return term.replace(/[\\%_]/g, '\\$&');
+}
+
 /** Validates an optional enum-like query value; `undefined`/empty means "no filter". */
 export function parseChoice<T extends string>(
   raw: string | undefined,
