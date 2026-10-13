@@ -16,6 +16,7 @@ import type IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
 import { computeNextSlotSeconds } from './computeNextSlotSeconds';
 import { campaignCapToday } from './campaignCap';
+import { syncCampaignCompletion } from './campaignCompletion';
 import { DISPATCH_JOB_NAME, mailboxReservationKey } from './queue';
 
 const LEAD_BATCH_SIZE = 20;
@@ -97,12 +98,17 @@ export function hasMailingAddress(mailbox: { domain: { mailingAddress: string | 
  * is scheduled with the computed delay, and `queuedJobId`/`queuedSlotAt` are persisted on the Lead
  * row for crash recovery. A first email moves the lead to QUEUED; a follow-up leaves its status
  * alone (it stays CONTACTED/OPENED) and is marked queued by `queuedJobId` alone.
+ *
+ * Before either pass, `syncCampaignCompletion` marks campaigns with nothing left to send Completed
+ * and puts Completed ones with new work back to Sending, so that work is picked up this tick.
  */
 export async function runEnqueuerTick(
   queue: Queue,
   redis: IORedis,
   now: Date = new Date(),
 ): Promise<number> {
+  await syncCampaignCompletion();
+
   const mailboxes = await prisma.mailbox.findMany({
     where: SENDABLE_MAILBOX_WHERE,
     orderBy: [{ lastSentAt: { sort: 'asc', nulls: 'first' } }],
