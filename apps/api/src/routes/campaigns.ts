@@ -38,7 +38,12 @@ import {
   evaluateLaunch,
   readinessInclude,
 } from '../lib/sendingReadiness';
-import { MAX_FOLLOW_UPS, parseStepsInput, type SequenceStep } from '../lib/sequence';
+import {
+  MAX_FOLLOW_UPS,
+  followUpsSentByStep,
+  parseStepsInput,
+  type SequenceStep,
+} from '../lib/sequence';
 import { sendMail, MailSendError } from '../lib/mailSender';
 import { describeMailFailure } from '../lib/friendlyError';
 
@@ -443,6 +448,8 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
       leadStatuses,
       followUpsDue,
       sentToday,
+      stepsSentCounts,
+      upcomingFollowUps,
     ] = await Promise.all([
       campaignIds.length
         ? prisma.executionLog.groupBy({
@@ -510,6 +517,33 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
             _count: { _all: true },
           })
         : Promise.resolve([]),
+      // Leads by emails received, so the list can say how many got each follow-up.
+      campaignIds.length
+        ? prisma.lead.groupBy({
+            by: ['campaignId', 'stepsSent'],
+            where: { campaignId: { in: campaignIds }, stepsSent: { gte: 2 } },
+            _count: { _all: true },
+          })
+        : Promise.resolve([]),
+      // The same leads as `followUpsDue`, by which follow-up is next and when, in 15-minute buckets.
+      // The dashboard splits them into today and later in the reader's own time zone, and 15 minutes
+      // lines up with every UTC offset in use.
+      campaignIds.length
+        ? prisma.$queryRaw<
+            Array<{ campaignId: string; position: number; at: Date; count: number }>
+          >`
+            SELECT "campaignId",
+                   "stepsSent" AS position,
+                   to_timestamp(floor(extract(epoch FROM "nextStepAt") / 900) * 900) AS at,
+                   count(*)::int AS count
+            FROM "leads"
+            WHERE "campaignId" IN (${Prisma.join(campaignIds)})
+              AND "nextStepAt" IS NOT NULL
+              AND "mailboxId" IS NOT NULL
+              AND "status" IN ('CONTACTED', 'OPENED')
+            GROUP BY 1, 2, 3
+            ORDER BY 3`
+        : Promise.resolve([]),
     ]);
     const statusCount = (campaignId: string, status: string) =>
       leadStatuses.find((row) => row.campaignId === campaignId && row.status === status)?._count
@@ -561,6 +595,15 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
           followUpsDue:
             followUpsDue.find((row) => row.campaignId === campaign.id)?._count._all ?? 0,
           sentToday: sentToday.find((row) => row.campaignId === campaign.id)?._count._all ?? 0,
+          followUpsSent: followUpsSentByStep(
+            campaign.steps.length,
+            stepsSentCounts
+              .filter((row) => row.campaignId === campaign.id)
+              .map((row) => ({ stepsSent: row.stepsSent, leads: row._count._all })),
+          ),
+          upcomingFollowUps: upcomingFollowUps
+            .filter((row) => row.campaignId === campaign.id)
+            .map(({ position, at, count }) => ({ position, at, count })),
         },
         leadsCount: campaign._count.leads,
         repliesCount: campaign._count.replies,
