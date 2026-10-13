@@ -195,6 +195,12 @@ describeIntegration('paged dashboard lists (integration, real Postgres)', () => 
       const search = (await get(`/v1/leads?campaignId=${campaignId}&page=1&q=aCmE`)).json();
       expect(search.total).toBe(1);
       expect(search.leads[0].firstName).toBe('Lead07');
+
+      // `%` and `_` are literal text, not LIKE wildcards: "%0" and "lead_07" match nothing here.
+      for (const q of ['%0', 'lead_07']) {
+        const literal = (await get(`/v1/leads?campaignId=${campaignId}&page=1&q=${encodeURIComponent(q)}`)).json();
+        expect(literal.total).toBe(0);
+      }
     });
 
     it('sorts by status in pipeline order and by email ascending', async () => {

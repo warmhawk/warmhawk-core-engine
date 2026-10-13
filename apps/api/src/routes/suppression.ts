@@ -13,7 +13,7 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma, type Prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
-import { parsePage, type PageQuery } from '../lib/pagination';
+import { likeLiteral, parsePage, type PageQuery } from '../lib/pagination';
 import { EMAIL_REGEX } from '../lib/leadIngest';
 import { suppressEmails, unsuppressEmail } from '../lib/suppression';
 
@@ -36,7 +36,9 @@ export async function suppressionRoutes(app: FastifyInstance): Promise<void> {
     const page = parsePage(request.query);
     if (!page.ok) return reply.code(400).send({ error: page.error });
     const q = request.query.q?.trim().toLowerCase();
-    const where: Prisma.SuppressionEntryWhereInput = q ? { email: { contains: q } } : {};
+    const where: Prisma.SuppressionEntryWhereInput = q
+      ? { email: { contains: likeLiteral(q) } }
+      : {};
     const orderBy: Prisma.SuppressionEntryOrderByWithRelationInput[] = [
       { createdAt: 'desc' },
       { id: 'desc' },

@@ -18,7 +18,7 @@ import type { FastifyInstance } from 'fastify';
 import { parse } from 'csv-parse/sync';
 import { prisma, Prisma, type LeadStatus } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
-import { parseChoice, parsePage, wantsPage, type PageQuery } from '../lib/pagination';
+import { likeLiteral, parseChoice, parsePage, wantsPage, type PageQuery } from '../lib/pagination';
 import {
   validateLeadFields,
   isEmailSuppressed,
@@ -227,10 +227,10 @@ export async function leadsRoutes(app: FastifyInstance): Promise<void> {
       ...(q
         ? {
             OR: [
-              { email: { contains: q, mode: 'insensitive' } },
-              { firstName: { contains: q, mode: 'insensitive' } },
-              { lastName: { contains: q, mode: 'insensitive' } },
-              { company: { contains: q, mode: 'insensitive' } },
+              { email: { contains: likeLiteral(q), mode: 'insensitive' } },
+              { firstName: { contains: likeLiteral(q), mode: 'insensitive' } },
+              { lastName: { contains: likeLiteral(q), mode: 'insensitive' } },
+              { company: { contains: likeLiteral(q), mode: 'insensitive' } },
             ],
           }
         : {}),
