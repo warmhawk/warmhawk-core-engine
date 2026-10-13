@@ -38,6 +38,19 @@ export function nextStepAtAfter(
   return next ? new Date(sentAt.getTime() + next.waitDays * DAY_MS) : null;
 }
 
+/** Leads that got each follow-up: index 0 is follow-up 1. A lead with `stepsSent` emails got
+ *  follow-ups 1..stepsSent-1. As long as the campaign's steps, or longer when steps were removed
+ *  after leads already got them. */
+export function followUpsSentByStep(
+  stepCount: number,
+  rows: Array<{ stepsSent: number; leads: number }>,
+): number[] {
+  const deepest = Math.max(0, ...rows.map((row) => row.stepsSent - 1));
+  return Array.from({ length: Math.max(stepCount, deepest) }, (_, i) =>
+    rows.reduce((sum, row) => (row.stepsSent >= i + 2 ? sum + row.leads : sum), 0),
+  );
+}
+
 /** "Re: <first subject>", without stacking a second "Re:" on a subject that already has one. */
 export function followUpSubject(threadSubject: string): string {
   return `Re: ${threadSubject.replace(/^\s*(re|aw|sv):\s*/i, '').trim()}`;

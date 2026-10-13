@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   followUpSubject,
+  followUpsSentByStep,
   isDeterministicSubject,
   nextFollowUp,
   nextStepAtAfter,
@@ -59,5 +60,18 @@ describe('sequence', () => {
     expect(parseStepsInput([{ waitDays: 2.5 }]).ok).toBe(false);
     expect(parseStepsInput([{ waitDays: 2, body: 5 }]).ok).toBe(false);
     expect(parseStepsInput(Array.from({ length: 4 }, () => ({ waitDays: 2 }))).ok).toBe(false);
+  });
+
+  it('counts the leads that got each follow-up', () => {
+    // 3 leads got both follow-ups, 5 got only the first; a lead with 1 email got none.
+    const rows = [
+      { stepsSent: 3, leads: 3 },
+      { stepsSent: 2, leads: 5 },
+    ];
+    expect(followUpsSentByStep(2, rows)).toEqual([8, 3]);
+    expect(followUpsSentByStep(3, rows)).toEqual([8, 3, 0]);
+    expect(followUpsSentByStep(0, [])).toEqual([]);
+    // A step removed after leads got it still shows.
+    expect(followUpsSentByStep(1, rows)).toEqual([8, 3]);
   });
 });

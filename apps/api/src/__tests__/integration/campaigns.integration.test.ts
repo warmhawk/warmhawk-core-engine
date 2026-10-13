@@ -137,6 +137,57 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     expect(found.lastActivityAt).not.toBeNull();
   });
 
+  it('lists follow-ups sent per step and the follow-ups still coming', async () => {
+    const campaign = await prisma.campaign.create({
+      data: {
+        name: 'Follow-up Columns',
+        aiPromptTemplate: '',
+        template: 'Hi',
+        steps: {
+          create: [
+            { position: 1, waitDays: 3, body: 'Bumping this' },
+            { position: 2, waitDays: 4, body: 'Last note' },
+          ],
+        },
+      },
+    });
+    createdCampaignIds.push(campaign.id);
+    const soon = new Date(Date.now() + 60 * 60 * 1000);
+    const later = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    const lead = (email: string, data: object) =>
+      prisma.lead.create({ data: { campaignId: campaign.id, email, mailboxId, ...data } });
+    // Got both follow-ups; got follow-up 1 and is due follow-up 2; due follow-up 1; replied.
+    await lead('done@example.org', { status: 'CONTACTED', stepsSent: 3 });
+    await lead('soon@example.org', { status: 'CONTACTED', stepsSent: 2, nextStepAt: soon });
+    await lead('later@example.org', { status: 'CONTACTED', stepsSent: 1, nextStepAt: later });
+    await lead('replied@example.org', { status: 'REPLIED', stepsSent: 1 });
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/campaigns',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    const found = response.json().find((c: { id: string }) => c.id === campaign.id);
+    expect(found.progress.followUpsSent).toEqual([2, 1]);
+    expect(found.progress.followUpsDue).toBe(2);
+    const upcoming = found.progress.upcomingFollowUps as Array<{
+      position: number;
+      at: string;
+      count: number;
+    }>;
+    expect(upcoming.map(({ position, count }) => ({ position, count }))).toEqual([
+      { position: 2, count: 1 },
+      { position: 1, count: 1 },
+    ]);
+    // Floored to its 15-minute bucket.
+    const at = new Date(upcoming[0].at).getTime();
+    expect(at).toBeLessThanOrEqual(soon.getTime());
+    expect(soon.getTime() - at).toBeLessThan(15 * 60 * 1000);
+    expect(at % (15 * 60 * 1000)).toBe(0);
+
+    await prisma.lead.deleteMany({ where: { campaignId: campaign.id } });
+  });
+
   it('fetches a campaign by id and 404s an unknown id', async () => {
     const response = await app.inject({
       method: 'GET',
