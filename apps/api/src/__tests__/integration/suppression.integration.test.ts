@@ -115,6 +115,9 @@ describeIntegration('/v1/suppression routes (integration, real Postgres)', () =>
 
     const search = await call('GET', `/v1/suppression?q=${encodeURIComponent(`FRESH-${tag}`)}`);
     expect(search.json().entries.map((e: { email: string }) => e.email)).toEqual([addr('fresh')]);
+    // `_` is literal text, not a LIKE wildcard.
+    const wildcard = await call('GET', `/v1/suppression?q=${encodeURIComponent(`fresh_${tag}`)}`);
+    expect(wildcard.json().total).toBe(0);
 
     expect((await call('GET', '/v1/suppression?page=0')).statusCode).toBe(400);
   });

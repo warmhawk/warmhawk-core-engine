@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { MAX_PAGE_SIZE, parseChoice, parsePage, wantsPage } from '../../lib/pagination';
+import { MAX_PAGE_SIZE, likeLiteral, parseChoice, parsePage, wantsPage } from '../../lib/pagination';
 
 describe('parsePage', () => {
   it('defaults to page 1 of 25, or the route default', () => {
@@ -46,5 +46,13 @@ describe('parseChoice', () => {
 
   it('names the allowed values in the error', () => {
     expect(parseChoice('junk', allowed, 'result')).toEqual({ ok: false, error: 'result must be one of: inbox, spam' });
+  });
+});
+
+describe('likeLiteral', () => {
+  it('escapes LIKE wildcards and the escape character, and leaves other text alone', () => {
+    expect(likeLiteral('%20info@x.com')).toBe('\\%20info@x.com');
+    expect(likeLiteral('first_last\\x')).toBe('first\\_last\\\\x');
+    expect(likeLiteral('acme corp')).toBe('acme corp');
   });
 });
