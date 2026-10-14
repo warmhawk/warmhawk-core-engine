@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildRedisUrl, queuedByDay } from '../routes/queue';
+import { buildRedisUrl, pendingCounts, queuedByDay } from '../routes/queue';
 
 describe('queuedByDay', () => {
   const now = new Date('2026-10-14T17:00:00Z');
@@ -60,5 +60,25 @@ describe('buildRedisUrl — REDIS_PASSWORD URL-encoding (bug fix, 2026-09-04)', 
     expect(connectionString).toBe('redis://:has%2Fslash@redis:6379');
     expect(() => new URL('redis://:has/slash@redis:6379')).toThrow();
     expect(() => new URL(connectionString)).not.toThrow();
+  });
+});
+
+describe('pendingCounts', () => {
+  it('leaves the nightly daily-reset job out of the queued counts', () => {
+    const dispatch = { name: 'dispatch' };
+    const dailyReset = { name: 'daily-reset' };
+    expect(pendingCounts([[dispatch], [], [dailyReset, dispatch, dispatch]])).toEqual({
+      waiting: 1,
+      active: 0,
+      delayed: 2,
+    });
+  });
+
+  it('reads 0 when the only pending job is daily-reset', () => {
+    expect(pendingCounts([[], [], [{ name: 'daily-reset' }]])).toEqual({
+      waiting: 0,
+      active: 0,
+      delayed: 0,
+    });
   });
 });

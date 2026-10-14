@@ -48,6 +48,24 @@ const MAX_GAP_SECONDS = CADENCE_FLOOR_SECONDS + 480 + 90;
 
 const JOB_STATES = ['waiting', 'active', 'delayed', 'completed', 'failed'] as const;
 type DispatchJobState = (typeof JOB_STATES)[number];
+const PENDING_STATES = ['waiting', 'active', 'delayed'] as const;
+
+/** Whether a job sends an email, as opposed to a system job like the nightly daily-reset. */
+function isDispatchJob(job: Pick<Job, 'name'>): boolean {
+  return !SYSTEM_JOB_NAMES.has(job.name);
+}
+
+/**
+ * The waiting/active/delayed counts with system jobs left out, so a queue holding nothing but the
+ * nightly daily-reset reads 0 queued, not 1 (10-14-26). `jobsByState` is each pending state's
+ * jobs, in PENDING_STATES order.
+ */
+export function pendingCounts(
+  jobsByState: Pick<Job, 'name'>[][],
+): Record<(typeof PENDING_STATES)[number], number> {
+  const [waiting, active, delayed] = jobsByState.map((jobs) => jobs.filter(isDispatchJob).length);
+  return { waiting: waiting ?? 0, active: active ?? 0, delayed: delayed ?? 0 };
+}
 const MAX_LISTED_JOBS = 50;
 // Days of send history the Live Queue chart shows before today.
 const SENT_HISTORY_DAYS = 6;
@@ -283,22 +301,25 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
   app.get('/status', async () => {
     const queue = dispatchQueue();
 
-    const [rawCounts, isPaused, sent] = await Promise.all([
+    // Every pending job, per state, for the counts and the per-day and per-mailbox queued counts;
+    // the list below shows the soonest MAX_LISTED_JOBS.
+    const [rawCounts, isPaused, sent, jobsByState] = await Promise.all([
       queue.getJobCounts(...JOB_STATES),
       queue.isPaused(),
       sentByDay(new Date()),
+      Promise.all(PENDING_STATES.map((state) => queue.getJobs([state]))),
     ]);
-    const counts = Object.fromEntries(
-      JOB_STATES.map((state) => [state, rawCounts[state] ?? 0]),
-    ) as Record<DispatchJobState, number>;
+    const counts = {
+      ...(Object.fromEntries(JOB_STATES.map((state) => [state, rawCounts[state] ?? 0])) as Record<
+        DispatchJobState,
+        number
+      >),
+      ...pendingCounts(jobsByState),
+    };
 
-    // Every pending job, for the per-day and per-mailbox queued counts; the list below shows the
-    // soonest MAX_LISTED_JOBS.
     const now = new Date();
-    const allJobs = await queue.getJobs(['waiting', 'active', 'delayed']);
-    const dispatchJobs = allJobs
-      .filter((job) => !SYSTEM_JOB_NAMES.has(job.name))
-      .sort((a, b) => dueAtMs(a) - dueAtMs(b));
+    const allJobs = jobsByState.flat();
+    const dispatchJobs = allJobs.filter(isDispatchJob).sort((a, b) => dueAtMs(a) - dueAtMs(b));
     const activity = await mailboxActivity(
       now,
       allJobs
@@ -338,7 +359,7 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
     const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
     const all = await dispatchQueue().getJobs(['waiting', 'active', 'delayed']);
     const matching = all
-      .filter((job) => !SYSTEM_JOB_NAMES.has(job.name))
+      .filter(isDispatchJob)
       .filter((job) => !mailboxId || job.data?.mailboxId === mailboxId)
       .filter((job) => !day || dueDay(dueAtMs(job), today) === day)
       .sort((a, b) => dueAtMs(a) - dueAtMs(b));
