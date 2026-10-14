@@ -342,6 +342,15 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
 
       const both = await get(`mailboxId=${mailboxId}&day=${tomorrow}`);
       expect(both.jobs.map((j) => j.id)).toEqual([`jobs-soon-${stamp}`]);
+
+      // The status chart's per-day totals agree with the day filter's match total.
+      const status = await app.inject({
+        method: 'GET',
+        url: '/v1/queue/status',
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      const { queuedByDay } = status.json() as { queuedByDay: { day: string; count: number }[] };
+      expect(queuedByDay.find((d) => d.day === tomorrow)?.count).toBe(due.total);
     } finally {
       for (const job of added) await (await queue.getJob(job.id))?.remove();
     }
