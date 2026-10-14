@@ -17,7 +17,16 @@
  * longer set `status`, so nothing goes live around that check.
  */
 import type { FastifyInstance } from 'fastify';
-import { Prisma, prisma, type AiProvider, type CampaignAiMode } from '@warmhawk/db';
+import {
+  campaignSchedule,
+  Prisma,
+  prisma,
+  scheduleError,
+  windowState,
+  type AiProvider,
+  type CampaignAiMode,
+  type CampaignScheduleFields,
+} from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { scoreContent, type SpamScoreResult } from '../lib/spamScore';
 import { listSpintaxGroups, SpintaxParseError } from '../lib/spintax';
@@ -60,6 +69,13 @@ interface CreateCampaignBody {
   mailboxIds?: string[];
   /** Follow-ups, in order. Each `{ waitDays, body, aiRewrite }`. */
   steps?: unknown;
+  /** Send schedule — see `ScheduleBody`. Left out, the campaign sends at any hour. */
+  sendTimezone?: string | null;
+  sendDays?: number[];
+  sendStartMinute?: number | null;
+  sendEndMinute?: number | null;
+  useLeadTimezone?: boolean;
+  maxNewLeadsPerDay?: number | null;
 }
 
 interface UpdateCampaignBody {
@@ -78,6 +94,12 @@ interface UpdateCampaignBody {
   pausedForBounceRate?: boolean;
   mailboxIds?: string[];
   steps?: unknown;
+  sendTimezone?: string | null;
+  sendDays?: number[];
+  sendStartMinute?: number | null;
+  sendEndMinute?: number | null;
+  useLeadTimezone?: boolean;
+  maxNewLeadsPerDay?: number | null;
 }
 
 /** The fields `PATCH /:id` writes. Anything else in the body — `status` above all — is refused, so
@@ -94,6 +116,17 @@ const PATCHABLE_FIELDS = [
   'bounceRateThreshold',
   'pausedForBounceRate',
 ] as const;
+/** Send schedule fields (10-14-26), checked together by `scheduleData`. */
+const SCHEDULE_FIELDS = [
+  'sendTimezone',
+  'sendDays',
+  'sendStartMinute',
+  'sendEndMinute',
+  'useLeadTimezone',
+  'maxNewLeadsPerDay',
+] as const;
+/** Highest "max new leads per day" accepted — well past any one install's mailboxes. */
+const MAX_NEW_LEADS_PER_DAY = 10_000;
 const AI_PROVIDERS: AiProvider[] = ['GEMINI', 'CLAUDE'];
 
 interface ContentQuality {
@@ -144,6 +177,74 @@ function composeFieldsError(body: {
     return 'aiWritesSubject must be true or false';
   }
   return null;
+}
+
+type ScheduleData = Partial<CampaignScheduleFields> & {
+  useLeadTimezone?: boolean;
+  maxNewLeadsPerDay?: number | null;
+};
+
+/**
+ * The send schedule fields of a create/update body, checked as a whole against the saved ones
+ * (a PATCH may change only the hours). `sendTimezone: null` turns the schedule off and clears the
+ * rest. Returns the columns to write, or an error message.
+ */
+function scheduleData(
+  body: Record<string, unknown>,
+  saved: CampaignScheduleFields | null,
+): { data: ScheduleData } | { error: string } {
+  const data: ScheduleData = {};
+  if (body.useLeadTimezone !== undefined) {
+    if (typeof body.useLeadTimezone !== 'boolean') {
+      return { error: 'useLeadTimezone must be true or false' };
+    }
+    data.useLeadTimezone = body.useLeadTimezone;
+  }
+  if (body.maxNewLeadsPerDay !== undefined) {
+    const max = body.maxNewLeadsPerDay;
+    if (
+      max !== null &&
+      (!Number.isInteger(max) || (max as number) < 1 || (max as number) > MAX_NEW_LEADS_PER_DAY)
+    ) {
+      return { error: `maxNewLeadsPerDay must be empty or 1 to ${MAX_NEW_LEADS_PER_DAY}` };
+    }
+    data.maxNewLeadsPerDay = max as number | null;
+  }
+
+  const touched = ['sendTimezone', 'sendDays', 'sendStartMinute', 'sendEndMinute'].some(
+    (key) => body[key] !== undefined,
+  );
+  if (!touched) return { data };
+  const pick = <K extends keyof CampaignScheduleFields>(key: K): unknown =>
+    body[key] !== undefined ? body[key] : saved ? saved[key] : null;
+  const merged = {
+    sendTimezone: pick('sendTimezone'),
+    sendDays: pick('sendDays') ?? [],
+    sendStartMinute: pick('sendStartMinute'),
+    sendEndMinute: pick('sendEndMinute'),
+  };
+  if (merged.sendTimezone === null) {
+    return {
+      data: {
+        ...data,
+        sendTimezone: null,
+        sendDays: [],
+        sendStartMinute: null,
+        sendEndMinute: null,
+      },
+    };
+  }
+  const error = scheduleError(merged);
+  if (error) return { error };
+  return {
+    data: {
+      ...data,
+      sendTimezone: merged.sendTimezone as string,
+      sendDays: [...new Set(merged.sendDays as number[])].sort((a, b) => a - b),
+      sendStartMinute: merged.sendStartMinute as number,
+      sendEndMinute: merged.sendEndMinute as number,
+    },
+  };
 }
 
 interface PreviewBody extends Partial<Omit<CreateCampaignBody, 'steps'>> {
@@ -405,6 +506,14 @@ async function writeSendersAndSteps(
   if (writes.length) await prisma.$transaction(writes);
 }
 
+/** A campaign's send window right now, for the list and the side panel. Null with no schedule. */
+function sendWindowView(campaign: CampaignScheduleFields, now: Date) {
+  const schedule = campaignSchedule(campaign);
+  if (!schedule) return null;
+  const state = windowState(schedule, now);
+  return { open: state.open, closesAt: state.closesAt, nextOpenAt: state.nextOpenAt };
+}
+
 /** The campaign with its senders and follow-ups, as the dashboard reads it. */
 async function loadCampaignDetail(id: string) {
   const campaign = await prisma.campaign.findUnique({ where: { id }, include: readinessInclude });
@@ -450,6 +559,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
       sentToday,
       stepsSentCounts,
       upcomingFollowUps,
+      nextSlots,
     ] = await Promise.all([
       campaignIds.length
         ? prisma.executionLog.groupBy({
@@ -512,7 +622,8 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
             where: {
               campaignId: { in: campaignIds },
               status: 'SENT',
-              createdAt: { gte: new Date(new Date().setUTCHours(0, 0, 0, 0)) },
+              // The same rolling 24 hours the daily limit counts over.
+              createdAt: { gt: new Date(Date.now() - DAY_MS) },
             },
             _count: { _all: true },
           })
@@ -544,7 +655,20 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
             GROUP BY 1, 2, 3
             ORDER BY 3`
         : Promise.resolve([]),
+      // The next booked send, first email or follow-up — the side panel's "Next send".
+      campaignIds.length
+        ? prisma.lead.groupBy({
+            by: ['campaignId'],
+            where: {
+              campaignId: { in: campaignIds },
+              queuedJobId: { not: null },
+              queuedSlotAt: { not: null },
+            },
+            _min: { queuedSlotAt: true },
+          })
+        : Promise.resolve([]),
     ]);
+    const now = new Date();
     const statusCount = (campaignId: string, status: string) =>
       leadStatuses.find((row) => row.campaignId === campaignId && row.status === status)?._count
         ._all ?? 0;
@@ -586,6 +710,8 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
           domainHasAddress: domainHasAddress(m.domain),
         })),
         launch: { canLaunch: launch.canLaunch, problems: launch.problems },
+        // Whether the send window is open now, in the campaign's own zone. Null = no schedule.
+        sendWindow: sendWindowView(campaign, now),
         progress: {
           untouched: statusCount(campaign.id, 'UNTOUCHED') + statusCount(campaign.id, 'QUEUED'),
           contacted: statusCount(campaign.id, 'CONTACTED') + statusCount(campaign.id, 'OPENED'),
@@ -604,6 +730,8 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
           upcomingFollowUps: upcomingFollowUps
             .filter((row) => row.campaignId === campaign.id)
             .map(({ position, at, count }) => ({ position, at, count })),
+          nextSendAt:
+            nextSlots.find((row) => row.campaignId === campaign.id)?._min.queuedSlotAt ?? null,
         },
         leadsCount: campaign._count.leads,
         repliesCount: campaign._count.replies,
@@ -653,6 +781,8 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
     if (senders && !senders.ok) return reply.code(422).send({ error: senders.error });
     const steps = request.body.steps !== undefined ? parseStepsInput(request.body.steps) : null;
     if (steps && !steps.ok) return reply.code(422).send({ error: steps.error });
+    const schedule = scheduleData(request.body as unknown as Record<string, unknown>, null);
+    if ('error' in schedule) return reply.code(422).send({ error: schedule.error });
 
     let contentQuality: ContentQuality;
     try {
@@ -674,6 +804,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
         aiMode,
         aiWritesSubject,
         unsubscribeUrlTemplate,
+        ...schedule.data,
       },
     });
     await writeSendersAndSteps(
@@ -696,6 +827,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
       const unknown = Object.keys(body).filter(
         (key) =>
           !(PATCHABLE_FIELDS as readonly string[]).includes(key) &&
+          !(SCHEDULE_FIELDS as readonly string[]).includes(key) &&
           key !== 'mailboxIds' &&
           key !== 'steps',
       );
@@ -716,6 +848,13 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
       if (senders && !senders.ok) return reply.code(422).send({ error: senders.error });
       const steps = request.body.steps !== undefined ? parseStepsInput(request.body.steps) : null;
       if (steps && !steps.ok) return reply.code(422).send({ error: steps.error });
+      const saved = await prisma.campaign.findUnique({
+        where: { id: request.params.id },
+        select: { sendTimezone: true, sendDays: true, sendStartMinute: true, sendEndMinute: true },
+      });
+      if (!saved) return reply.code(404).send({ error: 'Campaign not found' });
+      const schedule = scheduleData(body, saved);
+      if ('error' in schedule) return reply.code(422).send({ error: schedule.error });
 
       let contentQuality: ContentQuality | undefined;
       if (request.body.template !== undefined || request.body.subject !== undefined) {
@@ -729,12 +868,15 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
         }
       }
 
-      const data = Object.fromEntries(
-        PATCHABLE_FIELDS.filter((key) => request.body[key] !== undefined).map((key) => [
-          key,
-          request.body[key],
-        ]),
-      );
+      const data = {
+        ...Object.fromEntries(
+          PATCHABLE_FIELDS.filter((key) => request.body[key] !== undefined).map((key) => [
+            key,
+            request.body[key],
+          ]),
+        ),
+        ...schedule.data,
+      };
       const updated = await prisma.campaign
         .update({ where: { id: request.params.id }, data })
         .catch(() => null);
@@ -906,7 +1048,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
   );
 
   /** `POST /v1/campaigns/:id/duplicate` — a new DRAFT named "Copy of …" with the same email,
-   *  follow-ups, AI settings, unsubscribe link and senders. Leads, replies and send history stay
+   *  follow-ups, AI settings, unsubscribe link, send schedule and senders. Leads, replies and send history stay
    *  with the original, and so does a bounce pause: that judged the original's list, not this one.
    *  One nested create, so a copy is never left half-written. */
   app.post<{ Params: { id: string } }>('/:id/duplicate', async (request, reply) => {
@@ -927,6 +1069,12 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
         aiWritesSubject: source.aiWritesSubject,
         unsubscribeUrlTemplate: source.unsubscribeUrlTemplate,
         bounceRateThreshold: source.bounceRateThreshold,
+        sendTimezone: source.sendTimezone,
+        sendDays: source.sendDays,
+        sendStartMinute: source.sendStartMinute,
+        sendEndMinute: source.sendEndMinute,
+        useLeadTimezone: source.useLeadTimezone,
+        maxNewLeadsPerDay: source.maxNewLeadsPerDay,
         steps: {
           create: source.steps.map(({ position, waitDays, body, aiRewrite }) => ({
             position,

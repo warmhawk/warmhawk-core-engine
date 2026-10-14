@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { selectNextMailbox, type MailboxCandidate } from '../enqueuer';
+import { spreadGapMs, selectNextMailbox, type MailboxCandidate } from '../enqueuer';
 
 function candidate(overrides: Partial<MailboxCandidate>): MailboxCandidate {
   return {
@@ -70,5 +70,31 @@ describe('selectNextMailbox — weighted (LRU + capacity-aware) rotation', () =>
     // sentToday incremented, but cap not reached (default 25) so it stays in the pool
     expect(remaining[0].sortKeyMs).toBe(5000);
     expect(remaining[0].sentToday).toBe(1);
+  });
+});
+
+describe('spreadGapMs — spreading the remaining limit over the window', () => {
+  const HOUR = 60 * 60 * 1000;
+  const nowMs = Date.parse('2026-10-14T14:00:00Z');
+  const open = (msLeft: number) => ({ open: true, msLeft, closesAt: null, nextOpenAt: null });
+
+  it('is 0 with no schedule (always open)', () => {
+    expect(spreadGapMs(open(Infinity), 25, [], nowMs)).toBe(0);
+  });
+
+  it('divides the time left by the sends left: 8 hours, 25 a day → about 19 minutes', () => {
+    expect(spreadGapMs(open(8 * HOUR), 25, [], nowMs) / 60_000).toBeCloseTo(19.2, 1);
+  });
+
+  it('counts sends that still count against the limit at window end', () => {
+    // 5 of a 10 limit sent an hour ago — still inside 24 hours when the window closes.
+    const recent = Array.from({ length: 5 }, () => nowMs - HOUR);
+    expect(spreadGapMs(open(5 * HOUR), 10, recent, nowMs)).toBe(HOUR);
+  });
+
+  it('frees room for sends that age out of the 24 hours before the window closes', () => {
+    // 10 of 10 sent 22 hours ago: all age out within the next 4 hours of window.
+    const old = Array.from({ length: 10 }, () => nowMs - 22 * HOUR);
+    expect(spreadGapMs(open(4 * HOUR), 10, old, nowMs)).toBe(24 * 60_000);
   });
 });

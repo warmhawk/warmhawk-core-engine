@@ -1,7 +1,8 @@
 /**
  * BullMQ job processor — re-checks eligibility at dispatch time (a mailbox can be paused, capped or
- * lose its domain's mailing address, a campaign can be paused or change its senders, and a lead can
- * reply, between enqueue and the job actually firing, given the jittered delay), then hands
+ * lose its domain's mailing address, a campaign can be paused, change its senders or close its
+ * send window, and a lead can reply, between enqueue and the job actually firing, given the
+ * jittered delay), then hands
  * off the real send to the n8n dispatch workflow over the internal Docker network — this process
  * never talks to an SMTP server directly.
  */
@@ -9,6 +10,8 @@ import type { Job } from 'bullmq';
 import { prisma } from '@warmhawk/db';
 import { campaignCapToday } from './campaignCap';
 import { hasMailingAddress } from './enqueuer';
+import { recentSendCount, syncSentToday } from './rollingSends';
+import { leadWindowState, SEND_SETTINGS_SELECT } from './sendWindow';
 
 export interface DispatchJobData {
   leadId: string;
@@ -57,6 +60,7 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
           select: {
             status: true,
             pausedForBounceRate: true,
+            ...SEND_SETTINGS_SELECT,
             mailboxes: { where: { mailboxId }, select: { mailboxId: true } },
           },
         },
@@ -66,12 +70,18 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
   if (!lead) return;
   const followUp = lead.stepsSent > 0;
 
+  const now = new Date();
   const mailboxCanSend =
     mailbox &&
     mailbox.status === 'ACTIVE' &&
     hasMailingAddress(mailbox) &&
-    mailbox.sentToday < campaignCapToday(mailbox.dailyCap, mailbox.warmupGraduatedAt, new Date());
-  const campaignCanSend = lead.campaign.status === 'ACTIVE' && !lead.campaign.pausedForBounceRate;
+    (await recentSendCount(mailboxId, now)) <
+      campaignCapToday(mailbox.dailyCap, mailbox.warmupGraduatedAt, now);
+  // The send window is checked again too: the schedule may have changed since the slot was booked.
+  const campaignCanSend =
+    lead.campaign.status === 'ACTIVE' &&
+    !lead.campaign.pausedForBounceRate &&
+    leadWindowState(lead.campaign, lead.customFields, now).open;
   // A first email only from a mailbox the campaign (still) sends from; a follow-up only from the
   // lead's own mailbox, and only while the lead is still waiting on one.
   const leadFits = followUp
@@ -172,8 +182,10 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
   }
 }
 
+/** The old midnight-UTC reset. The daily limit is a rolling 24 hours now (`rollingSends.ts`), so
+ *  this only re-syncs `sentToday` to that count rather than zeroing it. */
 export async function processDailyResetJob(): Promise<void> {
-  await prisma.mailbox.updateMany({ data: { sentToday: 0 } });
+  await syncSentToday();
 }
 
 /** BullMQ Worker processor function — dispatches to the right handler based on job name. */

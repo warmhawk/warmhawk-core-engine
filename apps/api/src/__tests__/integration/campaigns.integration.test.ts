@@ -743,6 +743,151 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     expect(missing.statusCode).toBe(404);
   });
 
+  it('stores a send schedule, validates it, and turns it off with sendTimezone null', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns',
+      headers: auth(),
+      payload: {
+        name: 'Schedule Campaign',
+        aiPromptTemplate: '',
+        sendTimezone: 'America/Chicago',
+        sendDays: [5, 1, 2, 3, 4],
+        sendStartMinute: 9 * 60,
+        sendEndMinute: 17 * 60,
+        useLeadTimezone: true,
+        maxNewLeadsPerDay: 40,
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    const id = created.json().id;
+    createdCampaignIds.push(id);
+    expect(created.json()).toMatchObject({
+      sendTimezone: 'America/Chicago',
+      sendDays: [1, 2, 3, 4, 5],
+      sendStartMinute: 540,
+      sendEndMinute: 1020,
+      useLeadTimezone: true,
+      maxNewLeadsPerDay: 40,
+    });
+
+    // A PATCH may change only the hours; it's checked against the saved days and zone.
+    const hours = await app.inject({
+      method: 'PATCH',
+      url: `/v1/campaigns/${id}`,
+      headers: auth(),
+      payload: { sendStartMinute: 8 * 60 },
+    });
+    expect(hours.statusCode).toBe(200);
+    expect(hours.json()).toMatchObject({ sendStartMinute: 480, sendDays: [1, 2, 3, 4, 5] });
+
+    const bad: Record<string, unknown>[] = [
+      { sendTimezone: 'Mars/Olympus' },
+      { sendDays: [] },
+      { sendDays: [1, 7] },
+      { sendDays: [1, 1] },
+      { sendStartMinute: 18 * 60 },
+      { sendEndMinute: 1441 },
+      { useLeadTimezone: 'yes' },
+      { maxNewLeadsPerDay: 0 },
+      { maxNewLeadsPerDay: 2.5 },
+    ];
+    for (const payload of bad) {
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/v1/campaigns/${id}`,
+        headers: auth(),
+        payload,
+      });
+      expect(response.statusCode, JSON.stringify(payload)).toBe(422);
+    }
+
+    const off = await app.inject({
+      method: 'PATCH',
+      url: `/v1/campaigns/${id}`,
+      headers: auth(),
+      payload: { sendTimezone: null, maxNewLeadsPerDay: null },
+    });
+    expect(off.statusCode).toBe(200);
+    expect(off.json()).toMatchObject({
+      sendTimezone: null,
+      sendDays: [],
+      sendStartMinute: null,
+      sendEndMinute: null,
+      maxNewLeadsPerDay: null,
+    });
+
+    // A schedule needs every part on create too.
+    const partial = await app.inject({
+      method: 'POST',
+      url: '/v1/campaigns',
+      headers: auth(),
+      payload: { name: 'Partial Schedule', aiPromptTemplate: '', sendTimezone: 'UTC' },
+    });
+    expect(partial.statusCode).toBe(422);
+  });
+
+  it('lists each campaign’s send window and next booked send, and a copy keeps the schedule', async () => {
+    const closed = await prisma.campaign.create({
+      data: {
+        name: 'Window Closed',
+        status: 'ACTIVE',
+        aiPromptTemplate: '',
+        sendTimezone: 'UTC',
+        // Every day but today: closed now, opens at midnight UTC.
+        sendDays: [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== new Date().getUTCDay()),
+        sendStartMinute: 0,
+        sendEndMinute: 1440,
+        maxNewLeadsPerDay: 25,
+      },
+    });
+    const legacy = await prisma.campaign.create({
+      data: { name: 'No Schedule', status: 'ACTIVE', aiPromptTemplate: '' },
+    });
+    createdCampaignIds.push(closed.id, legacy.id);
+    await linkSender(closed.id);
+    const slot = new Date(Date.now() + 30 * 60_000);
+    await prisma.lead.create({
+      data: {
+        campaignId: legacy.id,
+        email: `booked-${Date.now()}@example.com`,
+        status: 'QUEUED',
+        queuedJobId: 'job-1',
+        queuedSlotAt: slot,
+      },
+    });
+
+    const list = await app.inject({ method: 'GET', url: '/v1/campaigns', headers: auth() });
+    const rows = list.json() as {
+      id: string;
+      sendWindow: { open: boolean; nextOpenAt: string | null } | null;
+      progress: { nextSendAt: string | null };
+    }[];
+    const closedRow = rows.find((c) => c.id === closed.id)!;
+    const now = new Date();
+    const midnight = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+    expect(closedRow.sendWindow).toMatchObject({ open: false });
+    expect(new Date(closedRow.sendWindow!.nextOpenAt!).getTime()).toBe(midnight);
+    expect(closedRow.progress.nextSendAt).toBeNull();
+    const legacyRow = rows.find((c) => c.id === legacy.id)!;
+    expect(legacyRow.sendWindow).toBeNull();
+    expect(new Date(legacyRow.progress.nextSendAt!).getTime()).toBe(slot.getTime());
+
+    const copy = await app.inject({
+      method: 'POST',
+      url: `/v1/campaigns/${closed.id}/duplicate`,
+      headers: auth(),
+    });
+    expect(copy.statusCode).toBe(201);
+    createdCampaignIds.push(copy.json().id);
+    expect(copy.json()).toMatchObject({
+      sendTimezone: 'UTC',
+      sendDays: closed.sendDays,
+      sendEndMinute: 1440,
+      maxNewLeadsPerDay: 25,
+    });
+  });
+
   it('requires authentication', async () => {
     const response = await app.inject({ method: 'GET', url: '/v1/campaigns' });
     expect(response.statusCode).toBe(401);

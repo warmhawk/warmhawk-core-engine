@@ -56,4 +56,40 @@ describe('computeNextSlotSeconds — cadence/jitter math', () => {
     }
     expect(delays.size).toBeGreaterThan(1);
   });
+
+  it('keeps the 8-minute floor after a pending reservation, not just after a real send', () => {
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    const pendingReservationAt = new Date(now.getTime() + 60 * 1000); // booked 1 min from now
+    for (let i = 0; i < 50; i++) {
+      const delay = computeNextSlotSeconds(null, now, pendingReservationAt);
+      expect(delay).toBeGreaterThanOrEqual(60 + 8 * 60 + 150 - 5);
+    }
+  });
+
+  it('spaces sends by the window spread when it is wider than the floor (±20%)', () => {
+    const now = new Date('2026-01-01T12:00:00.000Z');
+    const lastSentAt = new Date(now.getTime() - 60 * 1000);
+    const spreadMs = 30 * 60 * 1000;
+    for (let i = 0; i < 50; i++) {
+      const delay = computeNextSlotSeconds(lastSentAt, now, null, spreadMs);
+      expect(delay).toBeGreaterThanOrEqual(0.8 * 30 * 60 - 60 - 5);
+      expect(delay).toBeLessThanOrEqual(1.2 * 30 * 60 - 60 + 5);
+    }
+  });
+
+  it('never goes under the floor and jitter when the spread is narrower', () => {
+    const now = new Date('2026-01-01T12:00:00.000Z');
+    const lastSentAt = new Date(now.getTime() - 60 * 1000);
+    for (let i = 0; i < 50; i++) {
+      const delay = computeNextSlotSeconds(lastSentAt, now, null, 2 * 60 * 1000);
+      expect(delay).toBeGreaterThanOrEqual(7 * 60 + 150 - 5);
+    }
+  });
+
+  it('sends soon at the start of a window, however long ago the last send was', () => {
+    const now = new Date('2026-01-01T09:00:00.000Z');
+    const lastSentAt = new Date(now.getTime() - 16 * 60 * 60 * 1000);
+    const delay = computeNextSlotSeconds(lastSentAt, now, null, 20 * 60 * 1000);
+    expect(delay).toBeLessThanOrEqual(570);
+  });
 });
