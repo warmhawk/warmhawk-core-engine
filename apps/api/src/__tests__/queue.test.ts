@@ -1,5 +1,40 @@
 import { describe, it, expect } from 'vitest';
-import { buildRedisUrl } from '../routes/queue';
+import { buildRedisUrl, pendingCounts, queuedByDay } from '../routes/queue';
+
+describe('queuedByDay', () => {
+  const now = new Date('2026-10-14T17:00:00Z');
+  const at = (iso: string) => Date.parse(iso);
+
+  it('counts every job by its UTC due day, soonest day first', () => {
+    expect(
+      queuedByDay(now, [
+        at('2026-10-16T01:00:00Z'),
+        at('2026-10-14T18:00:00Z'),
+        at('2026-10-15T09:00:00Z'),
+        at('2026-10-15T23:59:59Z'),
+      ]),
+    ).toEqual([
+      { day: '2026-10-14', count: 1 },
+      { day: '2026-10-15', count: 2 },
+      { day: '2026-10-16', count: 1 },
+    ]);
+  });
+
+  it('counts overdue jobs toward today', () => {
+    expect(queuedByDay(now, [at('2026-10-12T08:00:00Z'), at('2026-10-14T16:00:00Z')])).toEqual([
+      { day: '2026-10-14', count: 2 },
+    ]);
+  });
+
+  it('is not capped like the listed jobs', () => {
+    const dueAts = Array.from({ length: 267 }, (_, i) => at('2026-10-15T00:00:00Z') + i * 1000);
+    expect(queuedByDay(now, dueAts)).toEqual([{ day: '2026-10-15', count: 267 }]);
+  });
+
+  it('returns nothing for an empty queue', () => {
+    expect(queuedByDay(now, [])).toEqual([]);
+  });
+});
 
 // MUST match apps/worker/src/__tests__/queue.test.ts's coverage of the identical, deliberately
 // duplicated helper (see apps/api/src/routes/queue.ts's header comment on the duplication).
@@ -25,5 +60,25 @@ describe('buildRedisUrl — REDIS_PASSWORD URL-encoding (bug fix, 2026-09-04)', 
     expect(connectionString).toBe('redis://:has%2Fslash@redis:6379');
     expect(() => new URL('redis://:has/slash@redis:6379')).toThrow();
     expect(() => new URL(connectionString)).not.toThrow();
+  });
+});
+
+describe('pendingCounts', () => {
+  it('leaves the nightly daily-reset job out of the queued counts', () => {
+    const dispatch = { name: 'dispatch' };
+    const dailyReset = { name: 'daily-reset' };
+    expect(pendingCounts([[dispatch], [], [dailyReset, dispatch, dispatch]])).toEqual({
+      waiting: 1,
+      active: 0,
+      delayed: 2,
+    });
+  });
+
+  it('reads 0 when the only pending job is daily-reset', () => {
+    expect(pendingCounts([[], [], [{ name: 'daily-reset' }]])).toEqual({
+      waiting: 0,
+      active: 0,
+      delayed: 0,
+    });
   });
 });

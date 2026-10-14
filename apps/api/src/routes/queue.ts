@@ -48,6 +48,24 @@ const MAX_GAP_SECONDS = CADENCE_FLOOR_SECONDS + 480 + 90;
 
 const JOB_STATES = ['waiting', 'active', 'delayed', 'completed', 'failed'] as const;
 type DispatchJobState = (typeof JOB_STATES)[number];
+const PENDING_STATES = ['waiting', 'active', 'delayed'] as const;
+
+/** Whether a job sends an email, as opposed to a system job like the nightly daily-reset. */
+function isDispatchJob(job: Pick<Job, 'name'>): boolean {
+  return !SYSTEM_JOB_NAMES.has(job.name);
+}
+
+/**
+ * The waiting/active/delayed counts with system jobs left out, so a queue holding nothing but the
+ * nightly daily-reset reads 0 queued, not 1 (10-14-26). `jobsByState` is each pending state's
+ * jobs, in PENDING_STATES order.
+ */
+export function pendingCounts(
+  jobsByState: Pick<Job, 'name'>[][],
+): Record<(typeof PENDING_STATES)[number], number> {
+  const [waiting, active, delayed] = jobsByState.map((jobs) => jobs.filter(isDispatchJob).length);
+  return { waiting: waiting ?? 0, active: active ?? 0, delayed: delayed ?? 0 };
+}
 const MAX_LISTED_JOBS = 50;
 // Days of send history the Live Queue chart shows before today.
 const SENT_HISTORY_DAYS = 6;
@@ -213,6 +231,25 @@ function dueAtMs(job: Job): number {
   return job.timestamp + (job.opts?.delay ?? 0);
 }
 
+/** A due time's UTC day; overdue jobs are still due, so they count toward today (as on /jobs). */
+function dueDay(dueAt: number, today: number): string {
+  return new Date(Math.max(dueAt, today)).toISOString().slice(0, 10);
+}
+
+/**
+ * Every pending job counted by the UTC day it's due, soonest day first, only days with jobs. The
+ * listed `jobs` stop at MAX_LISTED_JOBS, so the Live Queue chart needs these to show real totals.
+ */
+export function queuedByDay(now: Date, dueAts: number[]): { day: string; count: number }[] {
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const counts = new Map<string, number>();
+  for (const dueAt of dueAts) {
+    const day = dueDay(dueAt, today);
+    counts.set(day, (counts.get(day) ?? 0) + 1);
+  }
+  return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([day, count]) => ({ day, count }));
+}
+
 /**
  * The dashboard's view of dispatch jobs: lead, mailbox and campaign names instead of ids. System
  * jobs (the repeatable `daily-reset` cron) carry no leadId/mailboxId and would render as a phantom
@@ -264,19 +301,27 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
   app.get('/status', async () => {
     const queue = dispatchQueue();
 
-    const [rawCounts, isPaused, sent] = await Promise.all([
+    // Every pending job, per state, for the counts and the per-day and per-mailbox queued counts;
+    // the list below shows the soonest MAX_LISTED_JOBS.
+    const [rawCounts, isPaused, sent, jobsByState] = await Promise.all([
       queue.getJobCounts(...JOB_STATES),
       queue.isPaused(),
       sentByDay(new Date()),
+      Promise.all(PENDING_STATES.map((state) => queue.getJobs([state]))),
     ]);
-    const counts = Object.fromEntries(
-      JOB_STATES.map((state) => [state, rawCounts[state] ?? 0]),
-    ) as Record<DispatchJobState, number>;
+    const counts = {
+      ...(Object.fromEntries(JOB_STATES.map((state) => [state, rawCounts[state] ?? 0])) as Record<
+        DispatchJobState,
+        number
+      >),
+      ...pendingCounts(jobsByState),
+    };
 
-    // Every pending job, for the per-mailbox queued counts; the list below shows the first 50.
-    const allJobs = await queue.getJobs(['waiting', 'active', 'delayed']);
+    const now = new Date();
+    const allJobs = jobsByState.flat();
+    const dispatchJobs = allJobs.filter(isDispatchJob).sort((a, b) => dueAtMs(a) - dueAtMs(b));
     const activity = await mailboxActivity(
-      new Date(),
+      now,
       allJobs
         .filter((job) => job.data?.mailboxId)
         .map((job) => ({
@@ -285,15 +330,14 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
         })),
     );
 
-    const jobSummaries = await summarizeJobs(
-      allJobs.slice(0, MAX_LISTED_JOBS).filter((job) => !SYSTEM_JOB_NAMES.has(job.name)),
-    );
+    const jobSummaries = await summarizeJobs(dispatchJobs.slice(0, MAX_LISTED_JOBS));
 
     return {
       counts,
       isPaused,
       jobs: jobSummaries,
       sentByDay: sent,
+      queuedByDay: queuedByDay(now, dispatchJobs.map(dueAtMs)),
       mailboxes: activity,
       throttling: {
         cadenceFloorSeconds: CADENCE_FLOOR_SECONDS,
@@ -315,11 +359,9 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
     const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
     const all = await dispatchQueue().getJobs(['waiting', 'active', 'delayed']);
     const matching = all
-      .filter((job) => !SYSTEM_JOB_NAMES.has(job.name))
+      .filter(isDispatchJob)
       .filter((job) => !mailboxId || job.data?.mailboxId === mailboxId)
-      .filter(
-        (job) => !day || new Date(Math.max(dueAtMs(job), today)).toISOString().slice(0, 10) === day,
-      )
+      .filter((job) => !day || dueDay(dueAtMs(job), today) === day)
       .sort((a, b) => dueAtMs(a) - dueAtMs(b));
     return {
       total: matching.length,
