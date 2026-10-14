@@ -524,6 +524,75 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     });
     expect(badSpintax.statusCode).toBe(422);
   });
+  it('previews any one of its leads by id, from that lead’s own mailbox, with or without AI', async () => {
+    const preview = (payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url: '/v1/campaigns/preview', headers: auth(), payload });
+    const ownMailbox = await prisma.mailbox.create({
+      data: { email: `campaigns-own-${Date.now()}@example.com`, domainId, status: 'ACTIVE' },
+    });
+    const campaign = await prisma.campaign.create({
+      data: {
+        name: 'Preview By Lead',
+        aiPromptTemplate: 'Make it warmer',
+        aiProvider: 'CLAUDE',
+        subject: 'Hi {{firstName}}',
+        template: 'Body for {{company}}',
+        steps: { create: [{ position: 1, waitDays: 3, body: 'Following up, {{firstName}}' }] },
+      },
+    });
+    createdCampaignIds.push(campaign.id);
+    const other = await prisma.campaign.create({ data: { name: 'Other', aiPromptTemplate: '' } });
+    createdCampaignIds.push(other.id);
+    try {
+      await linkSender(campaign.id);
+      // Past the first three, so only `leadId` can reach it.
+      await prisma.lead.createMany({
+        data: ['a', 'b', 'c'].map((n) => ({ campaignId: campaign.id, email: `${n}@acme.example` })),
+      });
+      const lead = await prisma.lead.create({
+        data: {
+          campaignId: campaign.id,
+          email: 'dee@acme.example',
+          firstName: 'Dee',
+          company: 'Dee Co',
+          mailboxId: ownMailbox.id,
+          threadSubject: 'Hi Dee, the subject she really got',
+        },
+      });
+      const stranger = await prisma.lead.create({
+        data: { campaignId: other.id, email: 'x@acme.example' },
+      });
+
+      const first = await preview({ campaignId: campaign.id, leadId: lead.id, skipAi: true });
+      expect(first.statusCode).toBe(200);
+      expect(first.json()).toMatchObject({
+        lead: { email: 'dee@acme.example' },
+        subject: 'Hi Dee',
+        aiOutcome: 'TEMPLATE',
+        usesAi: true,
+        sender: { email: ownMailbox.email },
+      });
+      expect(first.json().body).toMatch(/^Body for Dee Co/);
+
+      // A follow-up replies under the subject this lead really got; this step isn't AI-rewritten.
+      const followUp = await preview({ campaignId: campaign.id, leadId: lead.id, step: 1 });
+      expect(followUp.json()).toMatchObject({
+        subject: 'Re: Hi Dee, the subject she really got',
+        aiOutcome: 'TEMPLATE',
+        usesAi: false,
+      });
+      expect(followUp.json().body).toMatch(/^Following up, Dee/);
+
+      expect((await preview({ campaignId: campaign.id, leadId: stranger.id })).statusCode).toBe(
+        404,
+      );
+      expect((await preview({ leadId: lead.id })).statusCode).toBe(422);
+    } finally {
+      await prisma.lead.deleteMany({ where: { campaignId: { in: [campaign.id, other.id] } } });
+      await prisma.campaignMailbox.deleteMany({ where: { campaignId: campaign.id } });
+      await prisma.mailbox.delete({ where: { id: ownMailbox.id } });
+    }
+  });
 
   it('previews the CAN-SPAM footer sends get, or says what is missing when sends would be refused', async () => {
     const preview = (payload: Record<string, unknown>) =>
