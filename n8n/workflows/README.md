@@ -36,6 +36,11 @@ every step is a real HTTP call to this API.
   round at the first such mailbox. `Loop Pending Leads` resets when a new mailbox's leads arrive,
   or it would carry the last mailbox's finished state. A failed call skips that mailbox or lead
   instead of ending the round, and a reply is stored with its own Date header, not the poll time.
+  A delivery-failure report (RFC 3464 DSN with `Action: failed`) comes back from `fetch-reply` as
+  `bounce: { status, diagnostic }` and is passed on to `POST /internal/replies`, which stores it
+  labelled `BOUNCED` and treats it like a bounce the server gave during the send: lead BOUNCED,
+  its latest SENT log flipped to BOUNCED, bounce-rate breakers checked. `classify-reply` leaves a
+  `BOUNCED` row alone.
 - **`seed-placement-poll.json`** *(new, V12 — Seed-Inbox Placement Test)* — schedule-triggered
   every 6 hours, calls `POST /internal/seed-placement/poll`, which checks every active
   `SeedAccount`'s IMAP folder placement for every recently-sent campaign and records a

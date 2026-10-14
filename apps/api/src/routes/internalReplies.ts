@@ -11,6 +11,12 @@
 import type { FastifyInstance } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
+import { applyBounceCircuitBreaker } from '../lib/mailSender';
+import { bounceReasonText, type BounceReport } from '../lib/warmup/placement';
+
+/** Lead states still waiting on an answer. A reply or bounce only moves a lead out of these, so
+ *  one that lands after an unsubscribe or an earlier answer doesn't undo it. */
+const WAITING = ['CONTACTED', 'OPENED', 'QUEUED'] as const;
 
 interface CreateReplyBody {
   leadId: string;
@@ -18,6 +24,8 @@ interface CreateReplyBody {
   mailboxId: string;
   rawContent: string;
   repliedAt?: string;
+  /** Set by `/internal/imap/fetch-reply` when the message is a delivery-failure report. */
+  bounce?: BounceReport | null;
 }
 
 export async function internalRepliesRoutes(app: FastifyInstance): Promise<void> {
@@ -91,8 +99,9 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
 
   /** Called by the reply-poll workflow after `imap.ts`'s `/fetch-reply` retrieves a message body. */
   app.post<{ Body: CreateReplyBody }>('/', async (request, reply) => {
-    const { leadId, campaignId, mailboxId, rawContent, repliedAt } = request.body;
-    if (!leadId || !campaignId || !mailboxId || !rawContent) {
+    const { leadId, campaignId, mailboxId, rawContent, repliedAt, bounce } = request.body;
+    // A bounce report with no readable text part still counts; its status line stands in.
+    if (!leadId || !campaignId || !mailboxId || (!rawContent && !bounce)) {
       return reply
         .code(422)
         .send({ error: 'leadId, campaignId, mailboxId, rawContent are required' });
@@ -102,16 +111,47 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
         leadId,
         campaignId,
         mailboxId,
-        rawContent,
+        rawContent: rawContent || (bounce ? bounceReasonText(bounce) : ''),
         repliedAt: repliedAt ? new Date(repliedAt) : new Date(),
+        ...(bounce ? { classification: 'BOUNCED' as const, classifiedAt: new Date() } : {}),
       },
     });
-    // A reply ends the lead's sequence: no follow-up goes to someone who answered. Only from a
-    // waiting state — a reply that lands after an unsubscribe or bounce doesn't undo either.
-    await prisma.lead.updateMany({
-      where: { id: leadId, status: { in: ['CONTACTED', 'OPENED', 'QUEUED'] } },
-      data: { status: 'REPLIED', nextStepAt: null, nextRetryAt: null },
+
+    if (!bounce) {
+      // A reply ends the lead's sequence: no follow-up goes to someone who answered.
+      await prisma.lead.updateMany({
+        where: { id: leadId, status: { in: [...WAITING] } },
+        data: { status: 'REPLIED', nextStepAt: null, nextRetryAt: null },
+      });
+      return reply.code(201).send(created);
+    }
+
+    // The same outcome as a bounce the server gives during the send (`mailSender.ts`
+    // `recordSendFailure`): the lead is BOUNCED, its latest send is logged as BOUNCED, and the
+    // bounce-rate breakers see it.
+    const moved = await prisma.lead.updateMany({
+      where: { id: leadId, status: { in: [...WAITING] } },
+      data: {
+        status: 'BOUNCED',
+        nextStepAt: null,
+        nextRetryAt: null,
+        queuedJobId: null,
+        queuedSlotAt: null,
+      },
     });
+    if (moved.count > 0) {
+      const sent = await prisma.executionLog.findFirst({
+        where: { leadId, campaignId, mailboxId, status: 'SENT' },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (sent) {
+        await prisma.executionLog.update({
+          where: { id: sent.id },
+          data: { status: 'BOUNCED', errorMessage: bounceReasonText(bounce) },
+        });
+      }
+      await applyBounceCircuitBreaker({ campaignId, mailboxId }).catch(() => undefined);
+    }
     return reply.code(201).send(created);
   });
 }

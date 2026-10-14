@@ -36,6 +36,7 @@ import { mailboxesRoutes } from './routes/mailboxes';
 import { queueRoutes } from './routes/queue';
 import { seedAccountsRoutes } from './routes/seedAccounts';
 import { unsubscribeRoutes } from './routes/unsubscribe';
+import { versionRoutes } from './routes/version';
 import { toFriendlyError } from './lib/friendlyError';
 
 /**
@@ -184,6 +185,7 @@ export async function createApp(): Promise<FastifyInstance> {
       await v1.register(seedAccountsRoutes, { prefix: '/seed-accounts' });
       await v1.register(warmupRoutes, { prefix: '/warmup' });
       await v1.register(suppressionRoutes, { prefix: '/suppression' });
+      await v1.register(versionRoutes, { prefix: '/version' });
       // NOTE: this repo no longer registers a Stripe webhook / license-issuance route (V12 fix —
       // that logic was built here by mistake during a parallel-agent build; Stripe/RSA license
       // issuance now lives solely on WarmHawk's billing/marketing site, the one piece of billing
