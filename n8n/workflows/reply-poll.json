@@ -23,7 +23,9 @@
         "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/mailboxes/active",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" }]
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" }
+          ]
         },
         "options": {}
       }
@@ -63,13 +65,37 @@
         "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/replies/pending",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" }]
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" }
+          ]
         },
         "sendQuery": true,
         "queryParameters": {
           "parameters": [{ "name": "mailboxId", "value": "={{$json.id}}" }]
         },
         "options": {}
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "r16-if-has-pending",
+      "name": "IF Has Pending Leads",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-320, 340],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ ($json.pending ?? []).length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
       }
     },
     {
@@ -96,7 +122,10 @@
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [280, 160],
-      "parameters": { "batchSize": 1, "options": {} }
+      "parameters": {
+        "batchSize": 1,
+        "options": { "reset": "={{ $prevNode.name === 'Attach Mailbox Id' }}" }
+      }
     },
     {
       "id": "r10-search-imap",
@@ -109,7 +138,9 @@
         "url": "={{$env.API_INTERNAL_BASE_URL}}/internal/imap/search",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [{ "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" }]
+          "parameters": [
+            { "name": "X-Callback-Secret", "value": "={{$env.NEXTJS_CALLBACK_SECRET}}" }
+          ]
         },
         "sendQuery": true,
         "queryParameters": {
@@ -119,7 +150,8 @@
           ]
         },
         "options": {}
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "id": "r11-if-found",
@@ -162,7 +194,8 @@
         "specifyBody": "json",
         "jsonBody": "={{ { \"mailboxId\": $('Loop Pending Leads').item.json.mailboxId, \"messageId\": $json.messageId } }}",
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "r13-create-reply",
@@ -182,9 +215,10 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { \"leadId\": $('Loop Pending Leads').item.json.leadId, \"campaignId\": $('Loop Pending Leads').item.json.campaignId, \"mailboxId\": $('Loop Pending Leads').item.json.mailboxId, \"rawContent\": $json.content, \"repliedAt\": $now.toISO() } }}",
+        "jsonBody": "={{ { \"leadId\": $('Loop Pending Leads').item.json.leadId, \"campaignId\": $('Loop Pending Leads').item.json.campaignId, \"mailboxId\": $('Loop Pending Leads').item.json.mailboxId, \"rawContent\": $json.content, \"repliedAt\": $json.date ?? $now.toISO() } }}",
         "options": {}
-      }
+      },
+      "onError": "continueErrorOutput"
     },
     {
       "id": "r14-classify",
@@ -206,12 +240,17 @@
         "specifyBody": "json",
         "jsonBody": "={{ { \"replyId\": $json.id } }}",
         "options": {}
-      }
+      },
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
-    "Schedule Trigger": { "main": [[{ "node": "Get Active Mailboxes", "type": "main", "index": 0 }]] },
-    "Get Active Mailboxes": { "main": [[{ "node": "Split Out Mailboxes", "type": "main", "index": 0 }]] },
+    "Schedule Trigger": {
+      "main": [[{ "node": "Get Active Mailboxes", "type": "main", "index": 0 }]]
+    },
+    "Get Active Mailboxes": {
+      "main": [[{ "node": "Split Out Mailboxes", "type": "main", "index": 0 }]]
+    },
     "Split Out Mailboxes": { "main": [[{ "node": "Loop Mailboxes", "type": "main", "index": 0 }]] },
     "Loop Mailboxes": {
       "main": [
@@ -219,9 +258,21 @@
         [{ "node": "Get Pending Replies For Mailbox", "type": "main", "index": 0 }]
       ]
     },
-    "Get Pending Replies For Mailbox": { "main": [[{ "node": "Split Out Pending Leads", "type": "main", "index": 0 }]] },
-    "Split Out Pending Leads": { "main": [[{ "node": "Attach Mailbox Id", "type": "main", "index": 0 }]] },
-    "Attach Mailbox Id": { "main": [[{ "node": "Loop Pending Leads", "type": "main", "index": 0 }]] },
+    "Get Pending Replies For Mailbox": {
+      "main": [[{ "node": "IF Has Pending Leads", "type": "main", "index": 0 }]]
+    },
+    "IF Has Pending Leads": {
+      "main": [
+        [{ "node": "Split Out Pending Leads", "type": "main", "index": 0 }],
+        [{ "node": "Loop Mailboxes", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split Out Pending Leads": {
+      "main": [[{ "node": "Attach Mailbox Id", "type": "main", "index": 0 }]]
+    },
+    "Attach Mailbox Id": {
+      "main": [[{ "node": "Loop Pending Leads", "type": "main", "index": 0 }]]
+    },
     "Loop Pending Leads": {
       "main": [
         [{ "node": "Loop Mailboxes", "type": "main", "index": 0 }],
@@ -235,8 +286,18 @@
         [{ "node": "Loop Pending Leads", "type": "main", "index": 0 }]
       ]
     },
-    "Fetch Reply Body": { "main": [[{ "node": "Create Reply Record", "type": "main", "index": 0 }]] },
-    "Create Reply Record": { "main": [[{ "node": "Classify Reply", "type": "main", "index": 0 }]] },
+    "Fetch Reply Body": {
+      "main": [
+        [{ "node": "Create Reply Record", "type": "main", "index": 0 }],
+        [{ "node": "Loop Pending Leads", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Reply Record": {
+      "main": [
+        [{ "node": "Classify Reply", "type": "main", "index": 0 }],
+        [{ "node": "Loop Pending Leads", "type": "main", "index": 0 }]
+      ]
+    },
     "Classify Reply": { "main": [[{ "node": "Loop Pending Leads", "type": "main", "index": 0 }]] }
   },
   "settings": { "executionOrder": "v1" },
