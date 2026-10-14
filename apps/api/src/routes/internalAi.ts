@@ -125,6 +125,8 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
       include: { campaign: true },
     });
     if (!replyRow) return reply.code(404).send({ error: 'Reply not found' });
+    // Labelled from the delivery-failure report when it was stored; nothing for the AI to read.
+    if (replyRow.classification === 'BOUNCED') return reply.send(replyRow);
 
     const provider =
       replyRow.campaign.aiProvider ??

@@ -215,7 +215,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { \"leadId\": $('Loop Pending Leads').item.json.leadId, \"campaignId\": $('Loop Pending Leads').item.json.campaignId, \"mailboxId\": $('Loop Pending Leads').item.json.mailboxId, \"rawContent\": $json.content, \"repliedAt\": $json.date ?? $now.toISO() } }}",
+        "jsonBody": "={{ { \"leadId\": $('Loop Pending Leads').item.json.leadId, \"campaignId\": $('Loop Pending Leads').item.json.campaignId, \"mailboxId\": $('Loop Pending Leads').item.json.mailboxId, \"rawContent\": $json.content, \"repliedAt\": $json.date ?? $now.toISO(), \"bounce\": $json.bounce ?? null } }}",
         "options": {}
       },
       "onError": "continueErrorOutput"

@@ -120,6 +120,9 @@ enum ReplyClassification {
   AUTO_REPLY
   OPT_OUT
   UNCLASSIFIED
+  /// A delivery-failure report (RFC 3464 DSN) that came back for the email, not a person's reply.
+  /// Set by `POST /internal/replies` from the report itself, never by the AI classifier.
+  BOUNCED
 }
 
 /// Seed-Inbox Placement Test (Guardrails, V12 — option (c), "placement sampling," the spec's own

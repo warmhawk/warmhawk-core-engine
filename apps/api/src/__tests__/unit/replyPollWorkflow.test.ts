@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 interface WorkflowNode {
   name: string;
   onError?: string;
-  parameters: { options?: { reset?: unknown } };
+  parameters: { options?: { reset?: unknown }; jsonBody?: string };
 }
 interface Workflow {
   nodes: WorkflowNode[];
@@ -44,6 +44,12 @@ describe('reply-poll workflow', () => {
       expect(node(name).onError).toBe('continueErrorOutput');
       expect(targets(name, 1)).toEqual(['Loop Pending Leads']);
     }
+  });
+
+  it('passes a delivery-failure report on, so it is stored as a bounce', () => {
+    expect(node('Create Reply Record').parameters.jsonBody).toContain(
+      '"bounce": $json.bounce ?? null',
+    );
   });
 
   it('wires every connection to a real node', () => {
