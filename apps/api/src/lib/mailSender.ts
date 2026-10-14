@@ -128,8 +128,9 @@ function isHardBounce(message: string, code?: string): boolean {
  *  mailbox-level (reputation flag, `Mailbox.rollingBounceRate`/`autoFlaggedAt`, uses the instance
  *  default threshold since a mailbox is shared across campaigns) and campaign-level
  *  (`Campaign.pausedForBounceRate`, uses that campaign's own configurable threshold). Never
- *  throws — evaluating a breaker must not itself fail the send-failure recording it runs after. */
-async function applyBounceCircuitBreaker(params: {
+ *  throws — evaluating a breaker must not itself fail the send-failure recording it runs after.
+ *  Also called by `POST /internal/replies` for a bounce that comes back after the send. */
+export async function applyBounceCircuitBreaker(params: {
   campaignId: string;
   mailboxId: string;
 }): Promise<void> {

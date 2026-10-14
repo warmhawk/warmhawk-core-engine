@@ -246,6 +246,21 @@ describe('POST /internal/ai/classify-reply', () => {
     );
   });
 
+  it('leaves a BOUNCED reply as it is, without calling the provider', async () => {
+    vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue({
+      ...baseReplyRow,
+      classification: 'BOUNCED',
+    } as never);
+    const updateSpy = vi.spyOn(prisma.reply, 'update');
+
+    const response = await classifyReplyRequest();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ classification: 'BOUNCED' });
+    expect(aiProviderClient.classifyReply).not.toHaveBeenCalled();
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
   it('404s when the reply does not exist', async () => {
     vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue(null as never);
     const response = await classifyReplyRequest();

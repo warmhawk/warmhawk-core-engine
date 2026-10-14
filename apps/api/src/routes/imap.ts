@@ -22,6 +22,7 @@ import {
   decodeMessageId,
 } from '../lib/imapClient';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
+import { parseBounceReport, type BounceReport } from '../lib/warmup/placement';
 
 const SEARCH_TIMEOUT_MS = 15_000;
 
@@ -131,6 +132,9 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
         // When the reply was sent (its Date header), so a reply the poll picks up late still shows
         // its real time. Null when the header is missing; the workflow then uses the poll time.
         let date: string | null = null;
+        // A delivery-failure report threads to the send like a reply does. The workflow passes
+        // this on to `POST /internal/replies`, which records it as a bounce, not a reply.
+        let bounce: BounceReport | null = null;
         try {
           const message = await withTimeout(
             client.download(String(uid), undefined, { uid: true }),
@@ -152,7 +156,9 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
             // sibling — an html part wrapped in multipart/mixed (as Gmail sends replies composed
             // via its API) is neither, so `.text` comes back undefined even though `.html` is
             // fully decoded; convert that case ourselves rather than falling back to ''.
-            const parsed = await simpleParser(Buffer.concat(chunks));
+            const source = Buffer.concat(chunks);
+            bounce = parseBounceReport(source.toString('utf8'));
+            const parsed = await simpleParser(source);
             content = parsed.text || (parsed.html ? htmlToText(parsed.html) : '');
             date =
               parsed.date && !Number.isNaN(parsed.date.getTime())
@@ -162,7 +168,7 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
         } finally {
           lock.release();
         }
-        return reply.send({ content, date });
+        return reply.send({ content, date, bounce });
       } finally {
         await client.logout().catch(() => client.close());
       }
