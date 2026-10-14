@@ -31,7 +31,11 @@ every step is a real HTTP call to this API.
   via that mailbox have no `Reply` row yet, plus the provider Message-ID to thread against), then
   for each pending lead: `GET /internal/imap/search` (matches by In-Reply-To/References header,
   not subject text), and on a match, `POST /internal/imap/fetch-reply` -> `POST /internal/replies`
-  -> `POST /internal/ai/classify-reply`.
+  -> `POST /internal/ai/classify-reply`. A mailbox with no pending leads goes straight to the next
+  one (`IF Has Pending Leads`): a branch with no items ends an n8n run, which used to stop every
+  round at the first such mailbox. `Loop Pending Leads` resets when a new mailbox's leads arrive,
+  or it would carry the last mailbox's finished state. A failed call skips that mailbox or lead
+  instead of ending the round, and a reply is stored with its own Date header, not the poll time.
 - **`seed-placement-poll.json`** *(new, V12 — Seed-Inbox Placement Test)* — schedule-triggered
   every 6 hours, calls `POST /internal/seed-placement/poll`, which checks every active
   `SeedAccount`'s IMAP folder placement for every recently-sent campaign and records a
