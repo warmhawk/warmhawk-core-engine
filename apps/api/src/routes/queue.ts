@@ -26,6 +26,7 @@ import { Queue, type Job } from 'bullmq';
 import { prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { campaignCapToday } from '../lib/warmup/policy';
+import { sendForecast, type SendForecast } from '../lib/sendForecast';
 
 // MUST match apps/worker/src/queue.ts's DISPATCH_QUEUE_NAME.
 const DISPATCH_QUEUE_NAME = 'warmhawk-dispatch';
@@ -69,6 +70,8 @@ export function pendingCounts(
 const MAX_LISTED_JOBS = 50;
 // Days of send history the Live Queue chart shows before today.
 const SENT_HISTORY_DAYS = 6;
+// Days after today the Live Queue chart shows expected sends for.
+const FORECAST_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -105,6 +108,8 @@ export interface MailboxDay {
   warmup: number;
   /** Dispatch jobs due that day; overdue ones count toward today. */
   queued: number;
+  /** Campaign emails expected that day (`lib/sendForecast.ts`); days after today only. */
+  expected: number;
   /** Campaign cap for that day, including the post-graduation ramp. */
   cap: number;
 }
@@ -117,12 +122,13 @@ export interface MailboxActivity {
 
 /**
  * Per mailbox: its campaigns, and the MAILBOX_DAYS_EACH_SIDE UTC days either side of today with
- * sends, warmup sends, queued jobs and that day's cap. Past caps apply today's dailyCap to the
+ * sends, warmup sends, queued jobs, expected sends and that day's cap. Past caps apply today's dailyCap to the
  * ramp — cap edits aren't kept, so a day before an edit shows the new cap.
  */
 export async function mailboxActivity(
   now: Date,
   dueJobs: { mailboxId: string; dueAtMs: number }[],
+  expectedByMailbox: SendForecast['byMailbox'] = new Map(),
 ): Promise<MailboxActivity[]> {
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const offsets = Array.from(
@@ -181,6 +187,7 @@ export async function mailboxActivity(
       sent: sent.get(key(m.id, day)) ?? 0,
       warmup: warmup.get(key(m.id, day)) ?? 0,
       queued: offsets[i]! < 0 ? 0 : (queued.get(key(m.id, day)) ?? 0),
+      expected: offsets[i]! > 0 ? (expectedByMailbox.get(m.id)?.get(day) ?? 0) : 0,
       cap: campaignCapToday(
         m.dailyCap,
         m.warmupGraduatedAt,
@@ -303,11 +310,12 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
 
     // Every pending job, per state, for the counts and the per-day and per-mailbox queued counts;
     // the list below shows the soonest MAX_LISTED_JOBS.
-    const [rawCounts, isPaused, sent, jobsByState] = await Promise.all([
+    const [rawCounts, isPaused, sent, jobsByState, forecast] = await Promise.all([
       queue.getJobCounts(...JOB_STATES),
       queue.isPaused(),
       sentByDay(new Date()),
       Promise.all(PENDING_STATES.map((state) => queue.getJobs([state]))),
+      sendForecast(new Date(), FORECAST_DAYS),
     ]);
     const counts = {
       ...(Object.fromEntries(JOB_STATES.map((state) => [state, rawCounts[state] ?? 0])) as Record<
@@ -328,6 +336,7 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
           mailboxId: job.data.mailboxId as string,
           dueAtMs: dueAtMs(job),
         })),
+      forecast.byMailbox,
     );
 
     const jobSummaries = await summarizeJobs(dispatchJobs.slice(0, MAX_LISTED_JOBS));
@@ -338,6 +347,8 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
       jobs: jobSummaries,
       sentByDay: sent,
       queuedByDay: queuedByDay(now, dispatchJobs.map(dueAtMs)),
+      // The queue only ever holds each mailbox's next slot, so days ahead show what's expected.
+      expectedByDay: forecast.byDay,
       mailboxes: activity,
       throttling: {
         cadenceFloorSeconds: CADENCE_FLOOR_SECONDS,

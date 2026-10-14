@@ -285,12 +285,28 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
       ]);
       const day = (offset: number) => new Date(now + offset * DAY).toISOString().slice(0, 10);
       expect(mine.days).toEqual([
-        { day: day(-2), sent: 0, warmup: 0, queued: 0, cap: 5 },
-        { day: day(-1), sent: 1, warmup: 0, queued: 0, cap: 5 },
-        { day: day(0), sent: 1, warmup: 1, queued: 0, cap: 6 },
-        { day: day(1), sent: 0, warmup: 0, queued: 1, cap: 8 },
-        { day: day(2), sent: 0, warmup: 0, queued: 0, cap: 9 },
+        { day: day(-2), sent: 0, warmup: 0, queued: 0, expected: 0, cap: 5 },
+        { day: day(-1), sent: 1, warmup: 0, queued: 0, expected: 0, cap: 5 },
+        { day: day(0), sent: 1, warmup: 1, queued: 0, expected: 0, cap: 6 },
+        // Still warming up, so nothing is expected from it.
+        { day: day(1), sent: 0, warmup: 0, queued: 1, expected: 0, cap: 8 },
+        { day: day(2), sent: 0, warmup: 0, queued: 0, expected: 0, cap: 9 },
       ]);
+      // The chart's days ahead: the 7 UTC days after today.
+      expect(response.json().expectedByDay.map((d: { day: string }) => d.day)).toEqual(
+        [1, 2, 3, 4, 5, 6, 7].map((offset) =>
+          new Date(
+            Date.UTC(
+              new Date(now).getUTCFullYear(),
+              new Date(now).getUTCMonth(),
+              new Date(now).getUTCDate(),
+            ) +
+              offset * DAY,
+          )
+            .toISOString()
+            .slice(0, 10),
+        ),
+      );
     } finally {
       await (await queue.getJob(jobId))?.remove();
       await prisma.warmupMessage.deleteMany({ where: { id: { in: warmups.map((w) => w.id) } } });
