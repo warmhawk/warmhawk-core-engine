@@ -379,6 +379,22 @@ model Campaign {
   bounceRateThreshold Float   @default(0.05)
   pausedForBounceRate Boolean @default(false)
 
+  /// Send schedule (10-14-26) — the days and hours emails go out, in `sendTimezone` (IANA name).
+  /// Null `sendTimezone` = no schedule: the campaign sends at any hour, as every campaign did
+  /// before this existed. See `packages/db/src/sendSchedule.ts`.
+  sendTimezone    String?
+  /// Days of the week sends go out on, 0 = Sunday … 6 = Saturday.
+  sendDays        Int[]   @default([])
+  /// The window, in minutes after local midnight: start 0..1439, end 1..1440, start < end.
+  sendStartMinute Int?
+  sendEndMinute   Int?
+  /// Run the window in each lead's own time zone, read from their Time zone / Country / State /
+  /// City columns. A lead whose zone can't be told uses `sendTimezone`.
+  useLeadTimezone Boolean @default(false)
+  /// First emails per rolling 24 hours across all this campaign's mailboxes. Null = only the
+  /// mailboxes' own daily limits apply. Follow-ups never count against it.
+  maxNewLeadsPerDay Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

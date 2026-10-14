@@ -13,6 +13,7 @@ import { prisma } from '@warmhawk/db';
 import { runEnqueuerTick } from './enqueuer';
 import { reconcileStuckLeads } from './reconcile';
 import { processJob } from './processor';
+import { syncSentToday } from './rollingSends';
 import {
   createDispatchQueue,
   createRedisConnection,
@@ -56,6 +57,10 @@ async function main() {
       .catch((err) => {
         console.error('[worker] reconciliation tick failed:', err);
       });
+    // Keeps the dashboard's "sent today" figure on the same rolling 24 hours the limit uses.
+    syncSentToday().catch((err) => {
+      console.error('[worker] sentToday sync failed:', err);
+    });
   }, RECONCILE_INTERVAL_MS);
 
   // Run one of each immediately on boot rather than waiting a full interval.
