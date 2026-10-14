@@ -254,6 +254,11 @@ interface PreviewBody extends Partial<Omit<CreateCampaignBody, 'steps'>> {
   step?: number;
   /** Draft follow-ups from the editor, used instead of the saved ones. */
   steps?: unknown;
+  /** One of the campaign's own leads, by id, instead of `leadIndex` — sent from the mailbox that
+   *  lead is assigned to. The Live Queue panel uses it to show a queued lead's emails. */
+  leadId?: string;
+  /** Render the campaign's own text even when AI would write this email — no provider call. */
+  skipAi?: boolean;
 }
 
 type PreviewResult =
@@ -265,6 +270,8 @@ type PreviewResult =
       sampleLead: boolean;
       senderName: string | null;
       step: number;
+      /** Whether AI writes this email at send time (so `skipAi` showed only the text it starts from). */
+      usesAi: boolean;
       sender: { email: string; senderName: string | null; domainName: string } | null;
       complianceMissing: Array<'sender' | 'address' | 'unsubscribe'>;
       /** Internal — the mailbox a test send goes from. Not returned by `/preview`. */
@@ -315,14 +322,40 @@ async function buildPreview(
   const step = Math.trunc(Number(body.step) || 0);
   const followUp = step > 0 ? steps.find((s) => s.position === step) : undefined;
   if (step > 0 && !followUp) return { error: `There is no follow-up ${step}`, code: 422 };
+  const usesAi = Boolean(campaign.aiProvider) && (followUp ? followUp.aiRewrite : true);
+  if (body.skipAi === true) campaign.aiProvider = null;
+
+  let chosenLead:
+    (ComposeLead & { id: string; mailboxId: string | null; threadSubject: string | null }) | null =
+    null;
+  if (body.leadId !== undefined) {
+    if (!saved || typeof body.leadId !== 'string')
+      return { error: 'leadId needs the campaignId it belongs to', code: 422 };
+    chosenLead = await prisma.lead.findFirst({
+      where: { id: body.leadId, campaignId: saved.id, piiErasedAt: null },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true,
+        company: true,
+        customFields: true,
+        mailboxId: true,
+        threadSubject: true,
+      },
+    });
+    if (!chosenLead) return { error: 'Lead not found', code: 404 };
+  }
 
   // The sender: the first ticked mailbox that isn't paused (the draft's ticks win over the saved).
+  // A chosen lead already assigned a mailbox goes from that one, as its real send does.
   let senderIds = saved?.mailboxes.map((link) => link.mailboxId) ?? [];
   if (body.mailboxIds !== undefined) {
     if (!Array.isArray(body.mailboxIds))
       return { error: 'mailboxIds must be a list of mailbox ids', code: 422 };
     senderIds = body.mailboxIds.filter((id): id is string => typeof id === 'string');
   }
+  if (chosenLead?.mailboxId) senderIds = [chosenLead.mailboxId];
   const candidates = senderIds.length
     ? await prisma.mailbox.findMany({
         where: { id: { in: senderIds } },
@@ -359,18 +392,20 @@ async function buildPreview(
     Math.max(Math.trunc(Number(body.leadIndex) || 0), 0),
     Math.max(leads.length - 1, 0),
   );
-  const lead = leads[index] ?? SAMPLE_LEAD;
+  const lead = chosenLead ?? leads[index] ?? SAMPLE_LEAD;
   const senderName = resolveSenderName(mailbox);
 
   let composed: ComposedEmail;
   if (followUp) {
-    // The thread subject is the first email's — rendered without AI, so a preview never pays for
-    // a model call it throws away.
-    const first = await composeCampaignEmail({
-      campaign: { ...campaign, aiProvider: null },
-      lead,
-      senderName,
-    });
+    // The thread subject is the first email's: the one this lead really got once it has gone out,
+    // else rendered without AI, so a preview never pays for a model call it throws away.
+    const first = chosenLead?.threadSubject
+      ? { subject: chosenLead.threadSubject }
+      : await composeCampaignEmail({
+          campaign: { ...campaign, aiProvider: null },
+          lead,
+          senderName,
+        });
     composed = await composeCampaignEmail({
       campaign,
       lead,
@@ -426,6 +461,7 @@ async function buildPreview(
     sampleLead: leads.length === 0,
     senderName,
     step: followUp ? step : 0,
+    usesAi,
     sender: mailbox
       ? {
           email: mailbox.email,
