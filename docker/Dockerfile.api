@@ -20,6 +20,10 @@ COPY packages/tier-config/package.json packages/tier-config/package.json
 COPY packages/ops-scripts/package.json packages/ops-scripts/package.json
 RUN npm install --workspaces --include-workspace-root
 COPY . .
+# The release this image is built from, for `GET /v1/version` (routes/version.ts).
+# ks-woodpecker-config's tag-release step writes RELEASED_VERSION to the repo root before the build;
+# without it (a local build) the file is empty and the route reports null.
+RUN (cat /repo/RELEASED_VERSION 2>/dev/null || true) | tr -d '[:space:]' > /repo/apps/api/RELEASE_VERSION
 RUN npm run db:generate
 # devDependencies (vitest, typescript, eslint, etc.) have no business in the runtime image;
 # `db:generate` above already ran with the `prisma` devDependency present, so this can safely run
@@ -50,6 +54,8 @@ COPY --from=build --chown=app:app /repo/package.json ./package.json
 COPY --from=build --chown=app:app /repo/packages ./packages
 COPY --from=build --chown=app:app /repo/apps/api ./apps/api
 COPY --from=build --chown=app:app /repo/constants.ts ./constants.ts
+
+ENV WARMHAWK_RELEASE_VERSION_FILE=/repo/apps/api/RELEASE_VERSION
 
 USER app
 WORKDIR /repo/apps/api

@@ -116,6 +116,10 @@ server {
         proxy_pass http://api:4600;
     }
 
+    location /v1/version/ {
+        proxy_pass http://api:4600;
+    }
+
     # The built-in unsubscribe page campaign emails link to — public, no login.
     location /unsubscribe/ {
         proxy_pass http://api:4600;
@@ -210,6 +214,10 @@ server {
 #     }
 #
 #     location /v1/suppression/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/version/ {
 #         proxy_pass http://api:4600;
 #     }
 #
@@ -311,6 +319,10 @@ server {
 #     }
 #
 #     location /v1/suppression/ {
+#         proxy_pass http://api:4600;
+#     }
+#
+#     location /v1/version/ {
 #         proxy_pass http://api:4600;
 #     }
 #
