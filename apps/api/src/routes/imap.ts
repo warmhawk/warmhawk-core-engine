@@ -128,6 +128,9 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
       try {
         const lock = await client.getMailboxLock(folder);
         let content = '';
+        // When the reply was sent (its Date header), so a reply the poll picks up late still shows
+        // its real time. Null when the header is missing; the workflow then uses the poll time.
+        let date: string | null = null;
         try {
           const message = await withTimeout(
             client.download(String(uid), undefined, { uid: true }),
@@ -151,11 +154,15 @@ export async function imapRoutes(app: FastifyInstance): Promise<void> {
             // fully decoded; convert that case ourselves rather than falling back to ''.
             const parsed = await simpleParser(Buffer.concat(chunks));
             content = parsed.text || (parsed.html ? htmlToText(parsed.html) : '');
+            date =
+              parsed.date && !Number.isNaN(parsed.date.getTime())
+                ? parsed.date.toISOString()
+                : null;
           }
         } finally {
           lock.release();
         }
-        return reply.send({ content });
+        return reply.send({ content, date });
       } finally {
         await client.logout().catch(() => client.close());
       }
