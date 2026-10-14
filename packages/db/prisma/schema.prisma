@@ -628,6 +628,9 @@ model Reply {
   classification ReplyClassification @default(UNCLASSIFIED)
   classifiedAt   DateTime?
   repliedAt      DateTime
+  /// When the user marked the reply dealt with, from the dashboard. Null while an INTERESTED or
+  /// UNCLASSIFIED reply is still waiting on them (`GET /v1/replies/waiting-count`).
+  handledAt      DateTime?
   createdAt      DateTime            @default(now())
 
   @@index([campaignId])
