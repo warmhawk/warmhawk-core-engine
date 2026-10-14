@@ -102,7 +102,12 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
       const json = response.json();
 
       expect(json.counts).toHaveProperty('delayed');
-      expect(json.throttling).toEqual({ cadenceFloorSeconds: 480, jitterSeconds: 240 });
+      expect(json.throttling).toEqual({
+        cadenceFloorSeconds: 480,
+        jitterSeconds: 240,
+        minGapSeconds: 630,
+        maxGapSeconds: 1050,
+      });
 
       const found = json.jobs.find((j: { id: string }) => j.id === jobId);
       expect(found).toBeTruthy();
@@ -110,6 +115,8 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
       expect(found.leadEmail).toBe(leadEmail);
       expect(found.mailboxEmail).toBe(mailboxEmail);
       expect(found.campaignName).toBe('Queue Status Test Campaign');
+      // What the panel's email preview needs: whose email, which campaign, which step goes next.
+      expect(found).toMatchObject({ leadId, campaignId, step: 0 });
     } finally {
       const job = await queue.getJob(jobId);
       await job?.remove();
@@ -132,7 +139,11 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
     // the check), so these use "-" as the separator instead.
     const dispatchJobId = `${leadId}-${mailboxId}-daily-reset-regression-${Date.now()}`;
     const dailyResetJobId = `daily-reset-regression-${Date.now()}`;
-    await queue.add('dispatch', { leadId, mailboxId }, { jobId: dispatchJobId, delay: 10 * 60 * 1000 });
+    await queue.add(
+      'dispatch',
+      { leadId, mailboxId },
+      { jobId: dispatchJobId, delay: 10 * 60 * 1000 },
+    );
     await queue.add('daily-reset', {}, { jobId: dailyResetJobId, delay: 10 * 60 * 1000 });
 
     try {
@@ -154,12 +165,185 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
       expect(
         json.jobs.some(
           (j: { leadEmail: string; mailboxEmail: string; campaignName: string }) =>
-            j.leadEmail === 'unknown' && j.mailboxEmail === 'unknown' && j.campaignName === 'unknown',
+            j.leadEmail === 'unknown' &&
+            j.mailboxEmail === 'unknown' &&
+            j.campaignName === 'unknown',
         ),
       ).toBe(false);
     } finally {
       await (await queue.getJob(dispatchJobId))?.remove();
       await (await queue.getJob(dailyResetJobId))?.remove();
+    }
+  });
+
+  it('reports sends per UTC day for the last 6 days and today, counting only sends that left', async () => {
+    const getSent = async (): Promise<{ day: string; count: number }[]> => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/queue/status',
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json().sentByDay;
+    };
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    // Other tests share this database, so compare against a before count rather than absolutes.
+    const before = await getSent();
+    const created = await Promise.all(
+      [
+        { status: 'SENT', at: now },
+        { status: 'REPLIED', at: now },
+        { status: 'FAILED', at: now },
+        { status: 'OPENED', at: now - 3 * DAY },
+        { status: 'SENT', at: now - 8 * DAY },
+      ].map(({ status, at }) =>
+        prisma.executionLog.create({
+          data: {
+            campaignId,
+            leadId,
+            mailboxId,
+            status: status as 'SENT',
+            createdAt: new Date(at),
+          },
+        }),
+      ),
+    );
+
+    try {
+      const after = await getSent();
+      expect(after).toHaveLength(7);
+      const day = (offset: number) => new Date(now - offset * DAY).toISOString().slice(0, 10);
+      expect(after.map((d) => d.day)).toEqual([6, 5, 4, 3, 2, 1, 0].map(day));
+      const gained = after.map((d, i) => d.count - before[i]!.count);
+      expect(gained).toEqual([0, 0, 0, 1, 0, 0, 2]);
+    } finally {
+      await prisma.executionLog.deleteMany({ where: { id: { in: created.map((c) => c.id) } } });
+    }
+  });
+
+  it("reports each mailbox's campaigns and two days either side of today", async () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    // Graduated a day ago: the ramp gives 5, 5, 6, 8, 9 across the five days.
+    await prisma.mailbox.update({
+      where: { id: mailboxId },
+      data: { warmupGraduatedAt: new Date(now - DAY) },
+    });
+    const archived = await prisma.campaign.create({
+      data: { name: 'Queue Old Campaign', status: 'ARCHIVED', aiPromptTemplate: '' },
+    });
+    await prisma.campaignMailbox.createMany({
+      data: [
+        { campaignId, mailboxId },
+        { campaignId: archived.id, mailboxId },
+      ],
+    });
+    const logs = await Promise.all(
+      [
+        { status: 'SENT', at: now },
+        { status: 'FAILED', at: now },
+        { status: 'REPLIED', at: now - DAY },
+      ].map(({ status, at }) =>
+        prisma.executionLog.create({
+          data: {
+            campaignId,
+            leadId,
+            mailboxId,
+            status: status as 'SENT',
+            createdAt: new Date(at),
+          },
+        }),
+      ),
+    );
+    const warmups = await Promise.all(
+      ['PENDING', 'FAILED'].map((placement) =>
+        prisma.warmupMessage.create({
+          data: {
+            senderMailboxId: mailboxId,
+            recipientEmail: 'partner@example.com',
+            subject: 'hi',
+            placement: placement as 'PENDING',
+            sentAt: new Date(now),
+          },
+        }),
+      ),
+    );
+    const jobId = `${leadId}-${mailboxId}-activity-${now}`;
+    await queue.add('dispatch', { leadId, mailboxId }, { jobId, delay: DAY });
+
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v1/queue/status',
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(response.statusCode).toBe(200);
+      const mine = response.json().mailboxes.find((m: { id: string }) => m.id === mailboxId);
+      expect(mine.campaigns).toEqual([
+        { id: campaignId, name: 'Queue Status Test Campaign', status: 'ACTIVE' },
+      ]);
+      const day = (offset: number) => new Date(now + offset * DAY).toISOString().slice(0, 10);
+      expect(mine.days).toEqual([
+        { day: day(-2), sent: 0, warmup: 0, queued: 0, cap: 5 },
+        { day: day(-1), sent: 1, warmup: 0, queued: 0, cap: 5 },
+        { day: day(0), sent: 1, warmup: 1, queued: 0, cap: 6 },
+        { day: day(1), sent: 0, warmup: 0, queued: 1, cap: 8 },
+        { day: day(2), sent: 0, warmup: 0, queued: 0, cap: 9 },
+      ]);
+    } finally {
+      await (await queue.getJob(jobId))?.remove();
+      await prisma.warmupMessage.deleteMany({ where: { id: { in: warmups.map((w) => w.id) } } });
+      await prisma.executionLog.deleteMany({ where: { id: { in: logs.map((l) => l.id) } } });
+      await prisma.campaignMailbox.deleteMany({ where: { mailboxId } });
+      await prisma.campaign.delete({ where: { id: archived.id } });
+      await prisma.mailbox.update({ where: { id: mailboxId }, data: { warmupGraduatedAt: null } });
+    }
+  });
+
+  it('lists pending jobs for one mailbox or one day, soonest first, with the match total', async () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const stamp = `${now}`;
+    const added = [
+      { id: `jobs-later-${stamp}`, mailbox: mailboxId, delay: 2 * DAY },
+      { id: `jobs-soon-${stamp}`, mailbox: mailboxId, delay: DAY },
+      { id: `jobs-other-${stamp}`, mailbox: 'some-other-mailbox', delay: DAY },
+    ];
+    for (const job of added) {
+      await queue.add(
+        'dispatch',
+        { leadId, mailboxId: job.mailbox },
+        { jobId: job.id, delay: job.delay },
+      );
+    }
+    const get = async (query: string) => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/queue/jobs?${query}`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json() as { total: number; jobs: { id: string; leadEmail: string }[] };
+    };
+
+    try {
+      const mine = await get(`mailboxId=${mailboxId}`);
+      expect(mine.total).toBe(2);
+      expect(mine.jobs.map((j) => j.id)).toEqual([`jobs-soon-${stamp}`, `jobs-later-${stamp}`]);
+      expect(mine.jobs[0]!.leadEmail).toBe(leadEmail);
+
+      const tomorrow = new Date(now + DAY).toISOString().slice(0, 10);
+      const due = await get(`day=${tomorrow}`);
+      const ids = due.jobs.map((j) => j.id);
+      expect(ids).toContain(`jobs-soon-${stamp}`);
+      expect(ids).toContain(`jobs-other-${stamp}`);
+      expect(ids).not.toContain(`jobs-later-${stamp}`);
+
+      const both = await get(`mailboxId=${mailboxId}&day=${tomorrow}`);
+      expect(both.jobs.map((j) => j.id)).toEqual([`jobs-soon-${stamp}`]);
+    } finally {
+      for (const job of added) await (await queue.getJob(job.id))?.remove();
     }
   });
 

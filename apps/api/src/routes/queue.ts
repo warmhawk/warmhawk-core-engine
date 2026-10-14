@@ -22,9 +22,10 @@
  */
 import type { FastifyInstance } from 'fastify';
 import IORedis from 'ioredis';
-import { Queue } from 'bullmq';
+import { Queue, type Job } from 'bullmq';
 import { prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
+import { campaignCapToday } from '../lib/warmup/policy';
 
 // MUST match apps/worker/src/queue.ts's DISPATCH_QUEUE_NAME.
 const DISPATCH_QUEUE_NAME = 'warmhawk-dispatch';
@@ -39,10 +40,137 @@ const CADENCE_FLOOR_SECONDS = 8 * 60;
 // the cadence floor) — reported as a single representative figure for the dashboard's "±Ns"
 // throttling display, not a precise per-send guarantee.
 const JITTER_BAND_SECONDS = 240;
+// The real gap between two sends from one mailbox, with no send window: the floor, plus
+// 240-480s of jitter, plus ±90s of noise — all from computeNextSlotSeconds.ts. The jitter only
+// ever adds, so the shortest gap is 630s, not the floor.
+const MIN_GAP_SECONDS = CADENCE_FLOOR_SECONDS + 240 - 90;
+const MAX_GAP_SECONDS = CADENCE_FLOOR_SECONDS + 480 + 90;
 
 const JOB_STATES = ['waiting', 'active', 'delayed', 'completed', 'failed'] as const;
 type DispatchJobState = (typeof JOB_STATES)[number];
 const MAX_LISTED_JOBS = 50;
+// Days of send history the Live Queue chart shows before today.
+const SENT_HISTORY_DAYS = 6;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Sends per UTC day for the SENT_HISTORY_DAYS days before today plus today, oldest first, every
+ * day present even at 0. A send's execution log starts SENT and may move on to OPENED, REPLIED or
+ * BOUNCED, so all four count (the worker's rollingSends.ts uses the same set); FAILED never left.
+ * `createdAt` is a UTC timestamp without a zone, so its date part is the UTC day.
+ */
+export async function sentByDay(now: Date): Promise<{ day: string; count: number }[]> {
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const days = Array.from({ length: SENT_HISTORY_DAYS + 1 }, (_, i) =>
+    new Date(today - (SENT_HISTORY_DAYS - i) * DAY_MS).toISOString().slice(0, 10),
+  );
+  const rows = await prisma.$queryRaw<{ day: string; count: number }[]>`
+    SELECT to_char("createdAt", 'YYYY-MM-DD') AS day, count(*)::int AS count
+    FROM "execution_logs"
+    WHERE "status" IN ('SENT', 'OPENED', 'REPLIED', 'BOUNCED')
+      AND "createdAt" >= ${new Date(today - SENT_HISTORY_DAYS * DAY_MS)}
+    GROUP BY 1`;
+  const byDay = new Map(rows.map((row) => [row.day, row.count]));
+  return days.map((day) => ({ day, count: byDay.get(day) ?? 0 }));
+}
+
+// Days either side of today the Live Queue's per-mailbox table shows.
+const MAILBOX_DAYS_EACH_SIDE = 2;
+// Campaigns listed live ones first; archived ones aren't listed.
+const CAMPAIGN_STATUS_ORDER = ['ACTIVE', 'PAUSED', 'DRAFT', 'COMPLETED'];
+
+export interface MailboxDay {
+  day: string;
+  /** Campaign emails that left (same statuses as sentByDay). */
+  sent: number;
+  /** Warmup emails that left — they don't count against the campaign cap. */
+  warmup: number;
+  /** Dispatch jobs due that day; overdue ones count toward today. */
+  queued: number;
+  /** Campaign cap for that day, including the post-graduation ramp. */
+  cap: number;
+}
+
+export interface MailboxActivity {
+  id: string;
+  campaigns: { id: string; name: string; status: string }[];
+  days: MailboxDay[];
+}
+
+/**
+ * Per mailbox: its campaigns, and the MAILBOX_DAYS_EACH_SIDE UTC days either side of today with
+ * sends, warmup sends, queued jobs and that day's cap. Past caps apply today's dailyCap to the
+ * ramp — cap edits aren't kept, so a day before an edit shows the new cap.
+ */
+export async function mailboxActivity(
+  now: Date,
+  dueJobs: { mailboxId: string; dueAtMs: number }[],
+): Promise<MailboxActivity[]> {
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  const offsets = Array.from(
+    { length: MAILBOX_DAYS_EACH_SIDE * 2 + 1 },
+    (_, i) => i - MAILBOX_DAYS_EACH_SIDE,
+  );
+  const days = offsets.map((o) => new Date(today + o * DAY_MS).toISOString().slice(0, 10));
+  const since = new Date(today - MAILBOX_DAYS_EACH_SIDE * DAY_MS);
+
+  type Row = { mailboxId: string; day: string; count: number };
+  const [mailboxes, sentRows, warmupRows] = await Promise.all([
+    prisma.mailbox.findMany({
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true,
+        dailyCap: true,
+        warmupGraduatedAt: true,
+        campaignLinks: { select: { campaign: { select: { id: true, name: true, status: true } } } },
+      },
+    }),
+    prisma.$queryRaw<Row[]>`
+      SELECT "mailboxId", to_char("createdAt", 'YYYY-MM-DD') AS day, count(*)::int AS count
+      FROM "execution_logs"
+      WHERE "status" IN ('SENT', 'OPENED', 'REPLIED', 'BOUNCED')
+        AND "mailboxId" IS NOT NULL AND "createdAt" >= ${since}
+      GROUP BY 1, 2`,
+    prisma.$queryRaw<Row[]>`
+      SELECT "senderMailboxId" AS "mailboxId", to_char("sentAt", 'YYYY-MM-DD') AS day,
+        count(*)::int AS count
+      FROM "warmup_messages"
+      WHERE "placement" <> 'FAILED' AND "sentAt" >= ${since}
+      GROUP BY 1, 2`,
+  ]);
+
+  const key = (mailboxId: string, day: string) => `${mailboxId}|${day}`;
+  const sent = new Map(sentRows.map((r) => [key(r.mailboxId, r.day), r.count]));
+  const warmup = new Map(warmupRows.map((r) => [key(r.mailboxId, r.day), r.count]));
+  const queued = new Map<string, number>();
+  for (const job of dueJobs) {
+    const day = new Date(Math.max(job.dueAtMs, today)).toISOString().slice(0, 10);
+    queued.set(key(job.mailboxId, day), (queued.get(key(job.mailboxId, day)) ?? 0) + 1);
+  }
+
+  return mailboxes.map((m) => ({
+    id: m.id,
+    campaigns: m.campaignLinks
+      .map((link) => link.campaign)
+      .filter((c) => CAMPAIGN_STATUS_ORDER.includes(c.status))
+      .sort(
+        (a, b) =>
+          CAMPAIGN_STATUS_ORDER.indexOf(a.status) - CAMPAIGN_STATUS_ORDER.indexOf(b.status) ||
+          a.name.localeCompare(b.name),
+      ),
+    days: days.map((day, i) => ({
+      day,
+      sent: sent.get(key(m.id, day)) ?? 0,
+      warmup: warmup.get(key(m.id, day)) ?? 0,
+      queued: offsets[i]! < 0 ? 0 : (queued.get(key(m.id, day)) ?? 0),
+      cap: campaignCapToday(
+        m.dailyCap,
+        m.warmupGraduatedAt,
+        new Date(now.getTime() + offsets[i]! * DAY_MS),
+      ),
+    })),
+  }));
+}
 
 let sharedQueue: Queue | null = null;
 
@@ -80,68 +208,122 @@ function dispatchQueue(): Queue {
   return sharedQueue;
 }
 
+/** When a dispatch job is due: added at `timestamp`, held back by `delay`. */
+function dueAtMs(job: Job): number {
+  return job.timestamp + (job.opts?.delay ?? 0);
+}
+
+/**
+ * The dashboard's view of dispatch jobs: lead, mailbox and campaign names instead of ids. System
+ * jobs (the repeatable `daily-reset` cron) carry no leadId/mailboxId and would render as a phantom
+ * "unknown / unknown / unknown" row, so callers filter them out with SYSTEM_JOB_NAMES first.
+ */
+async function summarizeJobs(jobs: Job[]) {
+  const leadIds = jobs.map((job) => job.data?.leadId).filter((id): id is string => Boolean(id));
+  const mailboxIds = jobs
+    .map((job) => job.data?.mailboxId)
+    .filter((id): id is string => Boolean(id));
+
+  const [leads, mailboxes] = await Promise.all([
+    leadIds.length
+      ? prisma.lead.findMany({ where: { id: { in: leadIds } }, include: { campaign: true } })
+      : Promise.resolve([]),
+    mailboxIds.length
+      ? prisma.mailbox.findMany({ where: { id: { in: mailboxIds } } })
+      : Promise.resolve([]),
+  ]);
+  const leadById = new Map(leads.map((lead) => [lead.id, lead]));
+  const mailboxById = new Map(mailboxes.map((mailbox) => [mailbox.id, mailbox]));
+
+  return Promise.all(
+    jobs.map(async (job) => {
+      const state = (await job.getState()) as DispatchJobState;
+      const lead = leadById.get(job.data?.leadId);
+      const mailbox = mailboxById.get(job.data?.mailboxId);
+      return {
+        id: job.id ?? `${job.data?.leadId}:${job.data?.mailboxId}`,
+        state,
+        mailboxEmail: mailbox?.email ?? 'unknown',
+        leadEmail: lead?.email ?? 'unknown',
+        campaignName: lead?.campaign?.name ?? 'unknown',
+        scheduledFor: new Date(dueAtMs(job)).toISOString(),
+        attemptsMade: job.attemptsMade ?? 0,
+        // For the Live Queue panel's email preview. `step` is what this job sends: 0 = the first
+        // email, N = follow-up N — the same `stepsSent` the processor reads.
+        leadId: lead?.id ?? null,
+        campaignId: lead?.campaignId ?? null,
+        step: lead?.stepsSent ?? null,
+      };
+    }),
+  );
+}
+
 export async function queueRoutes(app: FastifyInstance): Promise<void> {
   app.addHook('preHandler', requireAuth);
 
   app.get('/status', async () => {
     const queue = dispatchQueue();
 
-    const [rawCounts, isPaused] = await Promise.all([
+    const [rawCounts, isPaused, sent] = await Promise.all([
       queue.getJobCounts(...JOB_STATES),
       queue.isPaused(),
+      sentByDay(new Date()),
     ]);
     const counts = Object.fromEntries(
       JOB_STATES.map((state) => [state, rawCounts[state] ?? 0]),
     ) as Record<DispatchJobState, number>;
 
-    const rawJobs = await queue.getJobs(['waiting', 'active', 'delayed'], 0, MAX_LISTED_JOBS - 1);
-    // Exclude system/internal jobs (the repeatable `daily-reset` cron) from the dashboard's job
-    // list — they carry no leadId/mailboxId and would otherwise render as a phantom
-    // "unknown / unknown / unknown" row. Filtered here, at summary-building time, not in the UI.
-    const jobs = rawJobs.filter((job) => !SYSTEM_JOB_NAMES.has(job.name));
+    // Every pending job, for the per-mailbox queued counts; the list below shows the first 50.
+    const allJobs = await queue.getJobs(['waiting', 'active', 'delayed']);
+    const activity = await mailboxActivity(
+      new Date(),
+      allJobs
+        .filter((job) => job.data?.mailboxId)
+        .map((job) => ({
+          mailboxId: job.data.mailboxId as string,
+          dueAtMs: dueAtMs(job),
+        })),
+    );
 
-    const leadIds = jobs.map((job) => job.data?.leadId).filter((id): id is string => Boolean(id));
-    const mailboxIds = jobs
-      .map((job) => job.data?.mailboxId)
-      .filter((id): id is string => Boolean(id));
-
-    const [leads, mailboxes] = await Promise.all([
-      leadIds.length
-        ? prisma.lead.findMany({ where: { id: { in: leadIds } }, include: { campaign: true } })
-        : Promise.resolve([]),
-      mailboxIds.length
-        ? prisma.mailbox.findMany({ where: { id: { in: mailboxIds } } })
-        : Promise.resolve([]),
-    ]);
-    const leadById = new Map(leads.map((lead) => [lead.id, lead]));
-    const mailboxById = new Map(mailboxes.map((mailbox) => [mailbox.id, mailbox]));
-
-    const jobSummaries = await Promise.all(
-      jobs.map(async (job) => {
-        const state = (await job.getState()) as DispatchJobState;
-        const lead = leadById.get(job.data?.leadId);
-        const mailbox = mailboxById.get(job.data?.mailboxId);
-        const scheduledForMs = job.timestamp + (job.opts?.delay ?? 0);
-        return {
-          id: job.id ?? `${job.data?.leadId}:${job.data?.mailboxId}`,
-          state,
-          mailboxEmail: mailbox?.email ?? 'unknown',
-          leadEmail: lead?.email ?? 'unknown',
-          campaignName: lead?.campaign?.name ?? 'unknown',
-          scheduledFor: new Date(scheduledForMs).toISOString(),
-          attemptsMade: job.attemptsMade ?? 0,
-        };
-      }),
+    const jobSummaries = await summarizeJobs(
+      allJobs.slice(0, MAX_LISTED_JOBS).filter((job) => !SYSTEM_JOB_NAMES.has(job.name)),
     );
 
     return {
       counts,
       isPaused,
       jobs: jobSummaries,
+      sentByDay: sent,
+      mailboxes: activity,
       throttling: {
         cadenceFloorSeconds: CADENCE_FLOOR_SECONDS,
         jitterSeconds: JITTER_BAND_SECONDS,
+        minGapSeconds: MIN_GAP_SECONDS,
+        maxGapSeconds: MAX_GAP_SECONDS,
       },
+    };
+  });
+
+  /**
+   * Pending dispatch jobs for the Live Queue's side panel, soonest first, up to MAX_LISTED_JOBS
+   * with the full match count in `total`. `mailboxId` narrows to one mailbox; `day` (UTC
+   * "YYYY-MM-DD") to the jobs due that day, overdue ones counting toward today as on the chart.
+   */
+  app.get<{ Querystring: { mailboxId?: string; day?: string } }>('/jobs', async (request) => {
+    const { mailboxId, day } = request.query;
+    const now = new Date();
+    const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+    const all = await dispatchQueue().getJobs(['waiting', 'active', 'delayed']);
+    const matching = all
+      .filter((job) => !SYSTEM_JOB_NAMES.has(job.name))
+      .filter((job) => !mailboxId || job.data?.mailboxId === mailboxId)
+      .filter(
+        (job) => !day || new Date(Math.max(dueAtMs(job), today)).toISOString().slice(0, 10) === day,
+      )
+      .sort((a, b) => dueAtMs(a) - dueAtMs(b));
+    return {
+      total: matching.length,
+      jobs: await summarizeJobs(matching.slice(0, MAX_LISTED_JOBS)),
     };
   });
 
