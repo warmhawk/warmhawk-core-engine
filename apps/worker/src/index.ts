@@ -10,7 +10,7 @@ import { startOtel, shutdownOtel } from './otel';
 startOtel(); // must run before bullmq/ioredis are imported below, for auto-instrumentation to patch them
 import { Worker } from 'bullmq';
 import { prisma } from '@warmhawk/db';
-import { addressCheckConfig } from './addressCheck';
+import { currentAddressCheckConfig } from './addressCheckName';
 import { precheckUpcomingLeads } from './addressRisk';
 import { runEnqueuerTick } from './enqueuer';
 import { reconcileStuckLeads } from './reconcile';
@@ -51,12 +51,13 @@ async function main() {
 
   // Address look-ahead: checks the next few leads before their turn (`addressRisk.ts`). Only with
   // the address check on, and one pass at a time: a slow mail server can hold a pass for a while.
-  const addressCheck = addressCheckConfig();
+  // Its name is looked up each pass, since a server name can be confirmed (or fail) while running.
   let precheckRunning = false;
   const precheckInterval = setInterval(() => {
-    if (!addressCheck || precheckRunning) return;
+    if (precheckRunning) return;
     precheckRunning = true;
-    precheckUpcomingLeads(connection, addressCheck)
+    currentAddressCheckConfig()
+      .then((addressCheck) => addressCheck && precheckUpcomingLeads(connection, addressCheck))
       .catch((err) => {
         console.error('[worker] address look-ahead failed:', err);
       })

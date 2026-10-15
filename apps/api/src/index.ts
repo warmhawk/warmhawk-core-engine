@@ -8,6 +8,7 @@ import { startOtel, shutdownOtel } from './otel';
 startOtel(); // must run before `./app` (and everything it imports) for auto-instrumentation to patch them
 import { createApp } from './app';
 import { prisma } from '@warmhawk/db';
+import { refreshServerName } from './lib/serverName';
 
 const port = Number(process.env.PORT) || 4600;
 const host = process.env.HOST || '0.0.0.0';
@@ -17,6 +18,13 @@ async function main() {
 
   await app.listen({ port, host });
   app.log.info(`[api] listening on ${host}:${port}`);
+
+  // A changed MAIL_SERVER_NAME is checked as soon as the API is back, not on first use.
+  refreshServerName()
+    .then((state) => {
+      if (state.name) app.log.info(`[api] server name ${state.name}: ${state.status}`);
+    })
+    .catch((err) => app.log.error(err, '[api] server name check failed'));
 
   let shuttingDown = false;
   async function shutdown(signal: string) {

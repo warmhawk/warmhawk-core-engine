@@ -670,6 +670,13 @@ model InstanceSettings {
   /// never returned by any GET.
   connectLicenseEncrypted String?
   connectRelayBaseUrl     String?
+  /// The server name (`MAIL_SERVER_NAME`) last checked and its result: PASS once each of its
+  /// addresses has reverse DNS naming it back (apps/api/src/lib/serverName.ts). A result for a
+  /// different name than the one configured now counts as not checked.
+  serverName              String?
+  serverNameStatus        DnsRecordStatus @default(PENDING)
+  serverNameError         String?
+  serverNameCheckedAt     DateTime?
   updatedAt              DateTime @updatedAt
 
   @@map("instance_settings")

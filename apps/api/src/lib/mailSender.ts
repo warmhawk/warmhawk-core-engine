@@ -36,7 +36,8 @@ import {
   resolveUnsubscribeUrl,
 } from './sendCompliance';
 import { hostedUnsubscribeUrl } from './unsubscribeToken';
-import { LINK_DOMAIN_SELECT, linkHostFor } from './linkDomain';
+import { LINK_DOMAIN_SELECT } from './linkDomain';
+import { ehloNameFor } from './serverName';
 import { isEmailSuppressed } from './leadIngest';
 import { pickSeedBccSample, subjectSha256 } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
@@ -467,8 +468,9 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
       // The name sent in EHLO. Left unset, nodemailer falls back to "[127.0.0.1]" inside a
       // container, and the receiving server stamps that into the Received header, where it
       // reads like a bot. The sending domain's checked link domain keeps the header to that
-      // brand's own name; without one, the install's own public domain is the honest name.
-      const clientName = linkHostFor(mailbox.domain);
+      // brand's own name; without one, the server name whose reverse DNS matches (serverName.ts),
+      // else the install's own public domain.
+      const clientName = await ehloNameFor(mailbox.domain);
       transporter = nodemailer.createTransport({
         host: mailbox.smtpHost,
         port: mailbox.smtpPort,
