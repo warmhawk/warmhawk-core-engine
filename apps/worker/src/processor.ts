@@ -9,7 +9,8 @@
 import type { Job } from 'bullmq';
 import type IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
-import { addressCheckConfig, checkAddress } from './addressCheck';
+import { addressCheckConfig, checkAddress, junkAddressReason } from './addressCheck';
+import { cachedVerdict, rememberVerdict, takeUnknownRetry, unknownRetryAt } from './addressRisk';
 import { campaignCapToday } from './campaignCap';
 import { hasMailingAddress } from './enqueuer';
 import { mailboxReservationKey } from './queue';
@@ -19,7 +20,8 @@ import { leadWindowState, SEND_SETTINGS_SELECT } from './sendWindow';
 let reservationRedis: IORedis | null = null;
 
 /** Gives the processor the Redis holding each mailbox's booked slot, so a dead address can hand
- *  its slot back. Set once by the worker bootstrap; without it the slot just runs out as before. */
+ *  its slot back, and the saved address checks (`addressRisk.ts`). Set once by the worker
+ *  bootstrap; without it the slot just runs out as before and every address is asked fresh. */
 export function setReservationRedis(redis: IORedis | null): void {
   reservationRedis = redis;
 }
@@ -44,6 +46,15 @@ async function freeSlot(mailboxId: string, slotAt: Date | null): Promise<void> {
     // Harmless: the reservation runs out on its own, a few minutes later.
     console.warn(`[worker] couldn't free mailbox ${mailboxId}'s slot:`, err);
   }
+}
+
+/** Puts a first email whose recipient's server said "not now" back in line, to be asked again
+ *  at `retryAt`. It keeps its place: the enqueuer re-picks QUEUED leads once `nextRetryAt` passes. */
+async function askAgainLater(leadId: string, retryAt: Date): Promise<void> {
+  await prisma.lead.updateMany({
+    where: { id: leadId, status: 'QUEUED' },
+    data: { queuedJobId: null, queuedSlotAt: null, nextRetryAt: retryAt },
+  });
 }
 
 export interface DispatchJobData {
@@ -158,11 +169,37 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
 
   // A first email only: a follow-up's address already took one. Checked here, before n8n writes
   // the email, so a dead address costs no AI call either.
+  if (!followUp) {
+    // A placeholder address (name@yoursite.com) is no one's, check or no check.
+    const junk = junkAddressReason(lead.email);
+    if (junk) {
+      await stopDeadAddress(lead.id, lead.campaignId, mailboxId, junk);
+      await freeSlot(mailboxId, lead.queuedSlotAt);
+      return;
+    }
+  }
   const addressCheck = addressCheckConfig();
   if (!followUp && addressCheck) {
-    const check = await checkAddress(lead.email, addressCheck);
+    // The look-ahead check (`precheckUpcomingLeads`) usually answered already.
+    const saved = reservationRedis ? await cachedVerdict(reservationRedis, lead.id) : null;
+    const check = saved ?? (await checkAddress(lead.email, addressCheck));
+    if (!saved && reservationRedis) {
+      await rememberVerdict(reservationRedis, lead.id, lead.email, check);
+    }
     if (check.verdict === 'invalid') {
       await stopDeadAddress(lead.id, lead.campaignId, mailboxId, check.detail);
+      await freeSlot(mailboxId, lead.queuedSlotAt);
+      return;
+    }
+    // Greylisting: the server answers "not now" to a sender it hasn't seen. Asked again 30-60
+    // minutes later it usually gives a clear answer. After the last try the lead is sent.
+    if (
+      check.verdict === 'unknown' &&
+      check.retryable &&
+      reservationRedis &&
+      (await takeUnknownRetry(reservationRedis, lead.id))
+    ) {
+      await askAgainLater(lead.id, unknownRetryAt(now));
       await freeSlot(mailboxId, lead.queuedSlotAt);
       return;
     }

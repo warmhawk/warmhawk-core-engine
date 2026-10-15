@@ -20,6 +20,9 @@ export interface AddressCheckResult {
   verdict: AddressVerdict;
   /** One plain sentence on why, for the activity log. */
   detail: string;
+  /** An `unknown` from a server that said "not now" (a 4xx, often greylisting), which a later
+   *  try usually answers. */
+  retryable?: boolean;
 }
 
 export interface AddressCheckConfig {
@@ -42,6 +45,55 @@ export interface SmtpReply {
 const DEFAULT_TIMEOUT_MS = 20_000;
 /** A domain with more mail hosts than this is asked on its first two only. */
 const MAX_HOSTS_TRIED = 2;
+
+/** Placeholder domains from templates and scraped pages. No real person's address is on one,
+ *  even when its server takes every address. */
+const JUNK_DOMAINS = new Set([
+  'example.com',
+  'example.org',
+  'example.net',
+  'domain.com',
+  'yourdomain.com',
+  'mydomain.com',
+  'yoursite.com',
+  'mysite.com',
+  'yourwebsite.com',
+  'website.com',
+  'yourcompany.com',
+  'company.com',
+  'email.tld',
+  'sentry.io',
+  'sentry.wixpress.com',
+  'sentry-next.wixpress.com',
+]);
+/** Reserved names (RFC 2606) and image file names scraped as addresses ("logo@2x.png"). */
+const JUNK_TLDS = new Set([
+  'example',
+  'test',
+  'invalid',
+  'localhost',
+  'png',
+  'jpg',
+  'jpeg',
+  'gif',
+  'webp',
+  'svg',
+]);
+
+/** Why an address can't be anyone's, without asking any server, or null when it might be. */
+export function junkAddressReason(email: string): string | null {
+  const at = email.lastIndexOf('@');
+  const domain = email
+    .slice(at + 1)
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, '');
+  if (at <= 0 || !domain.includes('.')) return `${email} isn't a complete email address`;
+  if (JUNK_DOMAINS.has(domain) || JUNK_TLDS.has(domain.slice(domain.lastIndexOf('.') + 1))) {
+    return `${domain} is a placeholder domain, not a real person's address`;
+  }
+  return null;
+}
 
 export function addressCheckConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -104,7 +156,11 @@ export function classifyRcpt(real: SmtpReply, madeUp: SmtpReply | null): Address
       detail: `the recipient's mail server says this address doesn't exist (${said})`,
     };
   }
-  return { verdict: 'unknown', detail: `the mail server gave no clear answer (${said})` };
+  return {
+    verdict: 'unknown',
+    detail: `the mail server gave no clear answer (${said})`,
+    retryable: real.code >= 400 && real.code < 500,
+  };
 }
 
 /** Reads SMTP replies off a socket, joining multi-line ones ("250-…" up to "250 …"). */
@@ -212,5 +268,11 @@ export async function checkAddress(
       lastError = err instanceof Error ? err.message : String(err);
     }
   }
-  return { verdict: 'unknown', detail: `couldn't ask ${domain}'s mail server (${lastError})` };
+  return {
+    verdict: 'unknown',
+    detail: `couldn't ask ${domain}'s mail server (${lastError})`,
+    // A server that answered "not now" before RCPT; a timeout or a refused connection isn't
+    // retried, or a blocked port 25 would hold every lead.
+    retryable: /refused [^:]+: 4\d\d\b/.test(lastError),
+  };
 }

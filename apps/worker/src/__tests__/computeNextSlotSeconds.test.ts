@@ -26,6 +26,16 @@ describe('computeNextSlotSeconds — cadence/jitter math', () => {
     }
   });
 
+  it('doubles the floor and jitter at half pace', () => {
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    const lastSentAt = new Date(now.getTime() - 60 * 1000);
+    for (let i = 0; i < 50; i++) {
+      const delay = computeNextSlotSeconds(lastSentAt, now, null, 0, 2);
+      // 16-minute floor less the minute gone, plus jitter of at least 480s less 90s of noise.
+      expect(delay).toBeGreaterThanOrEqual(15 * 60 + 390 - 1);
+    }
+  });
+
   it('never returns less than the 30-second absolute floor', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0); // minimizes jitter/noise contribution
     const now = new Date('2026-01-01T00:00:00.000Z');

@@ -17,15 +17,18 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
-import { checkAddress } from '../addressCheck';
+import { checkAddress, junkAddressReason } from '../addressCheck';
+import { rememberVerdict } from '../addressRisk';
 import { processDispatchJob, setReservationRedis } from '../processor';
 import { mailboxReservationKey } from '../queue';
 
 // The address check's SMTP conversation is covered in addressCheck.test.ts; here only its verdict
-// matters. Off (ADDRESS_CHECK_HELO unset) for every case but the one that sets it.
+// matters. Off (ADDRESS_CHECK_HELO unset) for every case but the one that sets it. The junk check
+// would stop these `.example` leads, so it says "fine" unless a case says otherwise.
 vi.mock('../addressCheck', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../addressCheck')>()),
   checkAddress: vi.fn(),
+  junkAddressReason: vi.fn(() => null),
 }));
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
@@ -230,6 +233,86 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
     } finally {
       vi.unstubAllEnvs();
       vi.mocked(checkAddress).mockReset();
+    }
+  });
+
+  it('stops a placeholder address without the check, as FAILED', async () => {
+    vi.mocked(junkAddressReason).mockReturnValueOnce(
+      "yoursite.com is a placeholder domain, not a real person's address",
+    );
+    const lead = await createQueuedLead('name@processor-test.example');
+
+    await expect(processDispatchJob({ leadId: lead.id, mailboxId })).resolves.toBeUndefined();
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(checkAddress).not.toHaveBeenCalled();
+    const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
+    expect(updated.status).toBe('FAILED');
+    const logs = await prisma.executionLog.findMany({ where: { leadId: lead.id } });
+    expect(logs[0].errorMessage).toMatch(/^Not sent: yoursite\.com is a placeholder domain/);
+  });
+
+  itWithRedis('asks a greylisting server again later, then sends after the last try', async () => {
+    const redis = new IORedis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
+    setReservationRedis(redis);
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    vi.mocked(checkAddress).mockResolvedValue({
+      verdict: 'unknown',
+      detail: 'the mail server gave no clear answer (450 4.2.0 greylisted)',
+      retryable: true,
+    });
+    const lead = await createQueuedLead('greylist@processor-test.example');
+    try {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const before = Date.now();
+        await processDispatchJob({ leadId: lead.id, mailboxId });
+        const waiting = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
+        expect(waiting.status).toBe('QUEUED');
+        expect(waiting.queuedJobId).toBeNull();
+        const waitMs = waiting.nextRetryAt!.getTime() - before;
+        expect(waitMs).toBeGreaterThanOrEqual(30 * 60_000);
+        expect(waitMs).toBeLessThanOrEqual(60 * 60_000 + 5_000);
+        await prisma.lead.update({
+          where: { id: lead.id },
+          data: { queuedJobId: `retry-${attempt}`, queuedSlotAt: new Date() },
+        });
+      }
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      // Out of tries: sent, not held.
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'sent', leadId: lead.id }));
+      await processDispatchJob({ leadId: lead.id, mailboxId });
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      await redis.del(`addresscheck:tries:${lead.id}`, `addresscheck:verdict:${lead.id}`);
+      setReservationRedis(null);
+      await redis.quit();
+      vi.unstubAllEnvs();
+      vi.mocked(checkAddress).mockReset();
+    }
+  });
+
+  itWithRedis('uses the look-ahead check’s verdict instead of asking again', async () => {
+    const redis = new IORedis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
+    setReservationRedis(redis);
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    const lead = await createQueuedLead('checked@processor-test.example');
+    try {
+      await rememberVerdict(redis, lead.id, lead.email, {
+        verdict: 'valid',
+        detail: 'the mail server accepts this address',
+      });
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'sent', leadId: lead.id }));
+
+      await processDispatchJob({ leadId: lead.id, mailboxId });
+
+      expect(checkAddress).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    } finally {
+      await redis.del(`addresscheck:verdict:${lead.id}`);
+      setReservationRedis(null);
+      await redis.quit();
+      vi.unstubAllEnvs();
     }
   });
 
