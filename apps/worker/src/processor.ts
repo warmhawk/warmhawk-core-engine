@@ -7,12 +7,44 @@
  * this process speaks is the optional pre-send address check (`addressCheck.ts`), which never sends.
  */
 import type { Job } from 'bullmq';
+import type IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
 import { addressCheckConfig, checkAddress } from './addressCheck';
 import { campaignCapToday } from './campaignCap';
 import { hasMailingAddress } from './enqueuer';
+import { mailboxReservationKey } from './queue';
 import { recentSendCount, syncSentToday } from './rollingSends';
 import { leadWindowState, SEND_SETTINGS_SELECT } from './sendWindow';
+
+let reservationRedis: IORedis | null = null;
+
+/** Gives the processor the Redis holding each mailbox's booked slot, so a dead address can hand
+ *  its slot back. Set once by the worker bootstrap; without it the slot just runs out as before. */
+export function setReservationRedis(redis: IORedis | null): void {
+  reservationRedis = redis;
+}
+
+// Deletes the reservation only while it still holds this slot: if the enqueuer has already booked
+// the mailbox's next one during the check, that booking stays.
+const FREE_SLOT_SCRIPT =
+  "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
+
+/** Hands a dead address's slot back, so the enqueuer books the mailbox's next lead on its next
+ *  tick, timed from the mailbox's last real send rather than from a send that never happened. */
+async function freeSlot(mailboxId: string, slotAt: Date | null): Promise<void> {
+  if (!reservationRedis || !slotAt) return;
+  try {
+    await reservationRedis.eval(
+      FREE_SLOT_SCRIPT,
+      1,
+      mailboxReservationKey(mailboxId),
+      String(slotAt.getTime()),
+    );
+  } catch (err) {
+    // Harmless: the reservation runs out on its own, a few minutes later.
+    console.warn(`[worker] couldn't free mailbox ${mailboxId}'s slot:`, err);
+  }
+}
 
 export interface DispatchJobData {
   leadId: string;
@@ -131,6 +163,7 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
     const check = await checkAddress(lead.email, addressCheck);
     if (check.verdict === 'invalid') {
       await stopDeadAddress(lead.id, lead.campaignId, mailboxId, check.detail);
+      await freeSlot(mailboxId, lead.queuedSlotAt);
       return;
     }
   }

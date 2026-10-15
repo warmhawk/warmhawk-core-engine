@@ -15,9 +15,11 @@
  * (vitest.integration.config.ts). Skipped automatically if DATABASE_URL isn't set.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
 import { checkAddress } from '../addressCheck';
-import { processDispatchJob } from '../processor';
+import { processDispatchJob, setReservationRedis } from '../processor';
+import { mailboxReservationKey } from '../queue';
 
 // The address check's SMTP conversation is covered in addressCheck.test.ts; here only its verdict
 // matters. Off (ADDRESS_CHECK_HELO unset) for every case but the one that sets it.
@@ -28,6 +30,7 @@ vi.mock('../addressCheck', async (importOriginal) => ({
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
+const itWithRedis = process.env.REDIS_URL ? it : it.skip;
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -181,6 +184,33 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
       expect(logs[0]).toMatchObject({ status: 'FAILED', mailboxId });
       expect(logs[0].errorMessage).toMatch(/^Not sent: .*5\.1\.1.*nothing went out\.$/);
     } finally {
+      vi.unstubAllEnvs();
+      vi.mocked(checkAddress).mockReset();
+    }
+  });
+
+  itWithRedis('hands a dead address’s slot back, but keeps a booking made since', async () => {
+    const redis = new IORedis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
+    setReservationRedis(redis);
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    vi.mocked(checkAddress).mockResolvedValue({ verdict: 'invalid', detail: '550 5.1.1' });
+    const key = mailboxReservationKey(mailboxId);
+    try {
+      const dead = await createQueuedLead('dead-slot@processor-test.example');
+      await redis.set(key, String(dead.queuedSlotAt!.getTime()), 'EX', 600);
+      await processDispatchJob({ leadId: dead.id, mailboxId });
+      expect(await redis.get(key)).toBeNull();
+
+      // The enqueuer booked the mailbox's next slot while this one was being checked.
+      const raced = await createQueuedLead('dead-raced@processor-test.example');
+      const nextSlot = String(raced.queuedSlotAt!.getTime() + 300_000);
+      await redis.set(key, nextSlot, 'EX', 600);
+      await processDispatchJob({ leadId: raced.id, mailboxId });
+      expect(await redis.get(key)).toBe(nextSlot);
+    } finally {
+      await redis.del(key);
+      setReservationRedis(null);
+      await redis.quit();
       vi.unstubAllEnvs();
       vi.mocked(checkAddress).mockReset();
     }
