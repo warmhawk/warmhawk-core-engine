@@ -23,4 +23,16 @@ describe('nginx.conf.template', () => {
     expect(nginx.match(/^#?\s*location \/unsubscribe\/ \{$/gm)).toHaveLength(3);
     expect(nginx.match(/^ {4}location \/unsubscribe\/ \{$/gm)).toHaveLength(1);
   });
+
+  // A brand's link host (`warmhawk link-domain add`) must never expose the API or the dashboard:
+  // the server blocks scripts/warmhawk writes proxy /unsubscribe/ and nothing else.
+  it('loads link-domain blocks, and those proxy /unsubscribe/ only', () => {
+    const root = resolve(__dirname, '../../../../..');
+    const nginx = readFileSync(resolve(root, 'nginx/nginx.conf.template'), 'utf8');
+    expect(nginx).toMatch(/^include \/etc\/nginx\/link-domains\/\*\.conf;$/m);
+    const cli = readFileSync(resolve(root, 'scripts/warmhawk'), 'utf8');
+    const proxied = [...cli.matchAll(/location (\S+) \{ proxy_pass/g)].map((m) => m[1]);
+    expect(proxied).toEqual(['/unsubscribe/']);
+    expect(cli).toContain('location / { return 404; }');
+  });
 });

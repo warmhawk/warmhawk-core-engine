@@ -21,6 +21,11 @@
 # see that function's own comment for why `restart`, not `reload`, is required here).
 # Renewal is a separate `certbot renew` loop container (docker-compose.yml's `certbot` service).
 
+# Link domains (`warmhawk link-domain add <host>`): one file per host, written by scripts/warmhawk
+# into nginx/link-domains/ and mounted here. Each serves /unsubscribe/ only, so a brand's link host
+# never exposes the API. Plain files, not templates, so adding one needs a reload, not a restart.
+include /etc/nginx/link-domains/*.conf;
+
 server {
     listen 80;
     server_name ${WARMHAWK_DOMAIN};

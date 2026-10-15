@@ -12,12 +12,16 @@
  * client brands each send their own. Adding a domain never needs one — only launching a campaign
  * that sends from it does (`lib/sendingReadiness.ts`). Clearing an address that live or draft
  * campaigns rely on needs `confirm: true`, since their sends from this domain stop.
+ *
+ * Link domain (10-15-26): a host on the brand's own zone for the unsubscribe link and EHLO name,
+ * used once its check passes — see `lib/linkDomain.ts`.
  */
 import type { FastifyInstance } from 'fastify';
 import { Prisma, prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { normalizeDkimSelector } from '../lib/dnsChecks';
-import { runDomainCheck } from '../lib/domainCheck';
+import { linkDomainUpdate, runDomainCheck } from '../lib/domainCheck';
+import { checkLinkDomain, normalizeLinkDomain } from '../lib/linkDomain';
 import { isPersonalMailProvider, personalMailProviderName } from '../lib/personalMailProviders';
 
 interface AddressFields {
@@ -38,6 +42,9 @@ interface CreateDomainBody extends AddressFields {
 interface UpdateDomainBody extends AddressFields {
   redirectUrl?: string;
   dkimSelector?: string | null;
+  /** The host this domain's unsubscribe link uses (`lib/linkDomain.ts`); null or "" clears it. A
+   *  new host starts unchecked and is used only once `POST /:domain/link-domain/check` passes. */
+  linkDomain?: string | null;
   /** Required to clear an address that campaigns send with. */
   confirm?: boolean;
 }
@@ -165,6 +172,8 @@ async function campaignUsage(domainIds: string[]) {
   };
 }
 
+const INVALID_LINK_DOMAIN_ERROR = 'linkDomain must be a host name such as "link.yourbrand.com"';
+
 const INVALID_SELECTOR_ERROR =
   'dkimSelector must be a DNS label such as "s1" or "abc123" — the part before ._domainkey';
 
@@ -227,7 +236,14 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
     const body = request.body ?? {};
     const address = parseAddressFields(body);
     if (!address.ok) return reply.code(422).send({ error: address.error });
-    const data: { redirectUrl?: string; dkimSelector?: string | null } & AddressPatch = {
+    const data: {
+      redirectUrl?: string;
+      dkimSelector?: string | null;
+      linkDomain?: string | null;
+      linkDomainStatus?: 'PENDING';
+      linkDomainError?: null;
+      linkDomainCheckedAt?: null;
+    } & AddressPatch = {
       redirectUrl: body.redirectUrl,
       ...address.data,
     };
@@ -250,6 +266,23 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(422).send({ error: INVALID_SELECTOR_ERROR });
       }
       data.dkimSelector = dkimSelector;
+    }
+    if ('linkDomain' in body) {
+      const linkDomain = normalizeLinkDomain(body.linkDomain);
+      if (linkDomain === undefined) {
+        return reply.code(422).send({ error: INVALID_LINK_DOMAIN_ERROR });
+      }
+      const current = await prisma.domain.findUnique({ where: { id: request.params.id } });
+      if (!current) return reply.code(404).send({ error: 'Domain not found' });
+      // A changed host is unproven: its mail goes back to the install's own link until checked.
+      if (current.linkDomain !== linkDomain) {
+        Object.assign(data, {
+          linkDomain,
+          linkDomainStatus: 'PENDING',
+          linkDomainError: null,
+          linkDomainCheckedAt: null,
+        });
+      }
     }
     const domain = await prisma.domain
       .update({ where: { id: request.params.id }, data })
@@ -306,6 +339,23 @@ export async function domainsRoutes(app: FastifyInstance): Promise<void> {
       return runDomainCheck(domain, selector ?? undefined);
     },
   );
+
+  /** `POST /v1/domains/:domain/link-domain/check` — fetches the ping page through the domain's
+   *  link domain and saves the result. Only a pass puts the host in this domain's emails. */
+  app.post<{ Params: { domain: string } }>('/:domain/link-domain/check', async (request, reply) => {
+    const domainName = request.params.domain.trim().toLowerCase();
+    const domain = await prisma.domain.findUnique({ where: { domainName } });
+    if (!domain) return reply.code(404).send({ error: 'Domain not found' });
+    if (!domain.linkDomain) {
+      return reply.code(422).send({ error: `${domainName} has no link domain to check` });
+    }
+    const result = await checkLinkDomain(domain.linkDomain);
+    const updated = await prisma.domain.update({
+      where: { id: domain.id },
+      data: linkDomainUpdate(result),
+    });
+    return { ...updated, usedBy: (await campaignUsage([updated.id]))(updated.id) };
+  });
 
   /** `GET /v1/domains/:domain/check-history` — most recent `DomainCheckHistory` snapshots for a
    *  domain, newest first, so a caller can diff what a given check changed instead of only ever

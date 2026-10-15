@@ -39,6 +39,7 @@ import {
 } from '../lib/composeCampaignEmail';
 import { appendCanSpamFooter, resolveUnsubscribeUrl } from '../lib/sendCompliance';
 import { hostedUnsubscribeUrl, TEST_SEND_UNSUBSCRIBE_ID } from '../lib/unsubscribeToken';
+import { LINK_DOMAIN_SELECT, linkHostFor } from '../lib/linkDomain';
 import {
   builtInUnsubscribeAvailable,
   checkCampaignLaunch,
@@ -273,6 +274,7 @@ type PreviewResult =
       /** Whether AI writes this email at send time (so `skipAi` showed only the text it starts from). */
       usesAi: boolean;
       sender: { email: string; senderName: string | null; domainName: string } | null;
+      unsubscribeHost: string | null;
       complianceMissing: Array<'sender' | 'address' | 'unsubscribe'>;
       /** Internal — the mailbox a test send goes from. Not returned by `/preview`. */
       mailbox: { id: string; email: string } | null;
@@ -364,7 +366,7 @@ async function buildPreview(
           email: true,
           status: true,
           senderName: true,
-          domain: { select: { domainName: true, mailingAddress: true } },
+          domain: { select: { domainName: true, mailingAddress: true, ...LINK_DOMAIN_SELECT } },
         },
       })
     : [];
@@ -434,7 +436,10 @@ async function buildPreview(
   // lead, which has no id.
   const unsubscribeUrl = unsubscribeTemplate
     ? resolveUnsubscribeUrl(unsubscribeTemplate, testRecipient ?? lead.email)
-    : hostedUnsubscribeUrl(!testRecipient && 'id' in lead ? lead.id : TEST_SEND_UNSUBSCRIBE_ID);
+    : hostedUnsubscribeUrl(
+        !testRecipient && 'id' in lead ? lead.id : TEST_SEND_UNSUBSCRIBE_ID,
+        mailbox?.domain,
+      );
   const complianceMissing: Array<'sender' | 'address' | 'unsubscribe'> = [];
   if (!mailbox) complianceMissing.push('sender');
   else if (!address) complianceMissing.push('address');
@@ -469,6 +474,10 @@ async function buildPreview(
           domainName: mailbox.domain.domainName,
         }
       : null,
+    // The host the built-in link uses for this sender (its checked link domain, else the
+    // install's own), so the dashboard can say which name the email shows. Null with a link of
+    // the campaign's own.
+    unsubscribeHost: unsubscribeTemplate ? null : linkHostFor(mailbox?.domain),
     ...composed,
     body: withFooter(composed.body),
     fallback: { ...composed.fallback, body: withFooter(composed.fallback.body) },
