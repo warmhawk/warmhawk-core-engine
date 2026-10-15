@@ -25,12 +25,14 @@ const SPREAD_VARIANCE = 0.2;
  *                     the same floor after it as after a real send.
  * @param spreadMs     The target gap between this mailbox's sends, from the send window; 0 = none
  *                     (no schedule — send as the floor and jitter allow).
+ * @param paceFactor   Stretches the floor and jitter: 2 after a deferral halves the mailbox's pace.
  */
 export function computeNextSlotSeconds(
   lastSentAt: Date | null,
   now: Date,
   pendingReservationAt: Date | null,
   spreadMs = 0,
+  paceFactor = 1,
 ): number {
   const nowMs = now.getTime();
 
@@ -41,11 +43,11 @@ export function computeNextSlotSeconds(
   );
   const hasAnchor = Number.isFinite(anchorMs);
 
-  let candidateMs = hasAnchor ? Math.max(nowMs, anchorMs + CADENCE_FLOOR_MS) : nowMs;
+  let candidateMs = hasAnchor ? Math.max(nowMs, anchorMs + CADENCE_FLOOR_MS * paceFactor) : nowMs;
 
   const jitterSeconds = JITTER_BASE_SECONDS + Math.random() * JITTER_RANGE_SECONDS;
   const noiseSeconds = (Math.random() * 2 - 1) * NOISE_RANGE_SECONDS;
-  candidateMs += (jitterSeconds + noiseSeconds) * 1000;
+  candidateMs += (jitterSeconds * paceFactor + noiseSeconds) * 1000;
 
   if (hasAnchor && spreadMs > 0) {
     const spreadGapMs = spreadMs * (1 - SPREAD_VARIANCE + Math.random() * 2 * SPREAD_VARIANCE);

@@ -14,11 +14,12 @@
 import type { Queue } from 'bullmq';
 import type IORedis from 'ioredis';
 import { DAY_MS, prisma, type WindowState } from '@warmhawk/db';
+import { lastRiskyMailboxes, markLastBooking, riskyLeadIds } from './addressRisk';
 import { computeNextSlotSeconds } from './computeNextSlotSeconds';
 import { campaignCapToday } from './campaignCap';
 import { syncCampaignCompletion } from './campaignCompletion';
 import { DISPATCH_JOB_NAME, mailboxReservationKey } from './queue';
-import { recentSendTimes } from './rollingSends';
+import { deferredMailboxes, recentSendTimes } from './rollingSends';
 import { leadWindowState, SEND_SETTINGS_SELECT, type CampaignSendSettings } from './sendWindow';
 
 /** Leads read per pass. More than the mailboxes can take in one tick, so leads whose window is
@@ -110,6 +111,8 @@ interface PoolEntry extends MailboxCandidate {
   sendTimesMs: number[];
   /** Its last booked slot, when that slot has already come round. */
   pendingAt: Date | null;
+  /** 2 when its provider deferred a send in the last day: twice the gap between sends. */
+  paceFactor: number;
 }
 
 /**
@@ -133,6 +136,14 @@ interface PoolEntry extends MailboxCandidate {
  *     hundreds of queued leads hours ahead.
  *   - The slot is spaced to spread the mailbox's remaining limit over what's left of the window
  *     (`spreadGapMs`), never closer than the 8-minute floor.
+ *
+ * Mailbox protection (10-15-26):
+ *
+ *   - A mailbox whose provider deferred or rate-limited a send in the last 24 hours runs at half
+ *     pace: half its daily limit, twice the gap between sends.
+ *   - A risky first email (catch-all server, Yahoo/AOL, no clear check answer — `addressRisk.ts`)
+ *     doesn't follow another risky one on the same mailbox while a confirmed address in its
+ *     campaign can go now. It takes that mailbox's next slot instead; every lead is still sent.
  *
  * Each slot is reserved in Redis, the BullMQ dispatch job is scheduled with the computed delay,
  * and `queuedJobId`/`queuedSlotAt` are persisted on the Lead row for crash recovery. A first email
@@ -177,11 +188,17 @@ export async function runEnqueuerTick(
   const reservations = mailboxes.length
     ? await redis.mget(...mailboxes.map((m) => mailboxReservationKey(m.id)))
     : [];
+  const deferred = await deferredMailboxes(
+    mailboxes.map((m) => m.id),
+    now,
+  );
 
   const pool = new Map<string, PoolEntry>();
   mailboxes.forEach((m, i) => {
     if (!hasMailingAddress(m)) return;
-    const cap = campaignCapToday(m.dailyCap, m.warmupGraduatedAt, now);
+    const fullCap = campaignCapToday(m.dailyCap, m.warmupGraduatedAt, now);
+    const slowed = deferred.has(m.id);
+    const cap = slowed ? Math.max(1, Math.floor(fullCap / 2)) : fullCap;
     const sendTimesMs = sendTimes.get(m.id) ?? [];
     if (sendTimesMs.length >= cap) return;
     const pendingAt = reservations[i] ? new Date(Number(reservations[i])) : null;
@@ -195,6 +212,7 @@ export async function runEnqueuerTick(
       sortKeyMs: m.lastSentAt ? m.lastSentAt.getTime() : -Infinity,
       sendTimesMs,
       pendingAt,
+      paceFactor: slowed ? 2 : 1,
     });
   });
   if (pool.size === 0) return 0;
@@ -203,7 +221,13 @@ export async function runEnqueuerTick(
    *  land after the window closes. A booked mailbox leaves the pool for this tick. */
   const takeSlot = async (target: PoolEntry, leadId: string, window: WindowState) => {
     const spreadMs = spreadGapMs(window, target.dailyCap, target.sendTimesMs, now.getTime());
-    const delaySeconds = computeNextSlotSeconds(target.lastSentAt, now, target.pendingAt, spreadMs);
+    const delaySeconds = computeNextSlotSeconds(
+      target.lastSentAt,
+      now,
+      target.pendingAt,
+      spreadMs,
+      target.paceFactor,
+    );
     if (delaySeconds * 1000 >= window.msLeft) return null;
     const slotAtMs = now.getTime() + delaySeconds * 1000;
     pool.delete(target.id);
@@ -308,15 +332,34 @@ export async function runEnqueuerTick(
     ]);
   }
 
+  // Which leads are risky, which mailboxes just had one, and how many confirmed leads per campaign
+  // could go now. Without Redis answers every lead counts as confirmed, as before.
+  const risky = await riskyLeadIds(redis, leads).catch(() => new Set<string>());
+  const lastRisky = await lastRiskyMailboxes(redis, [...pool.keys()]).catch(
+    () => new Set<string>(),
+  );
+  const confirmedReady = new Map<string, number>();
+  for (const lead of leads) {
+    if (risky.has(lead.id) || !windowFor(lead.campaignId, lead.customFields)?.open) continue;
+    confirmedReady.set(lead.campaignId, (confirmedReady.get(lead.campaignId) ?? 0) + 1);
+  }
+
   for (const lead of leads) {
     if (pool.size === 0) break;
     const left = newLeadsLeft.get(lead.campaignId);
     if (left === 0) continue;
     const window = windowFor(lead.campaignId, lead.customFields);
     if (!window?.open) continue;
-    const candidates = (sendersByCampaign.get(lead.campaignId) ?? [])
+    let candidates = (sendersByCampaign.get(lead.campaignId) ?? [])
       .map((id) => pool.get(id))
       .filter((c): c is PoolEntry => Boolean(c));
+    const isRisky = risky.has(lead.id);
+    if (isRisky) {
+      // A mailbox whose last first email was risky takes a confirmed lead next, if there is one.
+      const rested = candidates.filter((c) => !lastRisky.has(c.id));
+      if (rested.length > 0) candidates = rested;
+      else if ((confirmedReady.get(lead.campaignId) ?? 0) > 0) continue;
+    }
     // Least-recently-used of this campaign's mailboxes that still have room today.
     const target = [...candidates].sort((a, b) => a.sortKeyMs - b.sortKeyMs)[0];
     if (!target) continue;
@@ -324,6 +367,13 @@ export async function runEnqueuerTick(
     const slot = await takeSlot(target, lead.id, window);
     if (!slot) continue;
     if (left !== undefined) newLeadsLeft.set(lead.campaignId, left - 1);
+    if (isRisky) {
+      lastRisky.add(target.id);
+    } else {
+      lastRisky.delete(target.id);
+      confirmedReady.set(lead.campaignId, (confirmedReady.get(lead.campaignId) ?? 1) - 1);
+    }
+    await markLastBooking(redis, target.id, isRisky).catch(() => undefined);
 
     await prisma.lead.update({
       where: { id: lead.id },

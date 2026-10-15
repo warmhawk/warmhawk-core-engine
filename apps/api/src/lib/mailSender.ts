@@ -23,7 +23,7 @@
  * `/internal/*` anywhere in this repo).
  */
 import nodemailer, { type Transporter } from 'nodemailer';
-import { prisma, type AiWriteOutcome } from '@warmhawk/db';
+import { DAY_MS, isSendingLimit, prisma, type AiWriteOutcome } from '@warmhawk/db';
 import { decrypt, loadEncryptionKey } from './encryption';
 import { mintMailboxAccessToken } from './mailboxAccessToken';
 import { createGraphTransport } from './microsoftGraphTransport';
@@ -40,7 +40,11 @@ import { isEmailSuppressed } from './leadIngest';
 import { pickSeedBccSample, subjectSha256 } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
 import { nextStepAtAfter } from './sequence';
-import { DEFAULT_BOUNCE_RATE_THRESHOLD, BOUNCE_RATE_MIN_SAMPLE_SIZE } from '../../../../constants';
+import {
+  MAILBOX_BOUNCE_MIN_SAMPLE_SIZE,
+  MAILBOX_BOUNCE_RATE_THRESHOLD,
+  MAILBOX_BOUNCE_WINDOW_DAYS,
+} from '../../../../constants';
 
 function encryptionKey() {
   return loadEncryptionKey(process.env.MAILBOX_CREDENTIAL_KEY || '');
@@ -118,6 +122,8 @@ const HARD_BOUNCE_PATTERNS = [
 ];
 
 function isHardBounce(message: string, code?: string): boolean {
+  // A provider's sending limit can come back as a 550 (Gmail's 5.4.5): the address is fine.
+  if (isSendingLimit(message)) return false;
   const haystack = `${message} ${code ?? ''}`.toLowerCase();
   return HARD_BOUNCE_PATTERNS.some((pattern) => haystack.includes(pattern));
 }
@@ -125,8 +131,9 @@ function isHardBounce(message: string, code?: string): boolean {
 /** Guardrails — Reputation protection: `lib/bounceCircuitBreaker.ts`'s `evaluateBounceCircuitBreaker`
  *  shipped as real, unit-tested pure logic with zero production callers before this pass. Called
  *  after every hard bounce is recorded; recomputes and applies two independent breakers —
- *  mailbox-level (reputation flag, `Mailbox.rollingBounceRate`/`autoFlaggedAt`, uses the instance
- *  default threshold since a mailbox is shared across campaigns) and campaign-level
+ *  mailbox-level (reputation flag, `Mailbox.rollingBounceRate`/`autoFlaggedAt`: its last 7 days
+ *  of sends over 3%, the same for every mailbox since a mailbox is shared across campaigns) and
+ *  campaign-level
  *  (`Campaign.pausedForBounceRate`, uses that campaign's own configurable threshold). Never
  *  throws — evaluating a breaker must not itself fail the send-failure recording it runs after.
  *  Also called by `POST /internal/replies` for a bounce that comes back after the send. */
@@ -136,18 +143,29 @@ export async function applyBounceCircuitBreaker(params: {
 }): Promise<void> {
   const { campaignId, mailboxId } = params;
 
+  // The mailbox counts every send of the last 7 days: a send's log starts SENT and may move on to
+  // OPENED, REPLIED or BOUNCED, so counting SENT alone left opened and replied sends out.
+  const since = new Date(Date.now() - MAILBOX_BOUNCE_WINDOW_DAYS * DAY_MS);
   const [mailboxSent, mailboxBounced, campaignSent, campaignBounced, campaign] = await Promise.all([
-    prisma.executionLog.count({ where: { mailboxId, status: 'SENT' } }),
-    prisma.executionLog.count({ where: { mailboxId, status: 'BOUNCED' } }),
+    prisma.executionLog.count({
+      where: {
+        mailboxId,
+        status: { in: ['SENT', 'OPENED', 'REPLIED', 'BOUNCED'] },
+        createdAt: { gt: since },
+      },
+    }),
+    prisma.executionLog.count({
+      where: { mailboxId, status: 'BOUNCED', createdAt: { gt: since } },
+    }),
     prisma.executionLog.count({ where: { campaignId, status: 'SENT' } }),
     prisma.executionLog.count({ where: { campaignId, status: 'BOUNCED' } }),
     prisma.campaign.findUnique({ where: { id: campaignId } }),
   ]);
 
   const mailboxResult = evaluateBounceCircuitBreaker(
-    { sent: mailboxSent + mailboxBounced, bounced: mailboxBounced },
-    DEFAULT_BOUNCE_RATE_THRESHOLD,
-    BOUNCE_RATE_MIN_SAMPLE_SIZE,
+    { sent: mailboxSent, bounced: mailboxBounced },
+    MAILBOX_BOUNCE_RATE_THRESHOLD,
+    MAILBOX_BOUNCE_MIN_SAMPLE_SIZE,
   );
   const mailboxUpdate: { rollingBounceRate: number; status?: 'PAUSED'; autoFlaggedAt?: Date } = {
     rollingBounceRate: mailboxResult.bounceRate,

@@ -4,6 +4,7 @@ import {
   addressCheckConfig,
   checkAddress,
   classifyRcpt,
+  junkAddressReason,
   type AddressCheckConfig,
 } from '../addressCheck';
 
@@ -53,6 +54,39 @@ describe('classifyRcpt', () => {
     expect(classifyRcpt(blocked, blocked).verdict).toBe('unknown');
     expect(classifyRcpt(relay, relay).verdict).toBe('unknown');
     expect(classifyRcpt(greylisted, greylisted).verdict).toBe('unknown');
+  });
+
+  it('marks a "not now" answer worth asking again, and a refusal not', () => {
+    const greylisted = { code: 450, text: '4.2.0 Greylisted, please try again later' };
+    const blocked = { code: 554, text: '5.7.1 Client host blocked using zen.spamhaus.org' };
+    expect(classifyRcpt(greylisted, null).retryable).toBe(true);
+    expect(classifyRcpt(blocked, null).retryable).toBe(false);
+  });
+});
+
+describe('junkAddressReason', () => {
+  it('stops placeholder domains, reserved names and scraped file names', () => {
+    for (const email of [
+      'name@yoursite.com',
+      'info@Example.com',
+      'john@domain.com',
+      'ab12cd@sentry.wixpress.com',
+      'someone@shop.test',
+      'logo@2x.png',
+      'nobody',
+      'x@localhost',
+    ]) {
+      expect(junkAddressReason(email)).not.toBeNull();
+    }
+    expect(junkAddressReason('name@yoursite.com')).toBe(
+      "yoursite.com is a placeholder domain, not a real person's address",
+    );
+  });
+
+  it('lets real domains through', () => {
+    for (const email of ['ana@gmail.com', 'bob@acme-roofing.com', 'cy@mydomaincoach.com']) {
+      expect(junkAddressReason(email)).toBeNull();
+    }
   });
 });
 
@@ -154,10 +188,20 @@ describe('checkAddress against a mail server', () => {
 
   it('comes back unknown — never throws — on a refused greeting, a timeout or a DNS failure', async () => {
     const refusing = await setUp({ greeting: '554 5.7.1 No thanks' });
-    expect((await checkAddress('ana@shop.test', refusing.config)).verdict).toBe('unknown');
+    const refused = await checkAddress('ana@shop.test', refusing.config);
+    expect(refused.verdict).toBe('unknown');
+    expect(refused.retryable).toBe(false);
+    close?.();
+    const busy = await setUp({ greeting: '421 4.7.0 Try again later' });
+    expect(await checkAddress('ana@shop.test', busy.config)).toMatchObject({
+      verdict: 'unknown',
+      retryable: true,
+    });
     close?.();
     const silent = await setUp({ silent: true }, { timeoutMs: 200 });
-    expect((await checkAddress('ana@shop.test', silent.config)).verdict).toBe('unknown');
+    const timedOut = await checkAddress('ana@shop.test', silent.config);
+    expect(timedOut.verdict).toBe('unknown');
+    expect(timedOut.retryable).toBe(false);
     close?.();
     const noDns = await setUp(
       {},
