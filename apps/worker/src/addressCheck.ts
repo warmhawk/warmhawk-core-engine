@@ -134,6 +134,22 @@ const MAILBOX_GONE_TEXT =
 /** A rejection that is about us (our IP, our name), not the mailbox. */
 const REFUSED_FOR_POLICY =
   /spamhaus|block(ed|list)|blacklist|reputation|policy|spam|5\.7\.\d+|access denied, (banned|blocked)/i;
+/** The domain's own mail server won't take mail for the domain at all — its mail service was
+ *  shut off with the MX records left behind (Postfix "Relay access denied"). Every sender gets
+ *  this, so it is a sure bounce. Microsoft's TenantAttribution relay error is about the sender's
+ *  connector, not the domain. */
+const DOMAIN_NOT_HOSTED =
+  /relay access denied|relaying denied|relay not permitted|relaying not allowed|unable to relay/i;
+const ABOUT_THE_SENDER = /spamhaus|block(ed|list)|blacklist|reputation|tenantattribution/i;
+
+function refusesTheDomain(reply: SmtpReply | null): boolean {
+  return (
+    !!reply &&
+    reply.code >= 500 &&
+    DOMAIN_NOT_HOSTED.test(reply.text) &&
+    !ABOUT_THE_SENDER.test(reply.text)
+  );
+}
 
 /** Verdict from the server's answers to the real address and to a made-up one on the same domain. */
 export function classifyRcpt(real: SmtpReply, madeUp: SmtpReply | null): AddressCheckResult {
@@ -154,6 +170,13 @@ export function classifyRcpt(real: SmtpReply, madeUp: SmtpReply | null): Address
     return {
       verdict: 'invalid',
       detail: `the recipient's mail server says this address doesn't exist (${said})`,
+    };
+  }
+  // Both the real and the made-up address refused: the server turns away the whole domain.
+  if (refusesTheDomain(real) && refusesTheDomain(madeUp)) {
+    return {
+      verdict: 'invalid',
+      detail: `the domain's mail server no longer takes mail for it (${said})`,
     };
   }
   return {
