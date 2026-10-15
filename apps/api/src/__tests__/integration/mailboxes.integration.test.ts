@@ -162,6 +162,36 @@ describeIntegration('mailboxes routes (integration, real Postgres)', () => {
     expect(notFound.statusCode).toBe(404);
   });
 
+  it('clears the bounce flag when a paused mailbox is set back to sending', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/mailboxes',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { email: `flagged-${Date.now()}@example.com`, domainId },
+    });
+    const id = created.json().id;
+    createdMailboxIds.push(id);
+    await prisma.mailbox.update({
+      where: { id },
+      data: { status: 'PAUSED', autoFlaggedAt: new Date() },
+    });
+    const patch = (payload: Record<string, unknown>) =>
+      app.inject({
+        method: 'PATCH',
+        url: `/v1/mailboxes/${id}`,
+        headers: { authorization: `Bearer ${authToken}` },
+        payload,
+      });
+
+    // Changing anything else, or keeping it paused, leaves the flag alone.
+    expect((await patch({ dailyCap: 20 })).json().autoFlaggedAt).not.toBeNull();
+    expect((await patch({ status: 'PAUSED' })).json().autoFlaggedAt).not.toBeNull();
+
+    const resumed = await patch({ status: 'ACTIVE' });
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({ status: 'ACTIVE', autoFlaggedAt: null });
+  });
+
   it('sets, trims and clears the sender name, and refuses a multi-line one', async () => {
     const created = await app.inject({
       method: 'POST',

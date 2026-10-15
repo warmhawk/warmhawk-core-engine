@@ -11,6 +11,10 @@
  *   - First emails go next, spread over the campaign's mailboxes, up to its max new leads per day;
  *     each starts the lead's follow-ups.
  *
+ * Today (10-15-26) is played first when the caller passes what each mailbox already used today:
+ * its cap less the emails sent or booked, only for campaigns whose window hasn't closed yet. Before
+ * this, the Today bar read 0 every morning until the window opened.
+ *
  * An estimate, not a promise: replies, bounces and unsubscribes end sequences early, a lead's own
  * time zone can move its day, and cap or campaign edits change the plan. It's an upper bound in
  * the usual case.
@@ -49,10 +53,14 @@ export interface ForecastFollowUp {
 }
 
 export interface SendForecast {
-  /** The `days` UTC days after today, soonest first, every day present even at 0. */
+  /** Today's UTC day first when `usedToday` was passed (what's still to come today), then the
+   *  `days` UTC days after today, soonest first, every day present even at 0. */
   byDay: { day: string; count: number }[];
   /** Expected sends per mailbox, by UTC day; days with none are left out. */
   byMailbox: Map<string, Map<string, number>>;
+  /** UTC days, from `pastDays` back through the last forecast day, on which no active campaign
+   *  sends (a weekend for a Mon–Fri schedule). Empty when no campaign is active. */
+  offDays: string[];
 }
 
 /** Whether a campaign sends on the UTC day starting at `dayStartMs`, read at midday in its zone. */
@@ -62,13 +70,38 @@ function sendsOn(schedule: SendSchedule | null, dayStartMs: number): boolean {
   return schedule.days.includes(weekday);
 }
 
-/** Plays the enqueuer's rules forward over the `days` UTC days after `now`'s. Pure; no I/O. */
+/** Whether a campaign can still send today: a ticked day whose window hasn't closed yet. */
+function sendsLaterToday(schedule: SendSchedule | null, now: Date): boolean {
+  if (!schedule) return true;
+  const { weekday, minute } = localParts(schedule.timezone, now);
+  return schedule.days.includes(weekday) && minute < schedule.endMinute;
+}
+
+/** The `count` UTC days from `firstDayMs` on which none of `campaigns` sends, read the way the
+ *  forecast reads them. None when there are no campaigns: nothing is "off", there's just nothing. */
+export function offDays(
+  campaigns: Pick<ForecastCampaign, 'schedule'>[],
+  firstDayMs: number,
+  count: number,
+): string[] {
+  if (campaigns.length === 0) return [];
+  return Array.from({ length: count }, (_, i) => firstDayMs + i * DAY_MS)
+    .filter((dayStart) => !campaigns.some((c) => sendsOn(c.schedule, dayStart)))
+    .map((dayStart) => new Date(dayStart).toISOString().slice(0, 10));
+}
+
+/**
+ * Plays the enqueuer's rules forward over the `days` UTC days after `now`'s. With `usedToday`
+ * (campaign emails each mailbox has sent or booked today), the rest of today goes first. Pure; no
+ * I/O.
+ */
 export function forecastSends(
   now: Date,
   days: number,
   mailboxes: ForecastMailbox[],
   campaigns: ForecastCampaign[],
   followUps: ForecastFollowUp[],
+  usedToday?: Map<string, number>,
 ): SendForecast {
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const mailboxById = new Map(mailboxes.map((m) => [m.id, m]));
@@ -80,10 +113,10 @@ export function forecastSends(
   const byDay: SendForecast['byDay'] = [];
   const byMailbox: SendForecast['byMailbox'] = new Map();
 
-  for (let offset = 1; offset <= days; offset += 1) {
+  for (let offset = usedToday ? 0 : 1; offset <= days; offset += 1) {
     const dayStart = today + offset * DAY_MS;
     const dayEnd = dayStart + DAY_MS;
-    const sentAt = dayStart + DAY_MS / 2;
+    const sentAt = Math.max(now.getTime(), dayStart + DAY_MS / 2);
     const day = new Date(dayStart).toISOString().slice(0, 10);
     // The same cap the per-mailbox table shows for this day.
     const capLeft = new Map(
@@ -93,10 +126,16 @@ export function forecastSends(
           m.dailyCap,
           m.warmupGraduatedAt,
           new Date(now.getTime() + offset * DAY_MS),
-        ),
+        ) - (offset === 0 ? (usedToday?.get(m.id) ?? 0) : 0),
       ]),
     );
-    const open = new Set(campaigns.filter((c) => sendsOn(c.schedule, dayStart)).map((c) => c.id));
+    const open = new Set(
+      campaigns
+        .filter((c) =>
+          offset === 0 ? sendsLaterToday(c.schedule, now) : sendsOn(c.schedule, dayStart),
+        )
+        .map((c) => c.id),
+    );
     let count = 0;
     const send = (mailboxId: string, campaign: ForecastCampaign, stepsSent: number) => {
       capLeft.set(mailboxId, (capLeft.get(mailboxId) ?? 0) - 1);
@@ -160,16 +199,23 @@ export function forecastSends(
     pending = next;
     byDay.push({ day, count });
   }
-  return { byDay, byMailbox };
+  return {
+    byDay,
+    byMailbox,
+    offDays: offDays(campaigns, today + (usedToday ? 0 : DAY_MS), byDay.length),
+  };
 }
 
-/** The forecast's inputs from the database: sendable mailboxes and active campaigns' work left. */
-async function loadForecastInput(): Promise<{
+/** The forecast's inputs from the database: sendable mailboxes, active campaigns' work left and
+ *  each mailbox's campaign sends so far today (UTC day, the statuses the Live Queue counts). */
+async function loadForecastInput(now: Date): Promise<{
   mailboxes: ForecastMailbox[];
   campaigns: ForecastCampaign[];
   followUps: ForecastFollowUp[];
+  sentToday: Map<string, number>;
 }> {
-  const [mailboxRows, campaignRows] = await Promise.all([
+  const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const [mailboxRows, campaignRows, sentRows] = await Promise.all([
     // The same mailboxes the enqueuer sends from: ACTIVE, with a mailing address for the footer.
     prisma.mailbox.findMany({
       where: { status: 'ACTIVE', domain: { mailingAddress: { not: null } } },
@@ -193,10 +239,22 @@ async function loadForecastInput(): Promise<{
         steps: { select: { position: true, waitDays: true } },
       },
     }),
+    prisma.executionLog.groupBy({
+      by: ['mailboxId'],
+      where: {
+        status: { in: ['SENT', 'OPENED', 'REPLIED', 'BOUNCED'] },
+        mailboxId: { not: null },
+        createdAt: { gte: todayStart },
+      },
+      _count: { _all: true },
+    }),
   ]);
   const mailboxes = mailboxRows.filter((m) => m.domain.mailingAddress?.trim());
+  const sentToday = new Map(
+    sentRows.map((row) => [row.mailboxId as string, row._count._all] as const),
+  );
   const campaignIds = campaignRows.map((c) => c.id);
-  if (campaignIds.length === 0) return { mailboxes, campaigns: [], followUps: [] };
+  if (campaignIds.length === 0) return { mailboxes, campaigns: [], followUps: [], sentToday };
 
   const [firstRows, followUpRows] = await Promise.all([
     // Booked leads (a `queuedJobId`) go out today, so they aren't left for later days.
@@ -224,6 +282,7 @@ async function loadForecastInput(): Promise<{
   const firstLeft = new Map(firstRows.map((row) => [row.campaignId, row._count._all]));
   return {
     mailboxes,
+    sentToday,
     campaigns: campaignRows.map((c) => ({
       id: c.id,
       maxNewLeadsPerDay: c.maxNewLeadsPerDay,
@@ -241,17 +300,54 @@ async function loadForecastInput(): Promise<{
   };
 }
 
-let cached: { at: number; days: number; forecast: SendForecast } | null = null;
+let cached: {
+  at: number;
+  days: number;
+  pastDays: number;
+  key: string;
+  forecast: SendForecast;
+} | null = null;
 
-/** The forecast over the `days` UTC days after today, recomputed at most once a minute. */
-export async function sendForecast(now: Date, days: number): Promise<SendForecast> {
-  if (cached && cached.days === days && now.getTime() - cached.at < CACHE_MS) {
+/**
+ * The rest of today, then the `days` UTC days after it, recomputed at most once a minute or when
+ * the booked slots change. `bookedByMailbox` is each mailbox's dispatch jobs in the queue: they
+ * leave today and use its cap, and their leads are already out of the forecast's lead counts.
+ * `offDays` also covers the `pastDays` before today, by today's campaigns.
+ */
+export async function sendForecast(
+  now: Date,
+  days: number,
+  bookedByMailbox: Map<string, number> = new Map(),
+  pastDays = 0,
+): Promise<SendForecast> {
+  const key = [...bookedByMailbox].sort().join(',');
+  if (
+    cached &&
+    cached.days === days &&
+    cached.pastDays === pastDays &&
+    cached.key === key &&
+    now.getTime() - cached.at < CACHE_MS
+  ) {
     const sameDay =
       new Date(cached.at).toISOString().slice(0, 10) === now.toISOString().slice(0, 10);
     if (sameDay) return cached.forecast;
   }
-  const input = await loadForecastInput();
-  const forecast = forecastSends(now, days, input.mailboxes, input.campaigns, input.followUps);
-  cached = { at: now.getTime(), days, forecast };
+  const input = await loadForecastInput(now);
+  const usedToday = new Map(input.sentToday);
+  for (const [id, n] of bookedByMailbox) usedToday.set(id, (usedToday.get(id) ?? 0) + n);
+  const forecast = forecastSends(
+    now,
+    days,
+    input.mailboxes,
+    input.campaigns,
+    input.followUps,
+    usedToday,
+  );
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  forecast.offDays = [
+    ...offDays(input.campaigns, today - pastDays * DAY_MS, pastDays),
+    ...forecast.offDays,
+  ];
+  cached = { at: now.getTime(), days, pastDays, key, forecast };
   return forecast;
 }
