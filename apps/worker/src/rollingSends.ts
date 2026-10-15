@@ -4,7 +4,7 @@
  * reset mid-afternoon or mid-window and let a second day's batch out the same local day.
  * `Mailbox.sentToday` is still kept, now as this same rolling count, for the dashboard.
  */
-import { DAY_MS, prisma, type ExecutionStatus } from '@warmhawk/db';
+import { DAY_MS, isDeferral, prisma, type ExecutionStatus } from '@warmhawk/db';
 
 /** Every send that left the mailbox. A send's log starts SENT and may later move on. */
 export const COUNTED_SEND_STATUSES: ExecutionStatus[] = ['SENT', 'OPENED', 'REPLIED', 'BOUNCED'];
@@ -56,4 +56,24 @@ export async function syncSentToday(): Promise<void> {
         AND e."status" IN ('SENT', 'OPENED', 'REPLIED', 'BOUNCED')
         AND e."createdAt" > now() - interval '24 hours'
     ), 0)`;
+}
+
+/** Mailboxes whose provider deferred or rate-limited a send in the 24 hours before `now`. Each
+ *  sends at half pace until a day passes without one (Google: "reduce the sending volume until
+ *  the SMTP error rate decreases"). */
+export async function deferredMailboxes(mailboxIds: string[], now: Date): Promise<Set<string>> {
+  if (mailboxIds.length === 0) return new Set();
+  const rows = await prisma.executionLog.findMany({
+    where: {
+      mailboxId: { in: mailboxIds },
+      status: 'FAILED',
+      createdAt: { gt: new Date(now.getTime() - DAY_MS) },
+    },
+    select: { mailboxId: true, errorMessage: true },
+  });
+  return new Set(
+    rows
+      .filter((row) => row.mailboxId && isDeferral(row.errorMessage))
+      .map((row) => row.mailboxId as string),
+  );
 }

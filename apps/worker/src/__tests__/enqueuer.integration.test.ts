@@ -3,7 +3,7 @@
  * Redis (docker-compose.test.yml), same pattern as `reconcile.integration.test.ts`. Covers what the
  * pure unit tests can't: one booked slot per mailbox across ticks (the over-queue fix), the send
  * window, a follow-up due outside the window, "max new leads per day", the rolling 24-hour limit,
- * and sending in each lead's time zone.
+ * sending in each lead's time zone, half pace after a deferral, and spreading risky leads.
  *
  * Uses its own queue name so no running worker picks the jobs up.
  *
@@ -55,7 +55,11 @@ describeIntegration('runEnqueuerTick send schedule (integration, real Postgres +
   });
 
   async function cleanUp() {
-    await redis.del(...mailboxIds.map(mailboxReservationKey), 'enqueuer-it-placeholder');
+    await redis.del(
+      ...mailboxIds.map(mailboxReservationKey),
+      ...mailboxIds.map((id) => `mailbox:lastrisky:${id}`),
+      'enqueuer-it-placeholder',
+    );
     await prisma.executionLog.deleteMany({ where: { mailboxId: { in: mailboxIds } } });
     await prisma.campaign.deleteMany({ where: { id: { in: campaignIds } } });
     await prisma.mailbox.deleteMany({ where: { id: { in: mailboxIds } } });
@@ -263,5 +267,82 @@ describeIntegration('runEnqueuerTick send schedule (integration, real Postgres +
     expect(await runEnqueuerTick(queue, redis, now)).toBe(1);
     const [lead] = await queued(c.id);
     expect(lead.email).toBe('near@lead.example');
+  });
+
+  it('halves a mailbox’s daily limit and pace after its provider defers a send', async () => {
+    const m = await mailbox('deferred', 4);
+    const c = await campaign([m.id]);
+    await leads(c.id, 3);
+    for (let i = 0; i < 2; i += 1) {
+      await prisma.executionLog.create({
+        data: { mailboxId: m.id, status: 'SENT', createdAt: new Date(Date.now() - 3 * HOUR_MS) },
+      });
+    }
+    // Two of four sent: room for two more, at full pace.
+    const deferral = await prisma.executionLog.create({
+      data: {
+        mailboxId: m.id,
+        status: 'FAILED',
+        errorMessage: 'Message failed: 421 4.7.0 Try again later, closing connection.',
+        createdAt: new Date(Date.now() - HOUR_MS),
+      },
+    });
+    // Half of four is two, already sent.
+    expect(await runEnqueuerTick(queue, redis)).toBe(0);
+
+    // A day after the deferral, full pace again.
+    await prisma.executionLog.update({
+      where: { id: deferral.id },
+      data: { createdAt: new Date(Date.now() - 25 * HOUR_MS) },
+    });
+    expect(await runEnqueuerTick(queue, redis)).toBe(1);
+  });
+
+  it('doubles the gap after a deferral', async () => {
+    const lastSentAt = new Date(Date.now() - 60_000);
+    const m = await mailbox('slowed');
+    await prisma.mailbox.update({ where: { id: m.id }, data: { lastSentAt } });
+    const c = await campaign([m.id]);
+    await leads(c.id, 1);
+    await prisma.executionLog.create({
+      data: { mailboxId: m.id, status: 'FAILED', errorMessage: '451 4.7.650 throttled' },
+    });
+
+    expect(await runEnqueuerTick(queue, redis)).toBe(1);
+    // Floor 16 minutes, jitter 8-16 minutes, noise -1.5 minutes: never under 22.5 minutes.
+    const slotAt = Number(await redis.get(mailboxReservationKey(m.id)));
+    expect(slotAt - lastSentAt.getTime()).toBeGreaterThanOrEqual(22 * 60_000);
+  });
+
+  it('puts a confirmed lead between two risky ones on the same mailbox', async () => {
+    const m = await mailbox('spread');
+    const c = await campaign([m.id]);
+    await leads(c.id, 1, { email: 'first@yahoo.com' });
+    await leads(c.id, 1, { email: 'second@yahoo.com' });
+    await leads(c.id, 1, { email: 'confirmed@lead.example' });
+    const order: string[] = [];
+    let at = new Date();
+    for (let tick = 0; tick < 3; tick += 1) {
+      expect(await runEnqueuerTick(queue, redis, at)).toBe(1);
+      const slotAt = Number(await redis.get(mailboxReservationKey(m.id)));
+      const booked = await prisma.lead.findFirstOrThrow({
+        where: { campaignId: c.id, queuedSlotAt: new Date(slotAt) },
+      });
+      order.push(booked.email);
+      at = new Date(slotAt);
+    }
+    expect(order).toEqual(['first@yahoo.com', 'confirmed@lead.example', 'second@yahoo.com']);
+  });
+
+  it('still sends risky leads back to back when no confirmed one is waiting', async () => {
+    const m = await mailbox('risky-only');
+    const c = await campaign([m.id]);
+    await leads(c.id, 1, { email: 'one@yahoo.com' });
+    await leads(c.id, 1, { email: 'two@aol.com' });
+
+    expect(await runEnqueuerTick(queue, redis)).toBe(1);
+    const slotAt = Number(await redis.get(mailboxReservationKey(m.id)));
+    expect(await runEnqueuerTick(queue, redis, new Date(slotAt))).toBe(1);
+    expect(await queued(c.id)).toHaveLength(2);
   });
 });

@@ -46,6 +46,13 @@ export const RATE_LIMIT_UNSUBSCRIBE = { max: 30, timeWindowMs: 60_000 };
 // --- Bounce/complaint circuit breaker (Guardrails — Reputation protection)
 export const DEFAULT_BOUNCE_RATE_THRESHOLD = 0.05; // 5%
 export const BOUNCE_RATE_MIN_SAMPLE_SIZE = 20; // don't trip the breaker on tiny send counts
+/** A mailbox pauses on its last 7 days of sends, not its whole history: an old clean record must
+ *  not hide a bad week, and the providers judge a sender on recent mail. 3% is where sending
+ *  tools pause; providers start filtering a sender a little above that. */
+export const MAILBOX_BOUNCE_RATE_THRESHOLD = 0.03;
+export const MAILBOX_BOUNCE_WINDOW_DAYS = 7;
+/** At 3%, one bounce in 20 sends would pause the mailbox; 50 sends is about two warmed days. */
+export const MAILBOX_BOUNCE_MIN_SAMPLE_SIZE = 50;
 
 // --- Login brute-force protection (Guardrails — Account security)
 export const LOGIN_MAX_FAILED_ATTEMPTS = 5;

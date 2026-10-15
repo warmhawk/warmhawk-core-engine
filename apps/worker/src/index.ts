@@ -10,6 +10,8 @@ import { startOtel, shutdownOtel } from './otel';
 startOtel(); // must run before bullmq/ioredis are imported below, for auto-instrumentation to patch them
 import { Worker } from 'bullmq';
 import { prisma } from '@warmhawk/db';
+import { addressCheckConfig } from './addressCheck';
+import { precheckUpcomingLeads } from './addressRisk';
 import { runEnqueuerTick } from './enqueuer';
 import { reconcileStuckLeads } from './reconcile';
 import { processJob, setReservationRedis } from './processor';
@@ -23,6 +25,7 @@ import {
 
 const ENQUEUER_INTERVAL_MS = 30_000;
 const RECONCILE_INTERVAL_MS = 5 * 60_000; // every 5 minutes, per the V12 Redis Durability section
+const PRECHECK_INTERVAL_MS = 60_000;
 
 async function main() {
   const connection = createRedisConnection();
@@ -45,6 +48,22 @@ async function main() {
       console.error('[worker] enqueuer tick failed:', err);
     });
   }, ENQUEUER_INTERVAL_MS);
+
+  // Address look-ahead: checks the next few leads before their turn (`addressRisk.ts`). Only with
+  // the address check on, and one pass at a time: a slow mail server can hold a pass for a while.
+  const addressCheck = addressCheckConfig();
+  let precheckRunning = false;
+  const precheckInterval = setInterval(() => {
+    if (!addressCheck || precheckRunning) return;
+    precheckRunning = true;
+    precheckUpcomingLeads(connection, addressCheck)
+      .catch((err) => {
+        console.error('[worker] address look-ahead failed:', err);
+      })
+      .finally(() => {
+        precheckRunning = false;
+      });
+  }, PRECHECK_INTERVAL_MS);
 
   const reconcileInterval = setInterval(() => {
     reconcileStuckLeads(queue)
@@ -80,6 +99,7 @@ async function main() {
     shuttingDown = true;
     console.log(`[worker] received ${signal}, shutting down`);
     clearInterval(enqueuerInterval);
+    clearInterval(precheckInterval);
     clearInterval(reconcileInterval);
     // Give any in-flight job a grace window to finish rather than cutting it off mid-dispatch
     // (a 30s stop_grace_period; enforced by the compose file's own stop_grace_period, this is
