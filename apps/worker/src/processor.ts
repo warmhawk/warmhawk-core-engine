@@ -3,11 +3,12 @@
  * lose its domain's mailing address, a campaign can be paused, change its senders or close its
  * send window, and a lead can reply, between enqueue and the job actually firing, given the
  * jittered delay), then hands
- * off the real send to the n8n dispatch workflow over the internal Docker network — this process
- * never talks to an SMTP server directly.
+ * off the real send to the n8n dispatch workflow over the internal Docker network. The only SMTP
+ * this process speaks is the optional pre-send address check (`addressCheck.ts`), which never sends.
  */
 import type { Job } from 'bullmq';
 import { prisma } from '@warmhawk/db';
+import { addressCheckConfig, checkAddress } from './addressCheck';
 import { campaignCapToday } from './campaignCap';
 import { hasMailingAddress } from './enqueuer';
 import { recentSendCount, syncSentToday } from './rollingSends';
@@ -43,6 +44,32 @@ async function releaseLead(leadId: string, followUp: boolean): Promise<void> {
     where: { id: leadId, status: 'QUEUED' },
     data: { status: 'UNTOUCHED', queuedJobId: null, queuedSlotAt: null },
   });
+}
+
+/** Ends a lead whose address the pre-send check found dead: FAILED, not BOUNCED, since nothing was
+ *  sent. The FAILED log row tells the user why without counting toward the bounce rate or the
+ *  mailbox's daily sends. */
+async function stopDeadAddress(
+  leadId: string,
+  campaignId: string,
+  mailboxId: string,
+  detail: string,
+): Promise<void> {
+  await prisma.$transaction([
+    prisma.lead.updateMany({
+      where: { id: leadId, status: 'QUEUED' },
+      data: { status: 'FAILED', queuedJobId: null, queuedSlotAt: null, nextRetryAt: null },
+    }),
+    prisma.executionLog.create({
+      data: {
+        campaignId,
+        leadId,
+        mailboxId,
+        status: 'FAILED',
+        errorMessage: `Not sent: ${detail}. Checked before sending, so nothing went out.`,
+      },
+    }),
+  ]);
 }
 
 export async function processDispatchJob(data: DispatchJobData): Promise<void> {
@@ -95,6 +122,17 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
     // email — rather than silently dropping it.
     await releaseLead(leadId, followUp);
     return;
+  }
+
+  // A first email only: a follow-up's address already took one. Checked here, before n8n writes
+  // the email, so a dead address costs no AI call either.
+  const addressCheck = addressCheckConfig();
+  if (!followUp && addressCheck) {
+    const check = await checkAddress(lead.email, addressCheck);
+    if (check.verdict === 'invalid') {
+      await stopDeadAddress(lead.id, lead.campaignId, mailboxId, check.detail);
+      return;
+    }
   }
 
   // The webhook body carries everything n8n's dispatch workflow needs to complete the send

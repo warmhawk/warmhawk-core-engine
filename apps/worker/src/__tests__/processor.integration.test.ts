@@ -16,7 +16,15 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { prisma } from '@warmhawk/db';
+import { checkAddress } from '../addressCheck';
 import { processDispatchJob } from '../processor';
+
+// The address check's SMTP conversation is covered in addressCheck.test.ts; here only its verdict
+// matters. Off (ADDRESS_CHECK_HELO unset) for every case but the one that sets it.
+vi.mock('../addressCheck', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../addressCheck')>()),
+  checkAddress: vi.fn(),
+}));
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
@@ -59,6 +67,7 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
   });
 
   afterAll(async () => {
+    await prisma.executionLog.deleteMany({ where: { campaignId } });
     await prisma.lead.deleteMany({ where: { campaignId } });
     await prisma.mailbox.delete({ where: { id: mailboxId } }).catch(() => undefined);
     await prisma.domain.deleteMany({ where: { domainName: 'processor-test.example' } });
@@ -149,6 +158,49 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
 
     const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
     expect(updated.status).toBe('BOUNCED'); // untouched — recordSendFailure already had the final say
+  });
+
+  it('stops a dead address before n8n is called, as FAILED with the reason logged', async () => {
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    vi.mocked(checkAddress).mockResolvedValue({
+      verdict: 'invalid',
+      detail:
+        "the recipient's mail server says this address doesn't exist (550 5.1.1 no such user)",
+    });
+    try {
+      const lead = await createQueuedLead('dead@processor-test.example');
+
+      await expect(processDispatchJob({ leadId: lead.id, mailboxId })).resolves.toBeUndefined();
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
+      expect(updated.status).toBe('FAILED');
+      expect(updated.queuedJobId).toBeNull();
+      const logs = await prisma.executionLog.findMany({ where: { leadId: lead.id } });
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ status: 'FAILED', mailboxId });
+      expect(logs[0].errorMessage).toMatch(/^Not sent: .*5\.1\.1.*nothing went out\.$/);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.mocked(checkAddress).mockReset();
+    }
+  });
+
+  it('sends as before when the check can’t tell', async () => {
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    vi.mocked(checkAddress).mockResolvedValue({ verdict: 'unknown', detail: 'greylisted' });
+    try {
+      const lead = await createQueuedLead('maybe@processor-test.example');
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'sent', leadId: lead.id }));
+
+      await expect(processDispatchJob({ leadId: lead.id, mailboxId })).resolves.toBeUndefined();
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(checkAddress).toHaveBeenCalledWith('maybe@processor-test.example', expect.anything());
+    } finally {
+      vi.unstubAllEnvs();
+      vi.mocked(checkAddress).mockReset();
+    }
   });
 
   it('does not clobber a lead recordSendFailure already rescheduled with a real nextRetryAt', async () => {

@@ -234,13 +234,19 @@ services:
       REDIS_PORT: '6379'
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       N8N_BASE_URL: http://n8n:5678
+      # Pre-send address check (apps/worker/src/addressCheck.ts) — off while blank. See
+      # .env/.env.example for what it needs from the host.
+      ADDRESS_CHECK_HELO: ${ADDRESS_CHECK_HELO:-}
+      ADDRESS_CHECK_MAIL_FROM: ${ADDRESS_CHECK_MAIL_FROM:-}
       OTEL_SERVICE_NAME: warmhawk-worker
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
       migrate: { condition: service_completed_successfully }
-    networks: [warmhawk_internal]
+    # `warmhawk_edge` gives the pre-send address check its outbound DNS and port 25 — same egress-only
+    # reasoning as `api` above; the worker publishes no port.
+    networks: [warmhawk_internal, warmhawk_edge]
     stop_grace_period: 30s
     deploy:
       resources:
