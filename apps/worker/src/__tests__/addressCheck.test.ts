@@ -49,11 +49,30 @@ describe('classifyRcpt', () => {
       code: 554,
       text: '5.7.1 Service unavailable; Client host blocked using zen.spamhaus.org',
     };
-    const relay = { code: 554, text: '5.4.1 Relay access denied' };
+    const tenant = {
+      code: 550,
+      text: '5.7.64 TenantAttribution; Relay Access Denied [AM0PR02.prod.outlook.com]',
+    };
     const greylisted = { code: 450, text: '4.2.0 Greylisted, please try again later' };
     expect(classifyRcpt(blocked, blocked).verdict).toBe('unknown');
-    expect(classifyRcpt(relay, relay).verdict).toBe('unknown');
+    expect(classifyRcpt(tenant, tenant).verdict).toBe('unknown');
     expect(classifyRcpt(greylisted, greylisted).verdict).toBe('unknown');
+  });
+
+  it('calls an address dead when its mail server turns away the whole domain', () => {
+    // Namecheap Private Email, 2026-10-15: MX records left behind after the mail plan ended.
+    const relay = {
+      code: 554,
+      text: '5.7.1 <solutions@clearchoiceconsulting.ai>: Relay access denied',
+    };
+    const relayMadeUp = {
+      code: 554,
+      text: '5.7.1 <check-1a2b3c@clearchoiceconsulting.ai>: Relay access denied',
+    };
+    expect(classifyRcpt(relay, relayMadeUp).verdict).toBe('invalid');
+    // Only the real address refused, or no made-up answer: not sure, so it sends.
+    expect(classifyRcpt(relay, OK).verdict).toBe('unknown');
+    expect(classifyRcpt(relay, null).verdict).toBe('unknown');
   });
 
   it('marks a "not now" answer worth asking again, and a refusal not', () => {
