@@ -185,6 +185,8 @@ services:
       # mailbox-OAuth redirect URI without a dedicated GOOGLE_OAUTH_REDIRECT_URI/
       # MICROSOFT_OAUTH_REDIRECT_URI env var — see that file's header comment.
       WARMHAWK_DOMAIN: ${WARMHAWK_DOMAIN}
+      # The name sends give in EHLO once its reverse DNS checks out (lib/serverName.ts). Optional.
+      MAIL_SERVER_NAME: ${MAIL_SERVER_NAME:-}
       GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
       GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
       GOOGLE_OAUTH_REDIRECT_URI: ${GOOGLE_OAUTH_REDIRECT_URI:-}
@@ -238,6 +240,8 @@ services:
       # .env/.env.example for what it needs from the host.
       ADDRESS_CHECK_HELO: ${ADDRESS_CHECK_HELO:-}
       ADDRESS_CHECK_MAIL_FROM: ${ADDRESS_CHECK_MAIL_FROM:-}
+      # Used by the address check when ADDRESS_CHECK_HELO is blank, once confirmed (addressCheckName.ts).
+      MAIL_SERVER_NAME: ${MAIL_SERVER_NAME:-}
       OTEL_SERVICE_NAME: warmhawk-worker
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:

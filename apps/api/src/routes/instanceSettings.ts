@@ -11,6 +11,7 @@
 import type { FastifyInstance } from 'fastify';
 import { requireAuth } from '../lib/requireAuth';
 import { normalizeRelayBaseUrl, saveConnectLicense } from '../lib/connectRelay';
+import { refreshServerName, serverNameState } from '../lib/serverName';
 
 /** A license token is a signed payload plus an RSA signature — well under this in practice. */
 const MAX_LICENSE_TOKEN_LENGTH = 8192;
@@ -21,11 +22,28 @@ export async function instanceSettingsRoutes(app: FastifyInstance): Promise<void
   // `builtInUnsubscribe`: whether a campaign with no unsubscribe URL of its own gets the built-in
   // page (lib/unsubscribeToken.ts) — the dashboard uses it to say the field is optional.
   // `publicHost`: this install's own host, which a link domain's CNAME points at (lib/linkDomain.ts).
-  app.get('/', async () => ({
-    id: 'default',
-    builtInUnsubscribe: Boolean(process.env.WARMHAWK_DOMAIN?.trim()),
-    publicHost: process.env.WARMHAWK_DOMAIN?.trim() || null,
-  }));
+  // `serverName`: MAIL_SERVER_NAME and its reverse-DNS check (lib/serverName.ts).
+  // `addressCheckName`: the name the address check gives, null while it is off.
+  app.get('/', async () => {
+    const serverName = await serverNameState();
+    const explicitHelo = process.env.ADDRESS_CHECK_HELO?.trim() || null;
+    return {
+      id: 'default',
+      builtInUnsubscribe: Boolean(process.env.WARMHAWK_DOMAIN?.trim()),
+      publicHost: process.env.WARMHAWK_DOMAIN?.trim() || null,
+      serverName,
+      addressCheckName: explicitHelo ?? (serverName.status === 'PASS' ? serverName.name : null),
+    };
+  });
+
+  // Domain Health's Check now for the server name. 404 while MAIL_SERVER_NAME is blank.
+  app.post('/server-name/check', async (_request, reply) => {
+    const state = await refreshServerName();
+    if (!state.name) {
+      return reply.code(404).send({ error: 'MAIL_SERVER_NAME is not set on this server' });
+    }
+    return state;
+  });
 
   app.put('/', async (_request, reply) =>
     reply.code(410).send({

@@ -4,7 +4,8 @@
  * address is stopped here instead of bouncing, and a bounce is what counts toward the bounce-rate
  * pause and wears down the sending mailbox's reputation.
  *
- * Off unless ADDRESS_CHECK_HELO is set. The check needs outbound port 25, which most home ISPs and
+ * Off unless ADDRESS_CHECK_HELO is set, or MAIL_SERVER_NAME is and its reverse DNS checks out
+ * (addressCheckName.ts). The check needs outbound port 25, which most home ISPs and
  * many cloud hosts block, and a host name whose reverse DNS matches this server's IP, without
  * which the big providers refuse the connection. Anything short of a clear "no such mailbox" — a
  * timeout, a greylist, a policy refusal, a server that accepts every address — comes back

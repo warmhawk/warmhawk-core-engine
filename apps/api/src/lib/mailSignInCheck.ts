@@ -10,6 +10,7 @@
  */
 import nodemailer from 'nodemailer';
 import { ImapFlow } from 'imapflow';
+import { ehloNameFor } from './serverName';
 
 export type MailServerKind = 'SMTP' | 'IMAP';
 
@@ -109,7 +110,7 @@ export async function checkSmtpSignIn(signIn: MailServerSignIn): Promise<SignInR
   if (isReservedTestHost(signIn.host)) return null;
 
   // Built the way mailSender.ts builds its SMTP transport, so a pass here means sends will sign in.
-  const clientName = process.env.WARMHAWK_DOMAIN?.trim();
+  const clientName = await ehloNameFor(null);
   const transporter = nodemailer.createTransport({
     host: signIn.host.trim(),
     port: signIn.port,
