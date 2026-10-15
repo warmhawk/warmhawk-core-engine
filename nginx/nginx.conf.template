@@ -21,6 +21,16 @@
 # see that function's own comment for why `restart`, not `reload`, is required here).
 # Renewal is a separate `certbot renew` loop container (docker-compose.yml's `certbot` service).
 
+# Bug fix (2026-10-15): a literal api:4600 in proxy_pass resolved `api` once, at nginx start. When the
+# API container restarted it came back on a new address, and nginx kept sending every request to
+# the old one: all routes, the unsubscribe page included, were 502 until nginx itself restarted.
+# A variable in proxy_pass makes nginx resolve through Docker's DNS per request (cached 10s).
+# Every block below, and every link-domain file scripts/warmhawk writes, proxies via $warmhawk_api.
+resolver 127.0.0.11 valid=10s ipv6=off;
+map $host $warmhawk_api {
+    default http://api:4600;
+}
+
 # Link domains (`warmhawk link-domain add <host>`): one file per host, written by scripts/warmhawk
 # into nginx/link-domains/ and mounted here. Each serves /unsubscribe/ only, so a brand's link host
 # never exposes the API. Plain files, not templates, so adding one needs a reload, not a restart.
@@ -62,72 +72,72 @@ server {
     # outside the internal Docker network, by omission, not by an access-control rule that could
     # be misconfigured.
     location /health {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/leads/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/campaigns/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/mailboxes/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/domains/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/queue/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/seed-accounts/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/ai-providers/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/replies/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/oauth/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/public/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/auth/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/instance-settings/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/warmup/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/suppression/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     location /v1/version/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     # The built-in unsubscribe page campaign emails link to — public, no login.
     location /unsubscribe/ {
-        proxy_pass http://api:4600;
+        proxy_pass $warmhawk_api;
     }
 
     # Bundled Uptime Kuma dashboard, served under its own path so a customer can reach it through
@@ -163,71 +173,71 @@ server {
 #     proxy_set_header X-Forwarded-Proto $scheme;
 #
 #     location /health {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/leads/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/campaigns/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/mailboxes/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/domains/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/queue/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/seed-accounts/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/ai-providers/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/replies/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/oauth/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/public/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/auth/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/instance-settings/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/warmup/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/suppression/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/version/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /unsubscribe/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /status/ {
@@ -268,71 +278,71 @@ server {
 #     location /.well-known/acme-challenge/ { root /var/www/certbot; }
 #
 #     location /health {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/leads/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/campaigns/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/mailboxes/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/domains/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/queue/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/seed-accounts/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/ai-providers/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/replies/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/oauth/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/public/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/auth/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/instance-settings/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/warmup/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/suppression/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /v1/version/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /unsubscribe/ {
-#         proxy_pass http://api:4600;
+#         proxy_pass $warmhawk_api;
 #     }
 #
 #     location /status/ {

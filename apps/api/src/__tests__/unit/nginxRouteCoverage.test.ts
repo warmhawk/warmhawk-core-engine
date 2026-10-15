@@ -24,6 +24,18 @@ describe('nginx.conf.template', () => {
     expect(nginx.match(/^ {4}location \/unsubscribe\/ \{$/gm)).toHaveLength(1);
   });
 
+  // A literal `proxy_pass http://api:4600` is resolved once at nginx start: after an API restart
+  // on a new address, every route 502s until nginx restarts too (hit live 2026-10-15).
+  it('reaches the API through the re-resolving $warmhawk_api variable only', () => {
+    const root = resolve(__dirname, '../../../../..');
+    const nginx = readFileSync(resolve(root, 'nginx/nginx.conf.template'), 'utf8');
+    const cli = readFileSync(resolve(root, 'scripts/warmhawk'), 'utf8');
+    expect(nginx).toMatch(/^resolver 127\.0\.0\.11 /m);
+    expect(nginx).not.toMatch(/proxy_pass http:\/\/api:/);
+    expect(cli).not.toMatch(/proxy_pass http:\/\/api:/);
+    expect(cli).toContain('proxy_pass \\$warmhawk_api;');
+  });
+
   // A brand's link host (`warmhawk link-domain add`) must never expose the API or the dashboard:
   // the server blocks scripts/warmhawk writes proxy /unsubscribe/ and nothing else.
   it('loads link-domain blocks, and those proxy /unsubscribe/ only', () => {
