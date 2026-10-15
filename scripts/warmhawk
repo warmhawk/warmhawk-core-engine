@@ -173,6 +173,77 @@ link_domain() {
   esac
 }
 
+# --- server-name -----------------------------------------------------------------------------
+# The one name this server introduces itself with to mail servers (apps/api/src/lib/serverName.ts):
+# MAIL_SERVER_NAME in .env/.env. Core uses it only once its A record and the IP's reverse DNS both
+# match, and `check` prints that verdict -- the same one Domain Health shows -- from the API itself.
+ENV_FILE="$REPO_ROOT/.env/.env"
+
+name_fail() { echo "warmhawk server-name: $*" >&2; exit 1; }
+
+# Writes MAIL_SERVER_NAME (replacing the line, or adding one), then restarts the two services
+# that read it.
+set_server_name() {
+  local value="$1"
+  [ -f "$ENV_FILE" ] || name_fail "no $ENV_FILE. Run scripts/install.sh first."
+  if grep -q '^MAIL_SERVER_NAME=' "$ENV_FILE"; then
+    sed -i.bak "s/^MAIL_SERVER_NAME=.*/MAIL_SERVER_NAME=$value/" "$ENV_FILE" && rm -f "$ENV_FILE.bak"
+  else
+    printf '\nMAIL_SERVER_NAME=%s\n' "$value" >>"$ENV_FILE"
+  fi
+  compose up -d api worker >/dev/null
+}
+
+check_server_name() {
+  local result="" i
+  # The API checks the name when it starts; this asks it again once it is up.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    result="$(compose exec -T api node -e '
+      fetch("http://127.0.0.1:" + (process.env.PORT || 4600) + "/internal/domains/server-name/check", {
+        method: "POST",
+        headers: { "x-callback-secret": process.env.NEXTJS_CALLBACK_SECRET || "" },
+      }).then((r) => r.json()).then((s) => console.log(JSON.stringify(s)), () => process.exit(1));
+    ' 2>/dev/null)" && break
+    result=""
+    sleep 3
+  done
+  [ -n "$result" ] || name_fail "the API didn't answer. Check 'warmhawk status'."
+  printf '%s' "$result" | compose exec -T api node -e '
+    let raw = "";
+    process.stdin.on("data", (d) => (raw += d)).on("end", () => {
+      const s = JSON.parse(raw);
+      if (!s.name) console.log("MAIL_SERVER_NAME is blank. Emails use the default name.");
+      else if (s.status === "PASS") console.log(s.name + " checks out: its A record and reverse DNS match. Emails now introduce this server as " + s.name + ".");
+      else if (s.status === "FAIL") console.log(s.name + " is not used yet: " + s.error);
+      else console.log(s.name + " could not be checked: DNS did not answer. Try again in a minute.");
+    });
+  '
+}
+
+server_name() {
+  local action="${1:-}" host
+  host="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+  host="${host%.}"
+  case "$action" in
+    set)
+      valid_host "$host" || name_fail "'$host' isn't a host name. Example: warmhawk server-name set mail.yourcompany.com"
+      set_server_name "$host"
+      echo "MAIL_SERVER_NAME=$host saved. Checking..."
+      check_server_name
+      ;;
+    clear)
+      set_server_name ""
+      echo "MAIL_SERVER_NAME cleared. Emails use the default name."
+      ;;
+    check)
+      check_server_name
+      ;;
+    *)
+      name_fail "usage: warmhawk server-name set <host> | clear | check"
+      ;;
+  esac
+}
+
 usage() {
   cat <<USAGE
 WarmHawk Core Engine
@@ -189,6 +260,9 @@ Usage: warmhawk <command> [args]
                     server, with a Let's Encrypt certificate. --no-tls when a proxy in front
                     of this server already handles HTTPS.
   link-domain remove <host> | list
+  server-name set <host> | clear | check
+                    The name this server gives mail servers (e.g. mail.yourcompany.com). Used
+                    once its A record and this server's reverse DNS (PTR) both match it.
   help              This message.
 
 Installed at: ${REPO_ROOT}
@@ -213,6 +287,10 @@ case "${1:-help}" in
   link-domain)
     shift
     link_domain "$@"
+    ;;
+  server-name)
+    shift
+    server_name "$@"
     ;;
   help | --help | -h)
     usage

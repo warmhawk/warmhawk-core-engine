@@ -21,6 +21,7 @@ import { prisma } from '@warmhawk/db';
 import { personalMailProviderDomains } from '../lib/personalMailProviders';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { runDomainCheck } from '../lib/domainCheck';
+import { refreshServerName } from '../lib/serverName';
 import { postDomainChangeAlert } from '../lib/alertWebhook';
 import { generateCandidates } from '../lib/lookalikeCandidates';
 import { checkRdapRegistration } from '../lib/rdap';
@@ -64,6 +65,10 @@ export async function internalDomainsRoutes(app: FastifyInstance): Promise<void>
     });
     return { domains };
   });
+
+  // `warmhawk server-name` runs this inside the api container after setting MAIL_SERVER_NAME,
+  // so the owner sees the same verdict Domain Health shows (lib/serverName.ts).
+  app.post('/server-name/check', async () => refreshServerName());
 
   app.post<{ Body: CheckBlocklistBody }>('/check-blocklist', async (request, reply) => {
     const domainName = request.body?.domainName?.trim().toLowerCase();

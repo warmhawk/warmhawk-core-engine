@@ -156,9 +156,11 @@ describe('WarmHawk Connect (install side)', () => {
       });
       expect(response.statusCode).toBe(200);
       expect(Object.keys(response.json() as object).sort()).toEqual([
+        'addressCheckName',
         'builtInUnsubscribe',
         'id',
         'publicHost',
+        'serverName',
       ]);
     });
   });

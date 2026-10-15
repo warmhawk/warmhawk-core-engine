@@ -9,7 +9,8 @@
 import type { Job } from 'bullmq';
 import type IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
-import { addressCheckConfig, checkAddress, junkAddressReason } from './addressCheck';
+import { checkAddress, junkAddressReason } from './addressCheck';
+import { currentAddressCheckConfig } from './addressCheckName';
 import { cachedVerdict, rememberVerdict, takeUnknownRetry, unknownRetryAt } from './addressRisk';
 import { campaignCapToday } from './campaignCap';
 import { hasMailingAddress } from './enqueuer';
@@ -178,7 +179,7 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
       return;
     }
   }
-  const addressCheck = addressCheckConfig();
+  const addressCheck = await currentAddressCheckConfig();
   if (!followUp && addressCheck) {
     // The look-ahead check (`precheckUpcomingLeads`) usually answered already.
     const saved = reservationRedis ? await cachedVerdict(reservationRedis, lead.id) : null;
