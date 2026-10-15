@@ -155,7 +155,11 @@ describe('WarmHawk Connect (install side)', () => {
         headers: { authorization: 'Bearer operator-token' },
       });
       expect(response.statusCode).toBe(200);
-      expect(Object.keys(response.json() as object).sort()).toEqual(['builtInUnsubscribe', 'id']);
+      expect(Object.keys(response.json() as object).sort()).toEqual([
+        'builtInUnsubscribe',
+        'id',
+        'publicHost',
+      ]);
     });
   });
 

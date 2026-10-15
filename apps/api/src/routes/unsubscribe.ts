@@ -9,6 +9,7 @@
  *   GET  /unsubscribe/:token — a page with one button. Changes nothing: mail scanners and link
  *                              previews fetch every URL in a message, and a GET that unsubscribed
  *                              would opt people out who never clicked.
+ *   GET  /unsubscribe/ping   — a link domain's check (see `lib/linkDomain.ts`).
  *   POST /unsubscribe/:token — suppresses the address. Both the button and the RFC 8058 one-click
  *                              POST a mailbox provider sends (`List-Unsubscribe-Post`) land here;
  *                              the request body is ignored either way.
@@ -17,6 +18,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { prisma } from '@warmhawk/db';
 import { TEST_SEND_UNSUBSCRIBE_ID, verifyUnsubscribeToken } from '../lib/unsubscribeToken';
 import { suppressEmail } from '../lib/suppression';
+import { linkDomainProof } from '../lib/linkDomain';
 import { RATE_LIMIT_UNSUBSCRIBE } from '../../../../constants';
 
 function escapeHtml(text: string): string {
@@ -116,6 +118,19 @@ export async function unsubscribeRoutes(app: FastifyInstance): Promise<void> {
   const config = {
     rateLimit: { max: RATE_LIMIT_UNSUBSCRIBE.max, timeWindow: RATE_LIMIT_UNSUBSCRIBE.timeWindowMs },
   };
+
+  // A link domain's check (`lib/linkDomain.ts`): proves the host reaches this install by
+  // answering the HMAC of a nonce only this install can compute. Lives under /unsubscribe/ because
+  // that is the one path a link host serves.
+  app.get<{ Querystring: { n?: string } }>('/ping', { config }, async (request, reply) => {
+    const nonce = request.query.n ?? '';
+    if (!/^[\w-]{16,64}$/.test(nonce)) return reply.code(400).type('text/plain').send('');
+    return reply
+      .header('Cache-Control', 'no-store')
+      .header('X-Robots-Tag', 'noindex')
+      .type('text/plain; charset=utf-8')
+      .send(linkDomainProof(nonce));
+  });
 
   app.get<{ Params: { token: string } }>('/:token', { config }, async (request, reply) => {
     if (verifyUnsubscribeToken(request.params.token) === TEST_SEND_UNSUBSCRIBE_ID)

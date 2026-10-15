@@ -48,6 +48,23 @@ describe('unsubscribeToken', () => {
     expect(url).not.toContain('@');
   });
 
+  it("uses the sending domain's link domain only once its check has passed", () => {
+    process.env.WARMHAWK_DOMAIN = 'api.acme.example';
+    const token = signUnsubscribeToken('clead123');
+    const domain = { linkDomain: 'link.brand.example', linkDomainStatus: 'PASS' };
+    expect(hostedUnsubscribeUrl('clead123', domain)).toBe(
+      `https://link.brand.example/unsubscribe/${token}`,
+    );
+    for (const linkDomainStatus of ['PENDING', 'FAIL']) {
+      expect(hostedUnsubscribeUrl('clead123', { ...domain, linkDomainStatus })).toBe(
+        `https://api.acme.example/unsubscribe/${token}`,
+      );
+    }
+    expect(hostedUnsubscribeUrl('clead123', { linkDomain: null, linkDomainStatus: 'PASS' })).toBe(
+      `https://api.acme.example/unsubscribe/${token}`,
+    );
+  });
+
   it('has no URL to give on an install with no domain', () => {
     delete process.env.WARMHAWK_DOMAIN;
     expect(hostedUnsubscribeUrl('clead123')).toBeNull();

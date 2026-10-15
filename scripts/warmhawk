@@ -37,6 +37,142 @@ compose() {
   docker compose --env-file "$REPO_ROOT/.env/.env" -f "$COMPOSE_FILE" "$@"
 }
 
+# --- link-domain -----------------------------------------------------------------------------
+# A link domain (`link.yourbrand.com`) is the host a sending domain's unsubscribe link uses, so a
+# brand's emails name only that brand (apps/api/src/lib/linkDomain.ts). This server has to answer
+# on it: each host gets one nginx server block in nginx/link-domains/ (mounted into the nginx
+# container, see nginx.conf.template) that serves /unsubscribe/ and nothing else, plus a Let's
+# Encrypt certificate through the same certbot webroot install.sh uses. The dashboard's Domain
+# Health page checks the host afterwards; until that passes, emails keep the default link.
+LINK_DIR="$REPO_ROOT/nginx/link-domains"
+
+link_fail() { echo "warmhawk link-domain: $*" >&2; exit 1; }
+
+valid_host() {
+  [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] && [ "${#1}" -le 253 ]
+}
+
+# The locations every link host serves, on every port. Same four headers as the main blocks.
+link_locations() {
+  local proto="$1"
+  cat <<CONF
+    proxy_set_header Host              \$host;
+    proxy_set_header X-Real-IP         \$remote_addr;
+    proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto ${proto};
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location /unsubscribe/ { proxy_pass \$warmhawk_api; }
+    location / { return 404; }
+CONF
+}
+
+# Plain HTTP only: what certbot's challenge needs, and all a host behind a TLS proxy needs.
+# shellcheck disable=SC2016 # '$scheme' is nginx's variable, written into the file as is.
+link_conf_http() {
+  cat <<CONF
+# Link domain $1 -- written by \`warmhawk link-domain add\`. Serves /unsubscribe/ only.
+server {
+    listen 80;
+    server_name $1;
+$(link_locations '$scheme')
+}
+CONF
+}
+
+# HTTPS on 443, and port 80 redirecting to it -- except the ACME path, and a request a TLS proxy
+# in front already took over HTTPS (same rule as the main port-80 block in nginx.conf.template).
+# shellcheck disable=SC2016 # '$scheme' is nginx's variable, written into the file as is.
+link_conf_tls() {
+  cat <<CONF
+# Link domain $1 -- written by \`warmhawk link-domain add\`. Serves /unsubscribe/ only.
+server {
+    listen 443 ssl;
+    server_name $1;
+    ssl_certificate     /etc/letsencrypt/live/$1/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$1/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+$(link_locations '$scheme')
+}
+server {
+    listen 80;
+    server_name $1;
+    set \$link_redirect "https";
+    if (\$http_x_forwarded_proto = "https") { set \$link_redirect ""; }
+    if (\$uri ~ "^/\.well-known/acme-challenge/") { set \$link_redirect ""; }
+    if (\$link_redirect = "https") { return 301 https://\$host\$request_uri; }
+$(link_locations https)
+}
+CONF
+}
+
+# Test the config, then reload. A config nginx refuses is put back the way it was.
+link_reload() {
+  local conf="$1" previous="$2"
+  if ! compose exec -T nginx nginx -t >/dev/null 2>&1; then
+    if [ -n "$previous" ]; then printf '%s\n' "$previous" >"$conf"; else rm -f "$conf"; fi
+    compose exec -T nginx nginx -t >&2 || true
+    link_fail "nginx refused the new config, so it was put back. Nothing changed."
+  fi
+  compose exec -T nginx nginx -s reload >/dev/null
+}
+
+link_domain() {
+  local action="${1:-}" host="${2:-}" tls=true
+  [ "${3:-}" = "--no-tls" ] && tls=false
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  case "$action" in
+    add)
+      valid_host "$host" || link_fail "'$host' isn't a host name. Example: warmhawk link-domain add link.yourbrand.com"
+      [ -d "$LINK_DIR" ] || mkdir -p "$LINK_DIR"
+      compose exec -T nginx test -d /etc/nginx/link-domains \
+        || link_fail "nginx on this server predates link domains. Run 'warmhawk update' first."
+      local conf="$LINK_DIR/$host.conf" previous=""
+      [ -f "$conf" ] && previous="$(cat "$conf")"
+
+      link_conf_http "$host" >"$conf"
+      link_reload "$conf" "$previous"
+      if [ "$tls" = false ]; then
+        echo "$host now answers on port 80 (/unsubscribe/ only). Your TLS proxy must serve it over HTTPS."
+      else
+        set -a; source "$REPO_ROOT/.env/.env"; set +a
+        echo "Getting a certificate for $host (its DNS must already point at this server)..."
+        if ! compose run --rm --entrypoint certbot certbot certonly --webroot -w /var/www/certbot \
+          -d "$host" --non-interactive --agree-tos -m "admin@${WARMHAWK_DOMAIN}" --keep-until-expiring; then
+          link_fail "no certificate for $host. Point its DNS at this server (an A record to this server's IP, or a CNAME to ${WARMHAWK_DOMAIN}), then run this again."
+        fi
+        local http_only
+        http_only="$(cat "$conf")"
+        link_conf_tls "$host" >"$conf"
+        link_reload "$conf" "$http_only"
+        echo "$host now answers over HTTPS (/unsubscribe/ only)."
+      fi
+      echo "Next: in the dashboard, Domain Health -> the sending domain -> Link domain -> Check now."
+      ;;
+    remove)
+      valid_host "$host" || link_fail "usage: warmhawk link-domain remove <host>"
+      local conf="$LINK_DIR/$host.conf"
+      [ -f "$conf" ] || link_fail "$host isn't set up on this server."
+      local previous
+      previous="$(cat "$conf")"
+      rm -f "$conf"
+      link_reload "$conf" "$previous"
+      echo "$host removed. Clear it in the dashboard too, or its check fails and emails go back to the default link."
+      ;;
+    list)
+      local found=false f
+      for f in "$LINK_DIR"/*.conf; do
+        [ -e "$f" ] || continue
+        found=true
+        if grep -q "listen 443" "$f"; then echo "$(basename "$f" .conf)  https"; else echo "$(basename "$f" .conf)  http only"; fi
+      done
+      [ "$found" = true ] || echo "No link domains on this server yet."
+      ;;
+    *)
+      link_fail "usage: warmhawk link-domain add <host> [--no-tls] | remove <host> | list"
+      ;;
+  esac
+}
+
 usage() {
   cat <<USAGE
 WarmHawk Core Engine
@@ -48,6 +184,11 @@ Usage: warmhawk <command> [args]
   backup            Run the Postgres backup now, outside the nightly cron.
   status            Show every service and its health.
   logs [service]    Tail logs. With no service, tails everything.
+  link-domain add <host> [--no-tls]
+                    Serve a brand's unsubscribe link host (e.g. link.yourbrand.com) from this
+                    server, with a Let's Encrypt certificate. --no-tls when a proxy in front
+                    of this server already handles HTTPS.
+  link-domain remove <host> | list
   help              This message.
 
 Installed at: ${REPO_ROOT}
@@ -68,6 +209,10 @@ case "${1:-help}" in
   logs)
     shift
     compose logs -f --tail=200 "$@"
+    ;;
+  link-domain)
+    shift
+    link_domain "$@"
     ;;
   help | --help | -h)
     usage

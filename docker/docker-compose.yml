@@ -364,6 +364,8 @@ services:
     volumes:
       - certbot_conf:/etc/letsencrypt
       - certbot_www:/var/www/certbot
+      # Per-host link-domain server blocks, written by `warmhawk link-domain add` (scripts/warmhawk).
+      - ../nginx/link-domains:/etc/nginx/link-domains:ro
     depends_on: [api]
     networks:
       warmhawk_internal: {}

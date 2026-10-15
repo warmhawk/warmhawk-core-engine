@@ -1,5 +1,5 @@
 /**
- * One full domain check — SPF, DKIM, DMARC and blocklists — shared by the dashboard's on-demand
+ * One full domain check — SPF, DKIM, DMARC, blocklists and the link domain — shared by the dashboard's on-demand
  * `POST /v1/domains/:domain/check` and the scheduled `POST /internal/domains/check-blocklist`.
  *
  * The scheduled poll used to refresh blocklists only, on the theory that SPF/DKIM/DMARC change
@@ -7,9 +7,22 @@
  * someone else edits the zone, and the badge then stayed green indefinitely while "Last checked"
  * advanced every hour beside it. Every run now re-checks everything, so "Last checked" means what
  * it says and the change-alert diff covers all four fields.
+ *
+ * The link domain rides along: a host that stops answering (DNS moved, cert lapsed) flips to FAIL
+ * within the hour, and its emails go back to the install's own link until it answers again.
  */
 import { prisma, type Domain } from '@warmhawk/db';
 import { checkSpf, checkDkim, checkDmarc, checkBlocklists } from './dnsChecks';
+import { checkLinkDomain, type LinkDomainCheck } from './linkDomain';
+
+/** The columns a link-domain check writes. */
+export function linkDomainUpdate(link: LinkDomainCheck) {
+  return {
+    linkDomainStatus: link.status,
+    linkDomainError: link.error,
+    linkDomainCheckedAt: new Date(),
+  };
+}
 
 /**
  * Runs every check and writes the result. `selectorOverride` (a one-off `?selector=` on the
@@ -17,11 +30,12 @@ import { checkSpf, checkDkim, checkDmarc, checkBlocklists } from './dnsChecks';
  */
 export async function runDomainCheck(domain: Domain, selectorOverride?: string): Promise<Domain> {
   const selector = selectorOverride || domain.dkimSelector;
-  const [spfStatus, dkimStatus, dmarcStatus, blocklistStatus] = await Promise.all([
+  const [spfStatus, dkimStatus, dmarcStatus, blocklistStatus, link] = await Promise.all([
     checkSpf(domain.domainName),
     checkDkim(domain.domainName, selector),
     checkDmarc(domain.domainName),
     checkBlocklists(domain.domainName),
+    domain.linkDomain ? checkLinkDomain(domain.linkDomain) : null,
   ]);
 
   // History row captures the PRE-update snapshot (`domain.*`, read by the caller before any check
@@ -46,6 +60,7 @@ export async function runDomainCheck(domain: Domain, selectorOverride?: string):
         dmarcStatus,
         blocklistStatus,
         lastBlocklistCheckAt: new Date(),
+        ...(link ? linkDomainUpdate(link) : {}),
       },
     }),
   ]);
