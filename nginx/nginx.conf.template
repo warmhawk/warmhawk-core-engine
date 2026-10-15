@@ -156,6 +156,16 @@ server {
 }
 
 # --- Enabled by scripts/install.sh's enable_tls_template() once a cert exists ---
+# # enable_tls_template() keeps only what follows its marker line, so the resolver, the map and the
+# # link-domain include at the top of this file are repeated here. Without them a TLS install's
+# # nginx refuses to start ($warmhawk_api unknown) and link-domain files are never loaded.
+# resolver 127.0.0.11 valid=10s ipv6=off;
+# map $host $warmhawk_api {
+#     default http://api:4600;
+# }
+#
+# include /etc/nginx/link-domains/*.conf;
+#
 # server {
 #     listen 443 ssl;
 #     server_name ${WARMHAWK_DOMAIN};

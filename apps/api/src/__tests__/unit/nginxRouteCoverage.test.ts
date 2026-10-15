@@ -36,6 +36,32 @@ describe('nginx.conf.template', () => {
     expect(cli).toContain('proxy_pass \\$warmhawk_api;');
   });
 
+  // install.sh/update.sh's enable_tls_template() keeps only the lines after its marker, uncommented.
+  // Anything the live blocks rely on that sits above the marker has to be repeated below it, or a
+  // TLS install (every real one) loses it: the release e2e caught nginx not starting (2026-10-15).
+  it('keeps the resolver, the $warmhawk_api map and the link-domain include once TLS is enabled', () => {
+    const root = resolve(__dirname, '../../../../..');
+    const nginx = readFileSync(resolve(root, 'nginx/nginx.conf.template'), 'utf8');
+    const awk = 'index($0, "Enabled by scripts/install.sh") > 0 { found=1; next }';
+    for (const script of ['scripts/install.sh', 'scripts/update.sh']) {
+      expect(readFileSync(resolve(root, script), 'utf8')).toContain(awk);
+    }
+    const lines = nginx.split('\n');
+    const marker = lines.findIndex((line) => line.includes('Enabled by scripts/install.sh'));
+    expect(marker).toBeGreaterThan(0);
+    const tls = lines
+      .slice(marker + 1)
+      .map((line) => line.replace(/^# ?/, ''))
+      .join('\n');
+    for (const rendered of [nginx, tls]) {
+      expect(rendered).toMatch(/^resolver 127\.0\.0\.11 /m);
+      expect(rendered).toMatch(/^map \$host \$warmhawk_api \{\n {4}default http:\/\/api:4600;\n\}$/m);
+      expect(rendered).toMatch(/^include \/etc\/nginx\/link-domains\/\*\.conf;$/m);
+    }
+    expect(tls).toMatch(/^ {4}listen 443 ssl;$/m);
+    expect(tls).toContain('proxy_pass $warmhawk_api;');
+  });
+
   // A brand's link host (`warmhawk link-domain add`) must never expose the API or the dashboard:
   // the server blocks scripts/warmhawk writes proxy /unsubscribe/ and nothing else.
   it('loads link-domain blocks, and those proxy /unsubscribe/ only', () => {
