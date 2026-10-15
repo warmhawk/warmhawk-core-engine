@@ -95,6 +95,18 @@ export async function sentByDay(now: Date): Promise<{ day: string; count: number
   return days.map((day) => ({ day, count: byDay.get(day) ?? 0 }));
 }
 
+/**
+ * Campaign emails that failed today (UTC day): a FAILED execution log, written when a send errors
+ * out or the pre-send check finds the address dead. Retries live on the lead (`nextRetryAt`), not
+ * in BullMQ, so the queue's own `failed` count (crashed jobs kept for 7 days) isn't this (10-15-26).
+ */
+export async function failedToday(now: Date): Promise<number> {
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return prisma.executionLog.count({
+    where: { status: 'FAILED', createdAt: { gte: new Date(today) } },
+  });
+}
+
 // Days either side of today the Live Queue's per-mailbox table shows.
 const MAILBOX_DAYS_EACH_SIDE = 2;
 // Campaigns listed live ones first; archived ones aren't listed.
@@ -108,7 +120,7 @@ export interface MailboxDay {
   warmup: number;
   /** Dispatch jobs due that day; overdue ones count toward today. */
   queued: number;
-  /** Campaign emails expected that day (`lib/sendForecast.ts`); days after today only. */
+  /** Campaign emails expected that day (`lib/sendForecast.ts`); today counts what's still to come. */
   expected: number;
   /** Campaign cap for that day, including the post-graduation ramp. */
   cap: number;
@@ -187,7 +199,7 @@ export async function mailboxActivity(
       sent: sent.get(key(m.id, day)) ?? 0,
       warmup: warmup.get(key(m.id, day)) ?? 0,
       queued: offsets[i]! < 0 ? 0 : (queued.get(key(m.id, day)) ?? 0),
-      expected: offsets[i]! > 0 ? (expectedByMailbox.get(m.id)?.get(day) ?? 0) : 0,
+      expected: offsets[i]! >= 0 ? (expectedByMailbox.get(m.id)?.get(day) ?? 0) : 0,
       cap: campaignCapToday(
         m.dailyCap,
         m.warmupGraduatedAt,
@@ -310,12 +322,12 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
 
     // Every pending job, per state, for the counts and the per-day and per-mailbox queued counts;
     // the list below shows the soonest MAX_LISTED_JOBS.
-    const [rawCounts, isPaused, sent, jobsByState, forecast] = await Promise.all([
+    const [rawCounts, isPaused, sent, failed, jobsByState] = await Promise.all([
       queue.getJobCounts(...JOB_STATES),
       queue.isPaused(),
       sentByDay(new Date()),
+      failedToday(new Date()),
       Promise.all(PENDING_STATES.map((state) => queue.getJobs([state]))),
-      sendForecast(new Date(), FORECAST_DAYS),
     ]);
     const counts = {
       ...(Object.fromEntries(JOB_STATES.map((state) => [state, rawCounts[state] ?? 0])) as Record<
@@ -328,6 +340,13 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
     const now = new Date();
     const allJobs = jobsByState.flat();
     const dispatchJobs = allJobs.filter(isDispatchJob).sort((a, b) => dueAtMs(a) - dueAtMs(b));
+    // Booked slots go out today and use their mailbox's cap, so today's plan starts after them.
+    const bookedByMailbox = new Map<string, number>();
+    for (const job of dispatchJobs) {
+      const mailboxId = job.data?.mailboxId as string | undefined;
+      if (mailboxId) bookedByMailbox.set(mailboxId, (bookedByMailbox.get(mailboxId) ?? 0) + 1);
+    }
+    const forecast = await sendForecast(now, FORECAST_DAYS, bookedByMailbox, SENT_HISTORY_DAYS);
     const activity = await mailboxActivity(
       now,
       allJobs
@@ -346,9 +365,15 @@ export async function queueRoutes(app: FastifyInstance): Promise<void> {
       isPaused,
       jobs: jobSummaries,
       sentByDay: sent,
+      // `counts.completed` is every job finished in the last 24h, skipped slots included, so the
+      // Live Queue's "Sent today" reads sentByDay's today and its failed card this.
+      failedToday: failed,
       queuedByDay: queuedByDay(now, dispatchJobs.map(dueAtMs)),
-      // The queue only ever holds each mailbox's next slot, so days ahead show what's expected.
+      // The queue only ever holds each mailbox's next slot, so the rest of today and the days ahead
+      // show what's expected.
       expectedByDay: forecast.byDay,
+      // Chart days no active campaign sends on, so a weekend's 0 reads "Off" rather than empty.
+      offDays: forecast.offDays,
       mailboxes: activity,
       throttling: {
         cadenceFloorSeconds: CADENCE_FLOOR_SECONDS,
