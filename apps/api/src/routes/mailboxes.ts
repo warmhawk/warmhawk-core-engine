@@ -138,8 +138,19 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
       // `oauthConnectedAt`, `oauthRefreshTokenEncrypted`, even `authPasswordEncrypted`. Whitelist
       // exactly the fields this route is meant to expose (status, dailyCap, warmupEnabled,
       // senderName).
-      const data: { status?: MailboxStatus; dailyCap?: number; warmupEnabled?: boolean; senderName?: string | null } = {};
-      if (request.body.status !== undefined) data.status = request.body.status;
+      const data: {
+        status?: MailboxStatus;
+        autoFlaggedAt?: null;
+        dailyCap?: number;
+        warmupEnabled?: boolean;
+        senderName?: string | null;
+      } = {};
+      if (request.body.status !== undefined) {
+        data.status = request.body.status;
+        // Un-pausing is the human's answer to a bounce flag: clear it, or the dashboard keeps
+        // alerting and warm-up keeps skipping a mailbox that is sending again.
+        if (request.body.status !== 'PAUSED') data.autoFlaggedAt = null;
+      }
       if (request.body.dailyCap !== undefined) data.dailyCap = request.body.dailyCap;
       if (request.body.warmupEnabled !== undefined) {
         if (typeof request.body.warmupEnabled !== 'boolean') {
