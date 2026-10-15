@@ -15,11 +15,22 @@
  * (vitest.integration.config.ts). Skipped automatically if DATABASE_URL isn't set.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import IORedis from 'ioredis';
 import { prisma } from '@warmhawk/db';
-import { processDispatchJob } from '../processor';
+import { checkAddress } from '../addressCheck';
+import { processDispatchJob, setReservationRedis } from '../processor';
+import { mailboxReservationKey } from '../queue';
+
+// The address check's SMTP conversation is covered in addressCheck.test.ts; here only its verdict
+// matters. Off (ADDRESS_CHECK_HELO unset) for every case but the one that sets it.
+vi.mock('../addressCheck', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../addressCheck')>()),
+  checkAddress: vi.fn(),
+}));
 
 const hasIntegrationEnv = Boolean(process.env.DATABASE_URL);
 const describeIntegration = hasIntegrationEnv ? describe : describe.skip;
+const itWithRedis = process.env.REDIS_URL ? it : it.skip;
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -59,6 +70,7 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
   });
 
   afterAll(async () => {
+    await prisma.executionLog.deleteMany({ where: { campaignId } });
     await prisma.lead.deleteMany({ where: { campaignId } });
     await prisma.mailbox.delete({ where: { id: mailboxId } }).catch(() => undefined);
     await prisma.domain.deleteMany({ where: { domainName: 'processor-test.example' } });
@@ -149,6 +161,76 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
 
     const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
     expect(updated.status).toBe('BOUNCED'); // untouched — recordSendFailure already had the final say
+  });
+
+  it('stops a dead address before n8n is called, as FAILED with the reason logged', async () => {
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    vi.mocked(checkAddress).mockResolvedValue({
+      verdict: 'invalid',
+      detail:
+        "the recipient's mail server says this address doesn't exist (550 5.1.1 no such user)",
+    });
+    try {
+      const lead = await createQueuedLead('dead@processor-test.example');
+
+      await expect(processDispatchJob({ leadId: lead.id, mailboxId })).resolves.toBeUndefined();
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
+      expect(updated.status).toBe('FAILED');
+      expect(updated.queuedJobId).toBeNull();
+      const logs = await prisma.executionLog.findMany({ where: { leadId: lead.id } });
+      expect(logs).toHaveLength(1);
+      expect(logs[0]).toMatchObject({ status: 'FAILED', mailboxId });
+      expect(logs[0].errorMessage).toMatch(/^Not sent: .*5\.1\.1.*nothing went out\.$/);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.mocked(checkAddress).mockReset();
+    }
+  });
+
+  itWithRedis('hands a dead address’s slot back, but keeps a booking made since', async () => {
+    const redis = new IORedis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
+    setReservationRedis(redis);
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    vi.mocked(checkAddress).mockResolvedValue({ verdict: 'invalid', detail: '550 5.1.1' });
+    const key = mailboxReservationKey(mailboxId);
+    try {
+      const dead = await createQueuedLead('dead-slot@processor-test.example');
+      await redis.set(key, String(dead.queuedSlotAt!.getTime()), 'EX', 600);
+      await processDispatchJob({ leadId: dead.id, mailboxId });
+      expect(await redis.get(key)).toBeNull();
+
+      // The enqueuer booked the mailbox's next slot while this one was being checked.
+      const raced = await createQueuedLead('dead-raced@processor-test.example');
+      const nextSlot = String(raced.queuedSlotAt!.getTime() + 300_000);
+      await redis.set(key, nextSlot, 'EX', 600);
+      await processDispatchJob({ leadId: raced.id, mailboxId });
+      expect(await redis.get(key)).toBe(nextSlot);
+    } finally {
+      await redis.del(key);
+      setReservationRedis(null);
+      await redis.quit();
+      vi.unstubAllEnvs();
+      vi.mocked(checkAddress).mockReset();
+    }
+  });
+
+  it('sends as before when the check can’t tell', async () => {
+    vi.stubEnv('ADDRESS_CHECK_HELO', 'check.processor-test.example');
+    vi.mocked(checkAddress).mockResolvedValue({ verdict: 'unknown', detail: 'greylisted' });
+    try {
+      const lead = await createQueuedLead('maybe@processor-test.example');
+      fetchSpy.mockResolvedValue(jsonResponse(200, { status: 'sent', leadId: lead.id }));
+
+      await expect(processDispatchJob({ leadId: lead.id, mailboxId })).resolves.toBeUndefined();
+
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(checkAddress).toHaveBeenCalledWith('maybe@processor-test.example', expect.anything());
+    } finally {
+      vi.unstubAllEnvs();
+      vi.mocked(checkAddress).mockReset();
+    }
   });
 
   it('does not clobber a lead recordSendFailure already rescheduled with a real nextRetryAt', async () => {

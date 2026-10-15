@@ -12,7 +12,7 @@ import { Worker } from 'bullmq';
 import { prisma } from '@warmhawk/db';
 import { runEnqueuerTick } from './enqueuer';
 import { reconcileStuckLeads } from './reconcile';
-import { processJob } from './processor';
+import { processJob, setReservationRedis } from './processor';
 import { syncSentToday } from './rollingSends';
 import {
   createDispatchQueue,
@@ -27,6 +27,7 @@ const RECONCILE_INTERVAL_MS = 5 * 60_000; // every 5 minutes, per the V12 Redis 
 async function main() {
   const connection = createRedisConnection();
   const queue = createDispatchQueue(connection);
+  setReservationRedis(connection);
 
   const worker = new Worker(DISPATCH_QUEUE_NAME, processJob, { connection });
   worker.on('failed', (job, err) => {
