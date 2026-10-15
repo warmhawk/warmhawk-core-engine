@@ -177,19 +177,22 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
   });
 
   it('reports sends per UTC day for the last 6 days and today, counting only sends that left', async () => {
-    const getSent = async (): Promise<{ day: string; count: number }[]> => {
+    const getStatus = async (): Promise<{
+      sentByDay: { day: string; count: number }[];
+      failedToday: number;
+    }> => {
       const response = await app.inject({
         method: 'GET',
         url: '/v1/queue/status',
         headers: { authorization: `Bearer ${authToken}` },
       });
       expect(response.statusCode).toBe(200);
-      return response.json().sentByDay;
+      return response.json();
     };
     const DAY = 24 * 60 * 60 * 1000;
     const now = Date.now();
     // Other tests share this database, so compare against a before count rather than absolutes.
-    const before = await getSent();
+    const { sentByDay: before, failedToday: failedBefore } = await getStatus();
     const created = await Promise.all(
       [
         { status: 'SENT', at: now },
@@ -211,12 +214,14 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
     );
 
     try {
-      const after = await getSent();
+      const { sentByDay: after, failedToday } = await getStatus();
       expect(after).toHaveLength(7);
       const day = (offset: number) => new Date(now - offset * DAY).toISOString().slice(0, 10);
       expect(after.map((d) => d.day)).toEqual([6, 5, 4, 3, 2, 1, 0].map(day));
       const gained = after.map((d, i) => d.count - before[i]!.count);
       expect(gained).toEqual([0, 0, 0, 1, 0, 0, 2]);
+      // The FAILED log never left, so it counts as failed today instead.
+      expect(failedToday - failedBefore).toBe(1);
     } finally {
       await prisma.executionLog.deleteMany({ where: { id: { in: created.map((c) => c.id) } } });
     }
@@ -292,9 +297,9 @@ describeIntegration('queue routes (integration, real Postgres + Redis)', () => {
         { day: day(1), sent: 0, warmup: 0, queued: 1, expected: 0, cap: 8 },
         { day: day(2), sent: 0, warmup: 0, queued: 0, expected: 0, cap: 9 },
       ]);
-      // The chart's days ahead: the 7 UTC days after today.
+      // The rest of today, then the chart's 7 UTC days after it.
       expect(response.json().expectedByDay.map((d: { day: string }) => d.day)).toEqual(
-        [1, 2, 3, 4, 5, 6, 7].map((offset) =>
+        [0, 1, 2, 3, 4, 5, 6, 7].map((offset) =>
           new Date(
             Date.UTC(
               new Date(now).getUTCFullYear(),
