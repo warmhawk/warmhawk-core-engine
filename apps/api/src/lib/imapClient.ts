@@ -61,6 +61,11 @@ export async function openImapClient(mailboxId: string): Promise<ImapFlow> {
     auth,
     logger: false,
   });
+  // Bug fix (2026-10-15): a socket error after connect() settled (the server resetting the
+  // connection mid-search) is emitted as an 'error' event. With no listener, Node throws it and the
+  // whole API process exits; it did, live, during n8n's reply poll. The command in flight still
+  // rejects, so the caller sees the failure either way.
+  client.on('error', (err: Error) => console.warn(`[imap] mailbox ${mailbox.id}: ${err.message}`));
 
   try {
     await client.connect();
