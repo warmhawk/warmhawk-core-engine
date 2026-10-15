@@ -412,4 +412,81 @@ describeIntegration('domains routes (integration, real Postgres)', () => {
     const response = await app.inject({ method: 'DELETE', url: '/v1/domains/does-not-matter' });
     expect(response.statusCode).toBe(401);
   });
+
+  it('saves a link domain unchecked, resets it on change, and refuses a non-host', async () => {
+    const domainName = `link-domain-${Date.now()}.example.com`;
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v1/domains',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { domainName },
+    });
+    const { id } = created.json();
+    createdDomainIds.push(id);
+    const patch = (linkDomain: unknown) =>
+      app.inject({
+        method: 'PATCH',
+        url: `/v1/domains/${id}`,
+        headers: { authorization: `Bearer ${authToken}` },
+        payload: { linkDomain },
+      });
+
+    const saved = await patch(' HTTPS://Link.Brand.Example/ ');
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({
+      linkDomain: 'link.brand.example',
+      linkDomainStatus: 'PENDING',
+    });
+
+    // A pass earlier doesn't carry over to a different host.
+    await prisma.domain.update({
+      where: { id },
+      data: { linkDomainStatus: 'PASS', linkDomainCheckedAt: new Date() },
+    });
+    expect((await patch('link.brand.example')).json().linkDomainStatus).toBe('PASS');
+    const moved = (await patch('go.brand.example')).json();
+    expect(moved).toMatchObject({ linkDomain: 'go.brand.example', linkDomainStatus: 'PENDING' });
+    expect(moved.linkDomainCheckedAt).toBeNull();
+
+    expect((await patch('not a host')).statusCode).toBe(422);
+    expect((await patch('')).json().linkDomain).toBeNull();
+  });
+
+  it('checks a link domain through the ping page, and fails one that does not reach this install', async () => {
+    const domainName = `link-check-${Date.now()}.example.com`;
+    const domain = await prisma.domain.create({ data: { domainName } });
+    createdDomainIds.push(domain.id);
+    const check = () =>
+      app.inject({
+        method: 'POST',
+        url: `/v1/domains/${domainName}/link-domain/check`,
+        headers: { authorization: `Bearer ${authToken}` },
+      });
+
+    expect((await check()).statusCode).toBe(422);
+
+    // `.invalid` never resolves (RFC 2606), so this is the "no DNS record yet" path, offline.
+    await prisma.domain.update({
+      where: { id: domain.id },
+      data: { linkDomain: 'link.no-such-host.invalid', linkDomainStatus: 'PASS' },
+    });
+    const failed = await check();
+    expect(failed.statusCode).toBe(200);
+    expect(failed.json().linkDomainStatus).toBe('FAIL');
+    expect(failed.json().linkDomainError).toContain('link.no-such-host.invalid');
+    expect(failed.json().linkDomainCheckedAt).not.toBeNull();
+  }, 20_000);
+
+  it('answers the ping with a proof of this install, unauthenticated, and refuses a bad nonce', async () => {
+    const { linkDomainProof } = await import('../../lib/linkDomain');
+    const nonce = 'abcdefghijklmnop0123';
+    const ping = await app.inject({ method: 'GET', url: `/unsubscribe/ping?n=${nonce}` });
+    expect(ping.statusCode).toBe(200);
+    expect(ping.body).toBe(linkDomainProof(nonce));
+    expect(ping.headers['cache-control']).toBe('no-store');
+    expect((await app.inject({ method: 'GET', url: '/unsubscribe/ping?n=short' })).statusCode).toBe(
+      400,
+    );
+    expect((await app.inject({ method: 'GET', url: '/unsubscribe/ping' })).statusCode).toBe(400);
+  });
 });

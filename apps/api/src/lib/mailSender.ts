@@ -36,6 +36,7 @@ import {
   resolveUnsubscribeUrl,
 } from './sendCompliance';
 import { hostedUnsubscribeUrl } from './unsubscribeToken';
+import { LINK_DOMAIN_SELECT, linkHostFor } from './linkDomain';
 import { isEmailSuppressed } from './leadIngest';
 import { pickSeedBccSample, subjectSha256 } from './seedAccounts';
 import { evaluateBounceCircuitBreaker } from './bounceCircuitBreaker';
@@ -316,7 +317,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
   const mailbox = await prisma.mailbox.findUnique({
     where: { id: mailboxId },
-    include: { domain: { select: { mailingAddress: true } } },
+    include: { domain: { select: { mailingAddress: true, ...LINK_DOMAIN_SELECT } } },
   });
   if (!mailbox) throw new MailSendError('Mailbox not found', 404);
 
@@ -397,7 +398,7 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
     const unsubscribeUrl = customTemplate
       ? resolveUnsubscribeUrl(customTemplate, to)
       : leadId
-        ? hostedUnsubscribeUrl(leadId)
+        ? hostedUnsubscribeUrl(leadId, mailbox.domain)
         : null;
     assertCanSpamCompliant({
       physicalMailingAddress,
@@ -465,8 +466,9 @@ export async function sendMail(input: SendMailInput): Promise<SendMailResult> {
 
       // The name sent in EHLO. Left unset, nodemailer falls back to "[127.0.0.1]" inside a
       // container, and the receiving server stamps that into the Received header, where it
-      // reads like a bot. The install's own public domain is the honest name.
-      const clientName = process.env.WARMHAWK_DOMAIN?.trim();
+      // reads like a bot. The sending domain's checked link domain keeps the header to that
+      // brand's own name; without one, the install's own public domain is the honest name.
+      const clientName = linkHostFor(mailbox.domain);
       transporter = nodemailer.createTransport({
         host: mailbox.smtpHost,
         port: mailbox.smtpPort,

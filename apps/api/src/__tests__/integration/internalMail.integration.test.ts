@@ -450,6 +450,68 @@ describeIntegration('/internal/mail routes (integration, real Postgres + real SM
     }
   });
 
+  it("puts the sending domain's link domain in the link and EHLO only once it has passed", async () => {
+    const campaign = await prisma.campaign.create({
+      data: { name: 'Link Domain Campaign', status: 'ACTIVE', aiPromptTemplate: '' },
+    });
+    await prisma.campaignMailbox.create({ data: { campaignId: campaign.id, mailboxId } });
+    const savedDomain = process.env.WARMHAWK_DOMAIN;
+    process.env.WARMHAWK_DOMAIN = 'api.acme.example';
+    const send = async (linkDomainStatus: 'PENDING' | 'PASS') => {
+      await prisma.domain.update({
+        where: { id: domainId },
+        data: { linkDomain: 'link.brand.example', linkDomainStatus },
+      });
+      const lead = await prisma.lead.create({
+        data: {
+          campaignId: campaign.id,
+          email: `link-domain-${linkDomainStatus}-${Date.now()}@example.com`,
+          status: 'UNTOUCHED',
+        },
+      });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/internal/mail/send',
+        headers: { 'x-callback-secret': CALLBACK_SECRET },
+        payload: {
+          mailboxId,
+          to: lead.email,
+          subject: 'x',
+          body: 'Hi',
+          campaignId: campaign.id,
+          leadId: lead.id,
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      return { lead, header: response.json().listUnsubscribeHeader as string };
+    };
+
+    try {
+      // Not checked yet: the email keeps the install's own link, which is known to work.
+      const unchecked = await send('PENDING');
+      const installUrl = `https://api.acme.example/unsubscribe/${signUnsubscribeToken(unchecked.lead.id)}`;
+      expect(unchecked.header).toBe(`<${installUrl}>`);
+      expect(fakeSmtp.greetings.at(-1)).toBe('EHLO api.acme.example');
+
+      const checked = await send('PASS');
+      const linkUrl = `https://link.brand.example/unsubscribe/${signUnsubscribeToken(checked.lead.id)}`;
+      expect(checked.header).toBe(`<${linkUrl}>`);
+      expect(textOf(fakeSmtp.messages.at(-1) as string)).toContain(`Unsubscribe: ${linkUrl}`);
+      expect(fakeSmtp.messages.at(-1)).not.toContain('api.acme.example');
+      expect(fakeSmtp.greetings.at(-1)).toBe('EHLO link.brand.example');
+    } finally {
+      if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
+      else process.env.WARMHAWK_DOMAIN = savedDomain;
+      await prisma.domain.update({
+        where: { id: domainId },
+        data: { linkDomain: null, linkDomainStatus: 'PENDING' },
+      });
+      await prisma.executionLog.deleteMany({ where: { campaignId: campaign.id } });
+      await prisma.lead.deleteMany({ where: { campaignId: campaign.id } });
+      await prisma.campaign.deleteMany({ where: { id: campaign.id } });
+    }
+  });
+
   it('refuses a campaign send to a suppressed address, never reaches SMTP, and takes the lead out of the queue', async () => {
     const lead = await prisma.lead.create({
       data: {

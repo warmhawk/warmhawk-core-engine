@@ -85,6 +85,8 @@ export async function openSeedImapClient(seedAccountId: string): Promise<ImapFlo
     auth: { user: config.username, pass: config.password },
     logger: false,
   });
+  // A socket error after connect() is an 'error' event; unhandled, it exits the API (imapClient.ts).
+  client.on('error', (err: Error) => console.warn(`[imap] seed ${seedAccount.id}: ${err.message}`));
   await client.connect();
   return client;
 }

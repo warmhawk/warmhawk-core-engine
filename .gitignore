@@ -17,3 +17,6 @@ backups/
 
 # tests/e2e-install/test-upgrade-from-last-release.sh scratch install
 .e2e-from-release/
+
+# Written per install by `warmhawk link-domain add`; the folder itself ships (.gitkeep).
+nginx/link-domains/*.conf

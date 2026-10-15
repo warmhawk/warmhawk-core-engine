@@ -216,6 +216,17 @@ model Domain {
   /// postalCode, country), kept so the form re-opens filled in. `mailingAddress` is what prints.
   mailingAddressParts Json?
 
+  /// The host the unsubscribe link (and the SMTP EHLO name) uses for mail from this domain, e.g.
+  /// `link.getwarmhawk.com`, so an email names only its own brand, not the install's
+  /// `WARMHAWK_DOMAIN`. Used only while `linkDomainStatus` is PASS: an unchecked or failing host
+  /// falls back to `WARMHAWK_DOMAIN`, since an unsubscribe link that doesn't answer breaks CAN-SPAM.
+  /// See `lib/linkDomain.ts`.
+  linkDomain          String?
+  linkDomainStatus    DnsRecordStatus @default(PENDING)
+  /// Why the last check failed, in plain words. Null after a pass.
+  linkDomainError     String?
+  linkDomainCheckedAt DateTime?
+
   /// New, V11 — continuous DNSBL/blocklist monitoring. Per-list PASS/FAIL/PENDING, e.g.
   /// `{ "spamhausZen": "PASS", "spamhausDbl": "PASS", "barracuda": "FAIL", "sorbs": "PASS" }`.
   blocklistStatus      Json?

@@ -66,9 +66,12 @@ describeIntegration('instance-settings routes (integration, real Postgres)', () 
       });
     try {
       delete process.env.WARMHAWK_DOMAIN;
-      expect((await get()).json().builtInUnsubscribe).toBe(false);
+      expect((await get()).json()).toMatchObject({ builtInUnsubscribe: false, publicHost: null });
       process.env.WARMHAWK_DOMAIN = 'api.acme.example';
-      expect((await get()).json().builtInUnsubscribe).toBe(true);
+      expect((await get()).json()).toMatchObject({
+        builtInUnsubscribe: true,
+        publicHost: 'api.acme.example',
+      });
     } finally {
       if (savedDomain === undefined) delete process.env.WARMHAWK_DOMAIN;
       else process.env.WARMHAWK_DOMAIN = savedDomain;

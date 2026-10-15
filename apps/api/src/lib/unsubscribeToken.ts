@@ -2,7 +2,7 @@
  * Built-in unsubscribe link — the token that goes in the email, and the URL it lives at.
  *
  * A campaign with no `unsubscribeUrlTemplate` of its own gets
- * `https://${WARMHAWK_DOMAIN}/unsubscribe/<token>` in its footer and `List-Unsubscribe` header,
+ * `https://<link host>/unsubscribe/<token>` in its footer and `List-Unsubscribe` header,
  * served by `routes/unsubscribe.ts`. The token is `<leadId>.<signature>`: the signature is an
  * HMAC over the lead id, so the route never acts on an id somebody made up, and the address
  * itself never appears in the URL.
@@ -12,6 +12,7 @@
  * than one that works forever.
  */
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { linkHostFor, type LinkDomainFields } from './linkDomain';
 
 const SIGNATURE_BYTES = 16;
 
@@ -50,10 +51,15 @@ export function verifyUnsubscribeToken(token: string): string | null {
  *  Unsubscribe in the test would opt the real lead out. Lead ids are cuids, so this never is one. */
 export const TEST_SEND_UNSUBSCRIBE_ID = 'test-send';
 
-/** The built-in unsubscribe URL for a lead, or null on an install with no `WARMHAWK_DOMAIN` —
- *  there is no public address to put in the email then, so the campaign needs its own link. */
-export function hostedUnsubscribeUrl(leadId: string): string | null {
-  const domain = process.env.WARMHAWK_DOMAIN?.trim();
-  if (!domain) return null;
-  return `https://${domain}/unsubscribe/${signUnsubscribeToken(leadId)}`;
+/** The built-in unsubscribe URL for a lead, on the sending domain's checked link domain when it
+ *  has one (`lib/linkDomain.ts`), else on `WARMHAWK_DOMAIN`. Null on an install with neither —
+ *  there is no public address to put in the email then, so the campaign needs its own link. The
+ *  token is the same on every host, so a link already sent keeps working when the host changes. */
+export function hostedUnsubscribeUrl(
+  leadId: string,
+  sendingDomain?: LinkDomainFields | null,
+): string | null {
+  const host = linkHostFor(sendingDomain);
+  if (!host) return null;
+  return `https://${host}/unsubscribe/${signUnsubscribeToken(leadId)}`;
 }

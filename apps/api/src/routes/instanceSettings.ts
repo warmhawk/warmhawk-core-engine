@@ -20,9 +20,11 @@ export async function instanceSettingsRoutes(app: FastifyInstance): Promise<void
 
   // `builtInUnsubscribe`: whether a campaign with no unsubscribe URL of its own gets the built-in
   // page (lib/unsubscribeToken.ts) — the dashboard uses it to say the field is optional.
+  // `publicHost`: this install's own host, which a link domain's CNAME points at (lib/linkDomain.ts).
   app.get('/', async () => ({
     id: 'default',
     builtInUnsubscribe: Boolean(process.env.WARMHAWK_DOMAIN?.trim()),
+    publicHost: process.env.WARMHAWK_DOMAIN?.trim() || null,
   }));
 
   app.put('/', async (_request, reply) =>
