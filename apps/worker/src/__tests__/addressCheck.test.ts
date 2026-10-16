@@ -44,6 +44,20 @@ describe('classifyRcpt', () => {
     expect(classifyRcpt(OK, OK).verdict).toBe('catch_all');
   });
 
+  it("can't tell when the made-up address gets no clear no", () => {
+    // Microsoft 365, 2026-10-16: "Recipient OK" for a dead mailbox, then this for the made-up
+    // one; the email bounced 5.1.10 after delivery.
+    const tooMany = {
+      code: 452,
+      text: '4.5.3 Too many recipients. Please try again later from [157.180.125.116].',
+    };
+    const m365Ok = { code: 250, text: '2.1.5 Recipient OK' };
+    expect(classifyRcpt(m365Ok, tooMany).verdict).toBe('catch_all');
+    expect(classifyRcpt(OK, null).verdict).toBe('catch_all');
+    // A tenant that rejects unknown addresses up front still gives a real yes.
+    expect(classifyRcpt(m365Ok, M365_NO_SUCH_USER).verdict).toBe('valid');
+  });
+
   it('never calls an address dead over a refusal aimed at the sender', () => {
     const blocked = {
       code: 554,
