@@ -104,6 +104,26 @@ describeIntegration('syncCampaignCompletion (integration, real Postgres)', () =>
     expect(await status()).toBe('COMPLETED');
   });
 
+  it('still waits on a follow-up when the only reply is an away notice or auto-reply', async () => {
+    const lead = await addLead({
+      status: 'CONTACTED',
+      mailboxId,
+      nextStepAt: new Date(Date.now() + 86_400_000),
+    });
+    await prisma.reply.create({
+      data: {
+        leadId: lead.id,
+        campaignId,
+        mailboxId,
+        rawContent: 'Out of office until Monday',
+        classification: 'OUT_OF_OFFICE',
+        repliedAt: new Date(),
+      },
+    });
+    await syncCampaignCompletion();
+    expect(await status()).toBe('ACTIVE');
+  });
+
   it('puts a Completed campaign back to Sending when it gets a new lead', async () => {
     await addLead({ status: 'CONTACTED', nextStepAt: null });
     await syncCampaignCompletion();

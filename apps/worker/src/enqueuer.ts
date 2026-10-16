@@ -249,8 +249,9 @@ export async function runEnqueuerTick(
       nextStepAt: { lte: now },
       queuedJobId: null,
       mailboxId: { in: [...pool.keys()] },
-      // A reply recorded before replies set REPLIED still ends the sequence.
-      replies: { none: {} },
+      // A reply recorded before replies set REPLIED still ends the sequence. Away notices and
+      // auto-replies don't (`apps/api/src/lib/replyOutcome.ts`).
+      replies: { none: { classification: { notIn: ['OUT_OF_OFFICE', 'AUTO_REPLY'] } } },
       campaignId: { in: sendableCampaignIds },
     },
     orderBy: { nextStepAt: 'asc' },

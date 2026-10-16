@@ -210,6 +210,43 @@ describeIntegration('runEnqueuerTick send schedule (integration, real Postgres +
     expect(lead.status).toBe('CONTACTED');
   });
 
+  it('sends a due follow-up after an auto-reply, but not after a real answer', async () => {
+    const m = await mailbox('autoreply');
+    const now = new Date();
+    const c = await campaign([m.id], utcSchedule());
+    const due = {
+      status: 'CONTACTED',
+      mailboxId: m.id,
+      stepsSent: 1,
+      lastStepAt: new Date(now.getTime() - 3 * 24 * HOUR_MS),
+      nextStepAt: new Date(now.getTime() - HOUR_MS),
+    };
+    await leads(c.id, 2, due);
+    const [auto, answered] = await prisma.lead.findMany({
+      where: { campaignId: c.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    for (const [lead, classification] of [
+      [auto!, 'AUTO_REPLY'],
+      [answered!, 'NOT_INTERESTED'],
+    ] as const) {
+      await prisma.reply.create({
+        data: {
+          leadId: lead.id,
+          campaignId: c.id,
+          mailboxId: m.id,
+          rawContent: classification,
+          classification,
+          repliedAt: now,
+        },
+      });
+    }
+
+    expect(await runEnqueuerTick(queue, redis, now)).toBe(1);
+    const booked = await queued(c.id);
+    expect(booked.map((l) => l.id)).toEqual([auto!.id]);
+  });
+
   it('stops first emails at "max new leads per day", counting the last 24 hours', async () => {
     const mailboxes = await Promise.all(['n1', 'n2', 'n3', 'n4'].map((n) => mailbox(n)));
     const c = await campaign(

@@ -118,6 +118,29 @@ describeIntegration('processDispatchJob (integration, real Postgres)', () => {
     expect(updated.nextRetryAt!.getTime()).toBeGreaterThan(Date.now());
   });
 
+  it('puts back a queued follow-up whose lead an away notice moved past its return date', async () => {
+    const lead = await prisma.lead.create({
+      data: {
+        campaignId,
+        email: 'away@processor-test.example',
+        status: 'CONTACTED',
+        mailboxId,
+        stepsSent: 1,
+        lastStepAt: new Date(Date.now() - 3 * 86_400_000),
+        nextStepAt: new Date(Date.now() + 5 * 86_400_000),
+        queuedJobId: 'away-job',
+        queuedSlotAt: new Date(),
+      },
+    });
+
+    await processDispatchJob({ leadId: lead.id, mailboxId });
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const updated = await prisma.lead.findUniqueOrThrow({ where: { id: lead.id } });
+    expect(updated.queuedJobId).toBeNull();
+    expect(updated.nextStepAt!.getTime()).toBeGreaterThan(Date.now());
+  });
+
   it('leaves the lead alone when n8n answers 200 with a sent-status body (real success)', async () => {
     const lead = await createQueuedLead('sent-200@processor-test.example');
     fetchSpy.mockResolvedValue(

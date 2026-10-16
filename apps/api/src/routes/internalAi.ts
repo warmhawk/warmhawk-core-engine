@@ -24,6 +24,7 @@ import {
 } from '../lib/composeCampaignEmail';
 import { isDeterministicSubject, nextFollowUp } from '../lib/sequence';
 import { suppressEmail } from '../lib/suppression';
+import { applyReplyOutcome } from '../lib/replyOutcome';
 
 // Moved to `lib/composeCampaignEmail.ts` so the dashboard preview shares them; re-exported for the
 // existing callers and tests that import them from here.
@@ -126,7 +127,9 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!replyRow) return reply.code(404).send({ error: 'Reply not found' });
     // Labelled from the delivery-failure report when it was stored; nothing for the AI to read.
-    if (replyRow.classification === 'BOUNCED') return reply.send(replyRow);
+    // Labelled already: the reply poll found a message it had stored before (`POST
+    // /internal/replies` hands back the stored row), so no second AI call.
+    if (replyRow.classification === 'BOUNCED' || replyRow.classifiedAt) return reply.send(replyRow);
 
     const provider =
       replyRow.campaign.aiProvider ??
@@ -168,6 +171,10 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
         });
       }
     }
+
+    // Away notices and auto-replies start the follow-ups again; every other label keeps them
+    // stopped.
+    await applyReplyOutcome(replyId);
 
     return reply.send(updated);
   });

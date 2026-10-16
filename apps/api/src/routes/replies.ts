@@ -11,6 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import { prisma, type Prisma, type ReplyClassification } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { parseChoice, parsePage, wantsPage, type PageQuery } from '../lib/pagination';
+import { applyReplyOutcome } from '../lib/replyOutcome';
 
 interface ListRepliesQuery extends PageQuery {
   classification?: ReplyClassification;
@@ -24,6 +25,7 @@ const CLASSIFICATIONS = [
   'NOT_INTERESTED',
   'OUT_OF_OFFICE',
   'AUTO_REPLY',
+  'LEFT_COMPANY',
   'OPT_OUT',
   'UNCLASSIFIED',
   'BOUNCED',
@@ -142,6 +144,9 @@ export async function repliesRoutes(app: FastifyInstance): Promise<void> {
       })
       .catch(() => null);
     if (!updated) return reply.code(404).send({ error: 'Reply not found' });
+    // The lead follows the new label: relabelled an away notice, its follow-ups start again;
+    // relabelled a real answer, they stop.
+    if (classification) await applyReplyOutcome(updated.id);
     return updated;
   });
 }
