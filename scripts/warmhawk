@@ -244,6 +244,45 @@ server_name() {
   esac
 }
 
+# --- replies -----------------------------------------------------------------------------------
+
+replies_fail() { echo "warmhawk replies: $*" >&2; exit 1; }
+
+# Leads an away notice or auto-reply stopped before those stopped ending a sequence. Counts them;
+# with --yes, starts their follow-ups again (an away notice waits for its return date).
+resume_auto_replied() {
+  local dry_run=true result
+  [ "${1:-}" = "--yes" ] && dry_run=false
+  result="$(compose exec -T -e DRY_RUN="$dry_run" api node -e '
+    fetch("http://127.0.0.1:" + (process.env.PORT || 4600) + "/internal/replies/resume-auto-replied", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-callback-secret": process.env.NEXTJS_CALLBACK_SECRET || "",
+      },
+      body: JSON.stringify({ dryRun: process.env.DRY_RUN !== "false" }),
+    }).then((r) => r.json()).then((s) => console.log(JSON.stringify(s)), () => process.exit(1));
+  ' 2>/dev/null)" || replies_fail "the API didn't answer. Check 'warmhawk status'."
+  printf '%s' "$result" | compose exec -T -e DRY_RUN="$dry_run" api node -e '
+    let raw = "";
+    process.stdin.on("data", (d) => (raw += d)).on("end", () => {
+      const s = JSON.parse(raw);
+      if (s.found === 0) console.log("No leads were stopped by an away notice or auto-reply.");
+      else if (process.env.DRY_RUN !== "false")
+        console.log(s.found + " lead(s) were stopped by an away notice or auto-reply. Run with --yes to start their follow-ups again.");
+      else
+        console.log("Started follow-ups again for " + s.resumed + " lead(s); " + s.paused + " more wait for their return date.");
+    });
+  '
+}
+
+replies() {
+  case "${1:-}" in
+    resume-auto-replied) shift; resume_auto_replied "$@" ;;
+    *) replies_fail "usage: warmhawk replies resume-auto-replied [--yes]" ;;
+  esac
+}
+
 usage() {
   cat <<USAGE
 WarmHawk Core Engine
@@ -263,6 +302,9 @@ Usage: warmhawk <command> [args]
   server-name set <host> | clear | check
                     The name this server gives mail servers (e.g. mail.yourcompany.com). Used
                     once its A record and this server's reverse DNS (PTR) both match it.
+  replies resume-auto-replied [--yes]
+                    Leads an away notice or auto-reply stopped before v1.26.0. Counts them;
+                    --yes starts their follow-ups again.
   help              This message.
 
 Installed at: ${REPO_ROOT}
@@ -287,6 +329,10 @@ case "${1:-help}" in
   link-domain)
     shift
     link_domain "$@"
+    ;;
+  replies)
+    shift
+    replies "$@"
     ;;
   server-name)
     shift

@@ -10,6 +10,8 @@
  * N+1 — on a mailbox with thousands of CONTACTED leads, this workflow's every-few-minutes poll did
  * thousands of sequential DB round-trips) to a single batched `reply.findMany({ leadId: { in } })`
  * — see the fix's comment in the route file. Tests below mock `reply.findMany`, not `findFirst`.
+ * Only replies that end the sequence count: a lead whose only answer is an away notice or an
+ * auto-reply is still polled for the person's real one.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { FastifyInstance } from 'fastify';
@@ -67,7 +69,10 @@ describe('GET /internal/replies/pending', () => {
     // One batched existence check for every candidate lead, not one round-trip per lead.
     expect(replyFindManySpy).toHaveBeenCalledTimes(1);
     expect(replyFindManySpy).toHaveBeenCalledWith({
-      where: { leadId: { in: ['lead-1'] } },
+      where: {
+        leadId: { in: ['lead-1'] },
+        classification: { notIn: ['OUT_OF_OFFICE', 'AUTO_REPLY'] },
+      },
       select: { leadId: true },
     });
   });
@@ -91,7 +96,7 @@ describe('GET /internal/replies/pending', () => {
     expect(replyFindManySpy).not.toHaveBeenCalled();
   });
 
-  it('skips a lead that already has a Reply row', async () => {
+  it('skips a lead that already has a reply ending its sequence', async () => {
     vi.spyOn(prisma.executionLog, 'findMany').mockResolvedValue([baseLog()] as never);
     vi.spyOn(prisma.reply, 'findMany').mockResolvedValue([{ leadId: 'lead-1' }] as never);
 
@@ -171,7 +176,10 @@ describe('GET /internal/replies/pending', () => {
 
     expect(replyFindManySpy).toHaveBeenCalledTimes(1);
     expect(replyFindManySpy).toHaveBeenCalledWith({
-      where: { leadId: { in: ['lead-1', 'lead-2'] } },
+      where: {
+        leadId: { in: ['lead-1', 'lead-2'] },
+        classification: { notIn: ['OUT_OF_OFFICE', 'AUTO_REPLY'] },
+      },
       select: { leadId: true },
     });
     const body = response.json() as { pending: { leadId: string }[] };
@@ -213,6 +221,7 @@ describe('POST /internal/replies', () => {
     process.env.NEXTJS_CALLBACK_SECRET = 'test-secret';
     vi.mocked(mailSender.applyBounceCircuitBreaker).mockResolvedValue(undefined);
     app = await createApp();
+    vi.spyOn(prisma.reply, 'findFirst').mockResolvedValue(null);
   });
 
   afterEach(async () => {
@@ -304,6 +313,25 @@ describe('POST /internal/replies', () => {
 
     expect(response.statusCode).toBe(201);
     expect(createSpy.mock.calls[0]![0].data.rawContent).toContain('(5.1.1)');
+  });
+
+  it('the same message found again: hands back the stored reply and changes nothing', async () => {
+    vi.mocked(prisma.reply.findFirst).mockResolvedValue({
+      id: 'r-known',
+      classification: 'OUT_OF_OFFICE',
+    } as never);
+    const createSpy = vi.spyOn(prisma.reply, 'create');
+    const leadSpy = vi.spyOn(prisma.lead, 'updateMany');
+
+    const response = await post(body);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ id: 'r-known' });
+    expect(prisma.reply.findFirst).toHaveBeenCalledWith({
+      where: { leadId: 'lead-1', mailboxId: 'mb-1', rawContent: body.rawContent },
+    });
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(leadSpy).not.toHaveBeenCalled();
   });
 
   it('422s on an empty reply that is not a bounce', async () => {
