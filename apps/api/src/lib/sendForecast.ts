@@ -13,7 +13,9 @@
  *
  * Today (10-15-26) is played first when the caller passes what each mailbox already used today:
  * its cap less the emails sent or booked, only for campaigns whose window hasn't closed yet. Before
- * this, the Today bar read 0 every morning until the window opened.
+ * this, the Today bar read 0 every morning until the window opened. "Sent" is the worker's rolling
+ * 24 hours as it stands at the window's close (10-16-26, `usedAtClose`), not the UTC day: a mailbox
+ * that sent late yesterday has less room today than its UTC-day count suggests.
  *
  * An estimate, not a promise: replies, bounces and unsubscribes end sequences early, a lead's own
  * time zone can move its day, and cap or campaign edits change the plan. It's an upper bound in
@@ -22,6 +24,7 @@
 import { campaignSchedule, localParts, prisma, type SendSchedule } from '@warmhawk/db';
 import { campaignCapToday } from './warmup/policy';
 import { SEQUENCE_ENDING_REPLY } from './replyOutcome';
+import { closesTodayMs, stillCounted } from './rollingLimit';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Recomputed at most this often — the Live Queue polls every 5 seconds.
@@ -207,15 +210,41 @@ export function forecastSends(
   };
 }
 
+/**
+ * Each mailbox's sends that still count against its rolling limit when today's sending ends: at
+ * the latest close of its campaigns still sending today (the end of the UTC day for one with no
+ * schedule). A send from late yesterday uses today's room until it's a day old, as in the worker.
+ */
+export function usedAtClose(
+  now: Date,
+  sendTimes: Map<string, number[]>,
+  campaigns: Pick<ForecastCampaign, 'schedule' | 'mailboxIds'>[],
+): Map<string, number> {
+  const closeByMailbox = new Map<string, number>();
+  for (const c of campaigns) {
+    if (!sendsLaterToday(c.schedule, now)) continue;
+    const closesAt = closesTodayMs(c.schedule, now);
+    for (const id of c.mailboxIds) {
+      closeByMailbox.set(id, Math.max(closeByMailbox.get(id) ?? 0, closesAt));
+    }
+  }
+  const dayEnd = closesTodayMs(null, now);
+  return new Map(
+    [...sendTimes].map(([id, times]) => [
+      id,
+      stillCounted(times, closeByMailbox.get(id) ?? dayEnd),
+    ]),
+  );
+}
+
 /** The forecast's inputs from the database: sendable mailboxes, active campaigns' work left and
- *  each mailbox's campaign sends so far today (UTC day, the statuses the Live Queue counts). */
+ *  each mailbox's send times over the last 24 hours (the statuses the Live Queue counts). */
 async function loadForecastInput(now: Date): Promise<{
   mailboxes: ForecastMailbox[];
   campaigns: ForecastCampaign[];
   followUps: ForecastFollowUp[];
-  sentToday: Map<string, number>;
+  sendTimes: Map<string, number[]>;
 }> {
-  const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const [mailboxRows, campaignRows, sentRows] = await Promise.all([
     // The same mailboxes the enqueuer sends from: ACTIVE, with a mailing address for the footer.
     prisma.mailbox.findMany({
@@ -240,22 +269,23 @@ async function loadForecastInput(now: Date): Promise<{
         steps: { select: { position: true, waitDays: true } },
       },
     }),
-    prisma.executionLog.groupBy({
-      by: ['mailboxId'],
+    prisma.executionLog.findMany({
       where: {
         status: { in: ['SENT', 'OPENED', 'REPLIED', 'BOUNCED'] },
         mailboxId: { not: null },
-        createdAt: { gte: todayStart },
+        createdAt: { gt: new Date(now.getTime() - DAY_MS) },
       },
-      _count: { _all: true },
+      select: { mailboxId: true, createdAt: true },
     }),
   ]);
   const mailboxes = mailboxRows.filter((m) => m.domain.mailingAddress?.trim());
-  const sentToday = new Map(
-    sentRows.map((row) => [row.mailboxId as string, row._count._all] as const),
-  );
+  const sendTimes = new Map<string, number[]>();
+  for (const row of sentRows) {
+    const id = row.mailboxId as string;
+    sendTimes.set(id, [...(sendTimes.get(id) ?? []), row.createdAt.getTime()]);
+  }
   const campaignIds = campaignRows.map((c) => c.id);
-  if (campaignIds.length === 0) return { mailboxes, campaigns: [], followUps: [], sentToday };
+  if (campaignIds.length === 0) return { mailboxes, campaigns: [], followUps: [], sendTimes };
 
   const [firstRows, followUpRows] = await Promise.all([
     // Booked leads (a `queuedJobId`) go out today, so they aren't left for later days.
@@ -283,7 +313,7 @@ async function loadForecastInput(now: Date): Promise<{
   const firstLeft = new Map(firstRows.map((row) => [row.campaignId, row._count._all]));
   return {
     mailboxes,
-    sentToday,
+    sendTimes,
     campaigns: campaignRows.map((c) => ({
       id: c.id,
       maxNewLeadsPerDay: c.maxNewLeadsPerDay,
@@ -334,7 +364,7 @@ export async function sendForecast(
     if (sameDay) return cached.forecast;
   }
   const input = await loadForecastInput(now);
-  const usedToday = new Map(input.sentToday);
+  const usedToday = usedAtClose(now, input.sendTimes, input.campaigns);
   for (const [id, n] of bookedByMailbox) usedToday.set(id, (usedToday.get(id) ?? 0) + n);
   const forecast = forecastSends(
     now,

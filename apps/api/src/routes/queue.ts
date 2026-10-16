@@ -27,6 +27,7 @@ import { prisma } from '@warmhawk/db';
 import { requireAuth } from '../lib/requireAuth';
 import { campaignCapToday } from '../lib/warmup/policy';
 import { sendForecast, type SendForecast } from '../lib/sendForecast';
+import { limitFreesAt } from '../lib/rollingLimit';
 
 // MUST match apps/worker/src/queue.ts's DISPATCH_QUEUE_NAME.
 const DISPATCH_QUEUE_NAME = 'warmhawk-dispatch';
@@ -107,6 +108,8 @@ export async function failedToday(now: Date): Promise<number> {
   });
 }
 
+const isoOrNull = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
+
 // Days either side of today the Live Queue's per-mailbox table shows.
 const MAILBOX_DAYS_EACH_SIDE = 2;
 // Campaigns listed live ones first; archived ones aren't listed.
@@ -130,6 +133,8 @@ export interface MailboxActivity {
   id: string;
   campaigns: { id: string; name: string; status: string }[];
   days: MailboxDay[];
+  /** When a mailbox at its rolling 24-hour limit can book again (ISO); null when it has room. */
+  limitFreesAt: string | null;
 }
 
 /**
@@ -151,7 +156,7 @@ export async function mailboxActivity(
   const since = new Date(today - MAILBOX_DAYS_EACH_SIDE * DAY_MS);
 
   type Row = { mailboxId: string; day: string; count: number };
-  const [mailboxes, sentRows, warmupRows] = await Promise.all([
+  const [mailboxes, sentRows, warmupRows, recentRows] = await Promise.all([
     prisma.mailbox.findMany({
       orderBy: { createdAt: 'asc' },
       select: {
@@ -173,11 +178,25 @@ export async function mailboxActivity(
       FROM "warmup_messages"
       WHERE "placement" <> 'FAILED' AND "sentAt" >= ${since}
       GROUP BY 1, 2`,
+    // The sends the worker's rolling limit counts right now (`apps/worker/src/rollingSends.ts`).
+    prisma.executionLog.findMany({
+      where: {
+        status: { in: ['SENT', 'OPENED', 'REPLIED', 'BOUNCED'] },
+        mailboxId: { not: null },
+        createdAt: { gt: new Date(now.getTime() - DAY_MS) },
+      },
+      select: { mailboxId: true, createdAt: true },
+    }),
   ]);
 
   const key = (mailboxId: string, day: string) => `${mailboxId}|${day}`;
   const sent = new Map(sentRows.map((r) => [key(r.mailboxId, r.day), r.count]));
   const warmup = new Map(warmupRows.map((r) => [key(r.mailboxId, r.day), r.count]));
+  const recent = new Map<string, number[]>();
+  for (const row of recentRows) {
+    const id = row.mailboxId as string;
+    recent.set(id, [...(recent.get(id) ?? []), row.createdAt.getTime()]);
+  }
   const queued = new Map<string, number>();
   for (const job of dueJobs) {
     const day = new Date(Math.max(job.dueAtMs, today)).toISOString().slice(0, 10);
@@ -206,6 +225,13 @@ export async function mailboxActivity(
         new Date(now.getTime() + offsets[i]! * DAY_MS),
       ),
     })),
+    limitFreesAt: isoOrNull(
+      limitFreesAt(
+        recent.get(m.id) ?? [],
+        campaignCapToday(m.dailyCap, m.warmupGraduatedAt, now),
+        now.getTime(),
+      ),
+    ),
   }));
 }
 
