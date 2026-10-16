@@ -81,11 +81,19 @@ export interface PersonalizeResult {
   generatedText: string;
 }
 
-export interface ClassifyReplyRequest {
+export interface ClassifyReplyProvider {
   provider: AiProvider;
   apiKey: string;
   model: string;
+}
+
+export interface ClassifyReplyRequest {
+  /** Tried in this order; the next one only when the one before fails. */
+  providers: ClassifyReplyProvider[];
   replyContent: string;
+  /** Each failed call, so a reply labelled by keywords says why. `no_label`: it answered with
+   *  something other than one of the labels. */
+  onFailure?: (provider: AiProvider, reason: AiFallbackReason | 'no_label') => void;
 }
 
 export type ReplyClassificationLabel =
@@ -355,6 +363,19 @@ export function classifyByKeyword(content: string): ReplyClassificationLabel {
   if (/out of office|on vacation|away from my desk/.test(lower)) return 'OUT_OF_OFFICE';
   if (/automatic reply|auto-reply|do not reply/.test(lower)) return 'AUTO_REPLY';
   if (/not interested|uninterested|no thanks|please remove/.test(lower)) return 'NOT_INTERESTED';
+  // A one-line yes to "Want me to send it?". Only the first line, so it can't be a word in a
+  // signature or a longer sentence ("yes, but not now"). Howdy Pool Co.'s "Sure", 10-16-26.
+  const firstLine =
+    lower
+      .split('\n')
+      .find((line) => line.trim())
+      ?.trim() ?? '';
+  if (
+    /^(sure( thing)?|yes( please)?|yep|yeah|please do|please send( it)?|go ahead|send it( over)?|absolutely|of course)[.!, ]*$/.test(
+      firstLine,
+    )
+  )
+    return 'INTERESTED';
   if (/interested|let's talk|sounds good|schedule a call|book a time/.test(lower))
     return 'INTERESTED';
   return 'UNCLASSIFIED';
@@ -383,24 +404,36 @@ function parseClassificationLabel(raw: string): ReplyClassificationLabel | null 
     : null;
 }
 
-/** Real classification call, dispatched by provider. Falls back to the keyword heuristic above if
- *  the provider call throws OR returns text that doesn't parse cleanly to one of the labels —
- *  a reply must always get SOME classification, since OPT_OUT driving auto-suppression is a
- *  Guardrails requirement, not best-effort. */
+/** Real classification call: each provider in turn, a failed call asked once more when the failure
+ *  might pass (a timeout, an outage, an answer that isn't a label), the next provider when it
+ *  doesn't. The keyword heuristic above when every one fails — a reply must always get SOME
+ *  classification, since OPT_OUT driving auto-suppression is a Guardrails requirement, not
+ *  best-effort. Bug fix (10-16-26): one failed Gemini call left a "Sure" UNCLASSIFIED while the
+ *  Claude key sat unused. */
 export async function classifyReply(request: ClassifyReplyRequest): Promise<ClassifyReplyResult> {
   if (!request.replyContent.trim()) {
     return { classification: 'UNCLASSIFIED' };
   }
 
   const prompt = `${CLASSIFICATION_PROMPT_PREFIX}${request.replyContent}`;
-  try {
-    const generated =
-      request.provider === 'GEMINI'
-        ? await generateGeminiText({ apiKey: request.apiKey, model: request.model, prompt })
-        : await generateClaudeText({ apiKey: request.apiKey, model: request.model, prompt });
-    const parsed = parseClassificationLabel(generated);
-    return { classification: parsed ?? classifyByKeyword(request.replyContent) };
-  } catch {
-    return { classification: classifyByKeyword(request.replyContent) };
+  for (const { provider, apiKey, model } of request.providers) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let reason: AiFallbackReason | 'no_label';
+      try {
+        const generated =
+          provider === 'GEMINI'
+            ? await generateGeminiText({ apiKey, model, prompt })
+            : await generateClaudeText({ apiKey, model, prompt });
+        const parsed = parseClassificationLabel(generated);
+        if (parsed) return { classification: parsed };
+        reason = 'no_label';
+      } catch (err) {
+        reason = classifyAiFailure(err);
+      }
+      request.onFailure?.(provider, reason);
+      // A rejected key, a missing model or a spent quota answers the same way twice.
+      if (reason !== 'provider_error' && reason !== 'no_label') break;
+    }
   }
+  return { classification: classifyByKeyword(request.replyContent) };
 }

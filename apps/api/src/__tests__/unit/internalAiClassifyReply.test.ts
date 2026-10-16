@@ -72,12 +72,14 @@ describe('POST /internal/ai/classify-reply', () => {
 
   it('classifies a reply and persists the classification, with no suppression side effect', async () => {
     vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue(baseReplyRow as never);
-    vi.spyOn(prisma.aiProviderKey, 'findUnique').mockResolvedValue({
-      provider: 'GEMINI',
-      apiKeyEncrypted: 'irrelevant',
-      model: 'gemini-2.5-flash',
-      isActive: true,
-    } as never);
+    vi.spyOn(prisma.aiProviderKey, 'findMany').mockResolvedValue([
+      {
+        provider: 'GEMINI',
+        apiKeyEncrypted: 'irrelevant',
+        model: 'gemini-2.5-flash',
+        isActive: true,
+      },
+    ] as never);
     vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'INTERESTED' });
     const updateSpy = vi
       .spyOn(prisma.reply, 'update')
@@ -98,12 +100,14 @@ describe('POST /internal/ai/classify-reply', () => {
 
   it('OPT_OUT: upserts a SuppressionEntry and flips every lead with that address to SUPPRESSED inside one transaction', async () => {
     vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue(baseReplyRow as never);
-    vi.spyOn(prisma.aiProviderKey, 'findUnique').mockResolvedValue({
-      provider: 'GEMINI',
-      apiKeyEncrypted: 'irrelevant',
-      model: 'gemini-2.5-flash',
-      isActive: true,
-    } as never);
+    vi.spyOn(prisma.aiProviderKey, 'findMany').mockResolvedValue([
+      {
+        provider: 'GEMINI',
+        apiKeyEncrypted: 'irrelevant',
+        model: 'gemini-2.5-flash',
+        isActive: true,
+      },
+    ] as never);
     vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'OPT_OUT' });
     vi.spyOn(prisma.reply, 'update').mockResolvedValue({
       ...baseReplyRow,
@@ -146,12 +150,14 @@ describe('POST /internal/ai/classify-reply', () => {
 
   it('OPT_OUT but the lead is already gone: skips the transaction instead of crashing', async () => {
     vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue(baseReplyRow as never);
-    vi.spyOn(prisma.aiProviderKey, 'findUnique').mockResolvedValue({
-      provider: 'GEMINI',
-      apiKeyEncrypted: 'irrelevant',
-      model: 'gemini-2.5-flash',
-      isActive: true,
-    } as never);
+    vi.spyOn(prisma.aiProviderKey, 'findMany').mockResolvedValue([
+      {
+        provider: 'GEMINI',
+        apiKeyEncrypted: 'irrelevant',
+        model: 'gemini-2.5-flash',
+        isActive: true,
+      },
+    ] as never);
     vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'OPT_OUT' });
     vi.spyOn(prisma.reply, 'update').mockResolvedValue({
       ...baseReplyRow,
@@ -184,7 +190,7 @@ describe('POST /internal/ai/classify-reply', () => {
       rawContent,
       campaign: { aiProvider: null },
     } as never);
-    vi.spyOn(prisma.aiProviderKey, 'findFirst').mockResolvedValue(null as never);
+    vi.spyOn(prisma.aiProviderKey, 'findMany').mockResolvedValue([] as never);
     return vi.spyOn(prisma.reply, 'update').mockResolvedValue(baseReplyRow as never);
   }
 
@@ -238,12 +244,14 @@ describe('POST /internal/ai/classify-reply', () => {
       ...baseReplyRow,
       rawContent: quotingReply('Interested — send pricing.'),
     } as never);
-    vi.spyOn(prisma.aiProviderKey, 'findUnique').mockResolvedValue({
-      provider: 'GEMINI',
-      apiKeyEncrypted: 'irrelevant',
-      model: 'gemini-2.5-flash',
-      isActive: true,
-    } as never);
+    vi.spyOn(prisma.aiProviderKey, 'findMany').mockResolvedValue([
+      {
+        provider: 'GEMINI',
+        apiKeyEncrypted: 'irrelevant',
+        model: 'gemini-2.5-flash',
+        isActive: true,
+      },
+    ] as never);
     vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'INTERESTED' });
     vi.spyOn(prisma.reply, 'update').mockResolvedValue(baseReplyRow as never);
 
@@ -252,6 +260,28 @@ describe('POST /internal/ai/classify-reply', () => {
     expect(aiProviderClient.classifyReply).toHaveBeenCalledWith(
       expect.objectContaining({ replyContent: 'Interested — send pricing.' }),
     );
+  });
+
+  it("tries the campaign's own AI first, then every other key that's on, newest first", async () => {
+    vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue({
+      ...baseReplyRow,
+      campaign: { aiProvider: 'GEMINI' },
+    } as never);
+    const findMany = vi.spyOn(prisma.aiProviderKey, 'findMany').mockResolvedValue([
+      { provider: 'CLAUDE', apiKeyEncrypted: 'x', model: 'claude-sonnet-5', isActive: true },
+      { provider: 'GEMINI', apiKeyEncrypted: 'x', model: 'gemini-3.5-flash-lite', isActive: true },
+    ] as never);
+    vi.mocked(aiProviderClient.classifyReply).mockResolvedValue({ classification: 'INTERESTED' });
+    vi.spyOn(prisma.reply, 'update').mockResolvedValue(baseReplyRow as never);
+
+    await classifyReplyRequest();
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { isActive: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+    const { providers } = vi.mocked(aiProviderClient.classifyReply).mock.calls[0][0];
+    expect(providers.map((p) => p.provider)).toEqual(['GEMINI', 'CLAUDE']);
   });
 
   it('leaves a BOUNCED reply as it is, without calling the provider', async () => {

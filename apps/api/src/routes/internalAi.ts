@@ -131,25 +131,34 @@ export async function internalAiRoutes(app: FastifyInstance): Promise<void> {
     // /internal/replies` hands back the stored row), so no second AI call.
     if (replyRow.classification === 'BOUNCED' || replyRow.classifiedAt) return reply.send(replyRow);
 
-    const provider =
-      replyRow.campaign.aiProvider ??
-      (await prisma.aiProviderKey.findFirst({ where: { isActive: true } }))?.provider;
+    // The campaign's own AI first, then every other key that's on, the last one saved first. A
+    // template campaign has none of its own.
+    const keys = (
+      await prisma.aiProviderKey.findMany({
+        where: { isActive: true },
+        orderBy: { updatedAt: 'desc' },
+      })
+    ).sort(
+      (a, b) =>
+        Number(b.provider === replyRow.campaign.aiProvider) -
+        Number(a.provider === replyRow.campaign.aiProvider),
+    );
 
     // Only what the person typed — the quoted original carries our "Unsubscribe:" footer.
     const replyContent = stripQuotedReply(replyRow.rawContent);
-    const providerKey = provider
-      ? await prisma.aiProviderKey.findUnique({ where: { provider } })
-      : null;
 
     // No usable AI key: keywords, so a "please stop emailing me" is still suppressed below.
     let classification = classifyByKeyword(replyContent);
-    if (provider && providerKey?.isActive) {
-      const apiKey = decrypt(providerKey.apiKeyEncrypted, encryptionKey());
+    if (keys.length > 0) {
       const result = await classifyReply({
-        provider,
-        apiKey,
-        model: providerKey.model,
+        providers: keys.map((k) => ({
+          provider: k.provider,
+          apiKey: decrypt(k.apiKeyEncrypted, encryptionKey()),
+          model: k.model,
+        })),
         replyContent,
+        onFailure: (provider, reason) =>
+          request.log.warn({ replyId, provider, reason }, 'reply label: AI call failed'),
       });
       classification = result.classification;
     }

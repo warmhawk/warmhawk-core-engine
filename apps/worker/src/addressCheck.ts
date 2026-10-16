@@ -156,12 +156,21 @@ function refusesTheDomain(reply: SmtpReply | null): boolean {
 export function classifyRcpt(real: SmtpReply, madeUp: SmtpReply | null): AddressCheckResult {
   const said = `${real.code} ${real.text}`.trim().slice(0, 160);
   if (real.code >= 200 && real.code < 300) {
+    if (madeUp && madeUp.code >= 500) {
+      return { verdict: 'valid', detail: 'the mail server accepts this address' };
+    }
+    // A yes means something only next to a no for the made-up address. Microsoft 365 answers
+    // that one "452 Too many recipients", then bounces a dead mailbox after taking the email
+    // (5.1.10, 10-16-26), so a "not now" or no answer is no better than a yes.
     return madeUp && madeUp.code >= 200 && madeUp.code < 300
       ? {
           verdict: 'catch_all',
           detail: 'the mail server accepts every address, so it can’t be told',
         }
-      : { verdict: 'valid', detail: 'the mail server accepts this address' };
+      : {
+          verdict: 'catch_all',
+          detail: 'the mail server wouldn’t answer for a made-up address, so it can’t be told',
+        };
   }
   if (
     real.code >= 500 &&
