@@ -9,6 +9,7 @@ import {
   checkProviderKey,
   personalizeContent,
   classifyReply,
+  classifyByKeyword,
   fillMergeFields,
 } from '../../lib/aiProviderClient';
 import * as gemini from '../../lib/aiProviders/gemini';
@@ -181,9 +182,7 @@ describe('classifyReply', () => {
 
   it('returns UNCLASSIFIED for empty content without calling the provider', async () => {
     const result = await classifyReply({
-      provider: 'GEMINI',
-      apiKey: 'k',
-      model: 'm',
+      providers: [{ provider: 'GEMINI', apiKey: 'k', model: 'm' }],
       replyContent: '   ',
     });
     expect(result.classification).toBe('UNCLASSIFIED');
@@ -193,9 +192,7 @@ describe('classifyReply', () => {
   it('parses a clean single-word label from the provider response', async () => {
     vi.mocked(gemini.generateGeminiText).mockResolvedValue('OPT_OUT');
     const result = await classifyReply({
-      provider: 'GEMINI',
-      apiKey: 'k',
-      model: 'm',
+      providers: [{ provider: 'GEMINI', apiKey: 'k', model: 'm' }],
       replyContent: 'Please unsubscribe me.',
     });
     expect(result.classification).toBe('OPT_OUT');
@@ -204,9 +201,7 @@ describe('classifyReply', () => {
   it('tolerates surrounding whitespace/punctuation in the provider response', async () => {
     vi.mocked(claude.generateClaudeText).mockResolvedValue('  interested.\n');
     const result = await classifyReply({
-      provider: 'CLAUDE',
-      apiKey: 'k',
-      model: 'm',
+      providers: [{ provider: 'CLAUDE', apiKey: 'k', model: 'm' }],
       replyContent: "Sounds good, let's talk.",
     });
     expect(result.classification).toBe('INTERESTED');
@@ -215,9 +210,7 @@ describe('classifyReply', () => {
   it('falls back to the keyword heuristic when the provider returns an unparseable label', async () => {
     vi.mocked(gemini.generateGeminiText).mockResolvedValue('I am not sure, maybe interested?');
     const result = await classifyReply({
-      provider: 'GEMINI',
-      apiKey: 'k',
-      model: 'm',
+      providers: [{ provider: 'GEMINI', apiKey: 'k', model: 'm' }],
       replyContent: 'No thanks, not interested in this.',
     });
     expect(result.classification).toBe('NOT_INTERESTED');
@@ -226,11 +219,58 @@ describe('classifyReply', () => {
   it('falls back to the keyword heuristic when the provider call throws — OPT_OUT must never be lost', async () => {
     vi.mocked(gemini.generateGeminiText).mockRejectedValue(new Error('provider timeout'));
     const result = await classifyReply({
-      provider: 'GEMINI',
-      apiKey: 'k',
-      model: 'm',
+      providers: [{ provider: 'GEMINI', apiKey: 'k', model: 'm' }],
       replyContent: 'Please unsubscribe me immediately.',
     });
     expect(result.classification).toBe('OPT_OUT');
+  });
+
+  it('asks again after a failure, then the next provider, before falling back to keywords', async () => {
+    vi.mocked(gemini.generateGeminiText).mockRejectedValue(new Error('Gemini HTTP 503'));
+    vi.mocked(claude.generateClaudeText).mockResolvedValue('INTERESTED');
+    const failures: string[] = [];
+    const result = await classifyReply({
+      providers: [
+        { provider: 'GEMINI', apiKey: 'g', model: 'gm' },
+        { provider: 'CLAUDE', apiKey: 'c', model: 'cm' },
+      ],
+      replyContent: 'Sure',
+      onFailure: (provider, reason) => failures.push(`${provider} ${reason}`),
+    });
+    expect(result.classification).toBe('INTERESTED');
+    expect(gemini.generateGeminiText).toHaveBeenCalledTimes(2);
+    expect(failures).toEqual(['GEMINI provider_error', 'GEMINI provider_error']);
+  });
+
+  it("doesn't ask a rejected key twice", async () => {
+    vi.mocked(gemini.generateGeminiText).mockRejectedValue(new Error('Gemini HTTP 401'));
+    vi.mocked(claude.generateClaudeText).mockRejectedValue(new Error('Claude HTTP 429'));
+    const result = await classifyReply({
+      providers: [
+        { provider: 'GEMINI', apiKey: 'g', model: 'gm' },
+        { provider: 'CLAUDE', apiKey: 'c', model: 'cm' },
+      ],
+      replyContent: 'Sure\n\nGabe Gafner\nOwner/Builder',
+    });
+    expect(gemini.generateGeminiText).toHaveBeenCalledTimes(1);
+    expect(claude.generateClaudeText).toHaveBeenCalledTimes(1);
+    // Every AI failed: the keywords still read a one-line yes.
+    expect(result.classification).toBe('INTERESTED');
+  });
+});
+
+describe('classifyByKeyword', () => {
+  it('reads a one-line yes as interested, but not a yes inside a longer line', () => {
+    for (const reply of [
+      'Sure',
+      'Yes please!',
+      'go ahead',
+      'Send it over.',
+      'Sure\n\n*Gabe*\nOwner',
+    ]) {
+      expect(classifyByKeyword(reply)).toBe('INTERESTED');
+    }
+    expect(classifyByKeyword('Yes, but not this quarter')).toBe('UNCLASSIFIED');
+    expect(classifyByKeyword('Thanks\nSent from my iPhone. Sure Pools Inc.')).toBe('UNCLASSIFIED');
   });
 });
