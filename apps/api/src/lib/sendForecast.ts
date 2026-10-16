@@ -21,6 +21,7 @@
  */
 import { campaignSchedule, localParts, prisma, type SendSchedule } from '@warmhawk/db';
 import { campaignCapToday } from './warmup/policy';
+import { SEQUENCE_ENDING_REPLY } from './replyOutcome';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // Recomputed at most this often — the Live Queue polls every 5 seconds.
@@ -274,7 +275,7 @@ async function loadForecastInput(now: Date): Promise<{
         nextStepAt: { not: null },
         queuedJobId: null,
         mailboxId: { not: null },
-        replies: { none: {} },
+        replies: { none: SEQUENCE_ENDING_REPLY },
       },
       select: { campaignId: true, mailboxId: true, stepsSent: true, nextStepAt: true },
     }),

@@ -13,6 +13,7 @@ import { prisma } from '@warmhawk/db';
 import { requireCallbackSecret } from '../lib/requireCallbackSecret';
 import { applyBounceCircuitBreaker } from '../lib/mailSender';
 import { bounceReasonText, type BounceReport } from '../lib/warmup/placement';
+import { resumeAutoRepliedLeads, SEQUENCE_ENDING_REPLY } from '../lib/replyOutcome';
 
 /** Lead states still waiting on an answer. A reply or bounce only moves a lead out of these, so
  *  one that lands after an unsubscribe or an earlier answer doesn't undo it. */
@@ -60,7 +61,8 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
     >();
     for (const log of sentLogs) {
       if (!log.leadId || !log.campaignId || !log.lead) continue;
-      // Already replied/bounced/suppressed. OPENED still waits on a reply like CONTACTED does.
+      // Already replied/bounced/suppressed. OPENED still waits on a reply like CONTACTED does,
+      // and so does a lead whose only replies are away notices or auto-replies.
       if (log.lead.status !== 'CONTACTED' && log.lead.status !== 'OPENED') continue;
       if (!log.providerMessageId) continue; // sent before this field existed, or send failed
       const entry = byLead.get(log.leadId) ?? {
@@ -80,12 +82,14 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
     // A single batched existence check instead of one `reply.findFirst` round-trip per candidate
     // (was a sequential N+1 inside the loop above — on a mailbox with thousands of CONTACTED
     // leads this workflow polls every few minutes, that meant thousands of sequential DB
-    // round-trips per poll).
+    // round-trips per poll). Only a reply that ended the sequence counts: after an away notice
+    // the person's real answer is still to come. The poll finds the notice again until then;
+    // `POST /` below recognises it and stores nothing new.
     const existingReplyLeadIds = candidates.length
       ? new Set(
           (
             await prisma.reply.findMany({
-              where: { leadId: { in: candidates.map((c) => c.leadId) } },
+              where: { leadId: { in: candidates.map((c) => c.leadId) }, ...SEQUENCE_ENDING_REPLY },
               select: { leadId: true },
             })
           ).map((r) => r.leadId),
@@ -106,19 +110,29 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
         .code(422)
         .send({ error: 'leadId, campaignId, mailboxId, rawContent are required' });
     }
+    const content = rawContent || (bounce ? bounceReasonText(bounce) : '');
+    // The same message found again: the poll keeps searching a lead whose only answer so far is
+    // an away notice or auto-reply, and finds that answer every time until a newer one arrives.
+    // Hand back the stored row (already labelled, so classify-reply leaves it be) and change nothing.
+    const known = await prisma.reply.findFirst({
+      where: { leadId, mailboxId, rawContent: content },
+    });
+    if (known) return reply.code(200).send(known);
+
     const created = await prisma.reply.create({
       data: {
         leadId,
         campaignId,
         mailboxId,
-        rawContent: rawContent || (bounce ? bounceReasonText(bounce) : ''),
+        rawContent: content,
         repliedAt: repliedAt ? new Date(repliedAt) : new Date(),
         ...(bounce ? { classification: 'BOUNCED' as const, classifiedAt: new Date() } : {}),
       },
     });
 
     if (!bounce) {
-      // A reply ends the lead's sequence: no follow-up goes to someone who answered.
+      // A reply stops the lead's sequence until it's labelled: no follow-up goes to someone who
+      // may have answered. An away notice or auto-reply then starts it again (`lib/replyOutcome`).
       await prisma.lead.updateMany({
         where: { id: leadId, status: { in: [...WAITING] } },
         data: { status: 'REPLIED', nextStepAt: null, nextRetryAt: null },
@@ -154,4 +168,11 @@ export async function internalRepliesRoutes(app: FastifyInstance): Promise<void>
     }
     return reply.code(201).send(created);
   });
+
+  /** Starts the follow-ups again for leads an away notice or auto-reply stopped before they
+   *  stopped doing so. `{ dryRun: true }` only counts them. Run by `warmhawk replies
+   *  resume-auto-replied`, so the owner decides when those follow-ups go out. */
+  app.post<{ Body: { dryRun?: boolean } }>('/resume-auto-replied', async (request) =>
+    resumeAutoRepliedLeads(request.body?.dryRun !== false),
+  );
 }

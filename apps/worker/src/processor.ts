@@ -154,11 +154,13 @@ export async function processDispatchJob(data: DispatchJobData): Promise<void> {
     !lead.campaign.pausedForBounceRate &&
     leadWindowState(lead.campaign, lead.customFields, now).open;
   // A first email only from a mailbox the campaign (still) sends from; a follow-up only from the
-  // lead's own mailbox, and only while the lead is still waiting on one.
+  // lead's own mailbox, and only while the lead is still waiting on one that's due. An away notice
+  // that arrived after this was queued moves `nextStepAt` past its return date.
   const leadFits = followUp
     ? lead.mailboxId === mailboxId &&
       (lead.status === 'CONTACTED' || lead.status === 'OPENED') &&
-      lead.nextStepAt !== null
+      lead.nextStepAt !== null &&
+      lead.nextStepAt <= now
     : lead.status === 'QUEUED' && lead.campaign.mailboxes.length > 0;
 
   if (!mailboxCanSend || !campaignCanSend || !leadFits) {

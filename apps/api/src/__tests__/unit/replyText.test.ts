@@ -99,6 +99,14 @@ describe('classifyByKeyword on stripped replies', () => {
     ["I'm uninterested", 'NOT_INTERESTED'],
     ["Sounds good, let's talk", 'INTERESTED'],
     ["Don't stop sending these, they're great", 'UNCLASSIFIED'],
+    ['Automatic reply: Jane is no longer with the company.', 'LEFT_COMPANY'],
+    ['Sam has left the organization. Please contact sales@acme.example.', 'LEFT_COMPANY'],
+    ['This mailbox is no longer monitored.', 'LEFT_COMPANY'],
+    ['I am out of office until Monday.', 'OUT_OF_OFFICE'],
+    [
+      'Automatic reply: ticket #4412 received. Do not reply, this mailbox is not monitored.',
+      'AUTO_REPLY',
+    ],
   ] as const)('%s → %s', (reply, label) => {
     expect(classifyByKeyword(stripQuotedReply(reply))).toBe(label);
   });

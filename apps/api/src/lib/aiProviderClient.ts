@@ -89,7 +89,13 @@ export interface ClassifyReplyRequest {
 }
 
 export type ReplyClassificationLabel =
-  'INTERESTED' | 'NOT_INTERESTED' | 'OUT_OF_OFFICE' | 'AUTO_REPLY' | 'OPT_OUT' | 'UNCLASSIFIED';
+  | 'INTERESTED'
+  | 'NOT_INTERESTED'
+  | 'OUT_OF_OFFICE'
+  | 'AUTO_REPLY'
+  | 'LEFT_COMPANY'
+  | 'OPT_OUT'
+  | 'UNCLASSIFIED';
 
 export interface ClassifyReplyResult {
   classification: ReplyClassificationLabel;
@@ -100,6 +106,7 @@ const CLASSIFICATION_LABELS: ReplyClassificationLabel[] = [
   'NOT_INTERESTED',
   'OUT_OF_OFFICE',
   'AUTO_REPLY',
+  'LEFT_COMPANY',
   'OPT_OUT',
   'UNCLASSIFIED',
 ];
@@ -337,6 +344,14 @@ export function classifyByKeyword(content: string): ReplyClassificationLabel {
   ) {
     return 'OPT_OUT';
   }
+  // Before the away check: "she has left the company" often arrives as an automatic reply.
+  if (
+    /no longer (with|at|employed|works?|working)\b|(has|have) left (the|our) (company|organi[sz]ation|firm|business)|(mailbox|inbox|address|account) is no longer (monitored|in use|active|checked)/.test(
+      lower,
+    )
+  ) {
+    return 'LEFT_COMPANY';
+  }
   if (/out of office|on vacation|away from my desk/.test(lower)) return 'OUT_OF_OFFICE';
   if (/automatic reply|auto-reply|do not reply/.test(lower)) return 'AUTO_REPLY';
   if (/not interested|uninterested|no thanks|please remove/.test(lower)) return 'NOT_INTERESTED';
@@ -347,8 +362,9 @@ export function classifyByKeyword(content: string): ReplyClassificationLabel {
 
 const CLASSIFICATION_PROMPT_PREFIX = `Classify this email reply into EXACTLY ONE of these labels: ${CLASSIFICATION_LABELS.join(', ')}.
 - OPT_OUT: asks to be removed/unsubscribed/stop being emailed.
+- LEFT_COMPANY: says the person no longer works there, or that THIS address is no longer monitored or in use. A no-reply sender's "do not reply to this message" is not this.
 - OUT_OF_OFFICE: an automated "I'm away" reply.
-- AUTO_REPLY: any other automated/no-reply response.
+- AUTO_REPLY: any other automated/no-reply response (a ticket number, "we'll get back to you").
 - NOT_INTERESTED: a real person declining.
 - INTERESTED: a real person expressing interest or willingness to talk further.
 - UNCLASSIFIED: anything that doesn't clearly fit the above.
@@ -368,7 +384,7 @@ function parseClassificationLabel(raw: string): ReplyClassificationLabel | null 
 }
 
 /** Real classification call, dispatched by provider. Falls back to the keyword heuristic above if
- *  the provider call throws OR returns text that doesn't parse cleanly to one of the six labels —
+ *  the provider call throws OR returns text that doesn't parse cleanly to one of the labels —
  *  a reply must always get SOME classification, since OPT_OUT driving auto-suppression is a
  *  Guardrails requirement, not best-effort. */
 export async function classifyReply(request: ClassifyReplyRequest): Promise<ClassifyReplyResult> {

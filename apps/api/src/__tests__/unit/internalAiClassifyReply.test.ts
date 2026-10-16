@@ -17,6 +17,7 @@ import { prisma } from '@warmhawk/db';
 import { createApp } from '../../app';
 import * as aiProviderClient from '../../lib/aiProviderClient';
 import * as encryption from '../../lib/encryption';
+import * as replyOutcome from '../../lib/replyOutcome';
 
 vi.mock('../../lib/aiProviderClient', async () => {
   const actual = await vi.importActual<typeof aiProviderClient>('../../lib/aiProviderClient');
@@ -26,6 +27,11 @@ vi.mock('../../lib/aiProviderClient', async () => {
 vi.mock('../../lib/encryption', async () => {
   const actual = await vi.importActual<typeof encryption>('../../lib/encryption');
   return { ...actual, decrypt: vi.fn().mockReturnValue('decrypted-api-key') };
+});
+
+vi.mock('../../lib/replyOutcome', async () => {
+  const actual = await vi.importActual<typeof replyOutcome>('../../lib/replyOutcome');
+  return { ...actual, applyReplyOutcome: vi.fn().mockResolvedValue('unchanged') };
 });
 
 const VALID_KEY = Buffer.alloc(32, 7).toString('base64');
@@ -86,6 +92,8 @@ describe('POST /internal/ai/classify-reply', () => {
       data: { classification: 'INTERESTED', classifiedAt: expect.any(Date) },
     });
     expect(transactionSpy).not.toHaveBeenCalled();
+    // The lead follows the label: an away notice starts its follow-ups again, a real answer doesn't.
+    expect(replyOutcome.applyReplyOutcome).toHaveBeenCalledWith('reply-1');
   });
 
   it('OPT_OUT: upserts a SuppressionEntry and flips every lead with that address to SUPPRESSED inside one transaction', async () => {
@@ -259,6 +267,23 @@ describe('POST /internal/ai/classify-reply', () => {
     expect(response.json()).toMatchObject({ classification: 'BOUNCED' });
     expect(aiProviderClient.classifyReply).not.toHaveBeenCalled();
     expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves a reply labelled already as it is: the poll found a message it had stored', async () => {
+    vi.spyOn(prisma.reply, 'findUnique').mockResolvedValue({
+      ...baseReplyRow,
+      classification: 'OUT_OF_OFFICE',
+      classifiedAt: new Date('2026-10-15T11:24:05Z'),
+    } as never);
+    const updateSpy = vi.spyOn(prisma.reply, 'update');
+    vi.mocked(replyOutcome.applyReplyOutcome).mockClear();
+
+    const response = await classifyReplyRequest();
+
+    expect(response.statusCode).toBe(200);
+    expect(aiProviderClient.classifyReply).not.toHaveBeenCalled();
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(replyOutcome.applyReplyOutcome).not.toHaveBeenCalled();
   });
 
   it('404s when the reply does not exist', async () => {

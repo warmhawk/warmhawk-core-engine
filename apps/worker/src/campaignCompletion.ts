@@ -11,12 +11,16 @@ import { prisma, type Prisma } from '@warmhawk/db';
 
 /** A lead the campaign still owes an email: a first email not sent yet (waiting or queued), or a
  *  follow-up queued or still due. A follow-up on a lead that replied never goes out (the enqueuer
- *  skips it), so it isn't owed. */
+ *  skips it), so it isn't owed, unless the only replies were away notices or auto-replies. */
 export const LEAD_STILL_TO_SEND: Prisma.LeadWhereInput = {
   OR: [
     { status: { in: ['UNTOUCHED', 'QUEUED'] } },
     { status: { in: ['CONTACTED', 'OPENED'] }, queuedJobId: { not: null } },
-    { status: { in: ['CONTACTED', 'OPENED'] }, nextStepAt: { not: null }, replies: { none: {} } },
+    {
+      status: { in: ['CONTACTED', 'OPENED'] },
+      nextStepAt: { not: null },
+      replies: { none: { classification: { notIn: ['OUT_OF_OFFICE', 'AUTO_REPLY'] } } },
+    },
   ],
 };
 
