@@ -11,6 +11,7 @@ import { requireAuth } from '../lib/requireAuth';
 import { encrypt, loadEncryptionKey } from '../lib/encryption';
 import { MAILBOX_ALREADY_CONNECTED } from '../lib/friendlyError';
 import { checkMailboxSignIn } from '../lib/mailSignInCheck';
+import { connectionErrorOf, hasSavedSignIn } from '../lib/mailboxConnectionHealth';
 
 interface CreateMailboxBody {
   email: string;
@@ -53,7 +54,10 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
     // Bug fix: unlike POST/PATCH below, this previously returned the full row, including
     // `authPasswordEncrypted`/`oauthRefreshTokenEncrypted` — leaking encrypted credential
     // material to any authenticated caller. Apply the same redaction POST/PATCH already use.
-    return mailboxes.map(({ authPasswordEncrypted: _omit, oauthRefreshTokenEncrypted: _omit2, ...safe }) => safe);
+    return mailboxes.map(({ authPasswordEncrypted: _omit, oauthRefreshTokenEncrypted: _omit2, ...safe }, i) => ({
+      ...safe,
+      connectionError: connectionErrorOf(mailboxes[i]!),
+    }));
   });
 
   app.post<{ Body: CreateMailboxBody }>('/', async (request, reply) => {
@@ -73,14 +77,21 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
 
     const email = body.email.trim().toLowerCase();
 
+    // Checked first: it's instant, and "already connected" is the useful answer for a second try —
+    // not a sign-in error from dialing the servers again. A row with no sign-in isn't connected:
+    // it's left by a Google/Microsoft sign-in that never came back, and adding the address again
+    // (by password, or another sign-in) fills that row in instead of being refused.
+    const existing = await prisma.mailbox.findUnique({
+      where: { email },
+      select: { id: true, authPasswordEncrypted: true, oauthRefreshTokenEncrypted: true },
+    });
+    if (existing && hasSavedSignIn(existing)) {
+      return reply.code(409).send({ error: MAILBOX_ALREADY_CONNECTED });
+    }
+
     const smtpHost = body.smtpHost?.trim();
     const imapHost = body.imapHost?.trim();
     if (body.authPassword && (smtpHost || imapHost)) {
-      // Checked first: it's instant, and "already connected" is the useful answer for a second
-      // try — not a sign-in error from dialing the servers again.
-      const existing = await prisma.mailbox.findUnique({ where: { email }, select: { id: true } });
-      if (existing) return reply.code(409).send({ error: MAILBOX_ALREADY_CONNECTED });
-
       const username = body.authUsername || email;
       const password = body.authPassword;
       const refused = await checkMailboxSignIn({
@@ -105,21 +116,24 @@ export async function mailboxesRoutes(app: FastifyInstance): Promise<void> {
       ? encrypt(body.authPassword, encryptionKey())
       : undefined;
 
-    const created = await prisma.mailbox.create({
-      data: {
-        email,
-        domainId: body.domainId,
-        provider: body.provider ?? 'SMTP_CUSTOM',
-        dailyCap: body.dailyCap ?? 25,
-        smtpHost: body.smtpHost,
-        smtpPort: body.smtpPort,
-        imapHost: body.imapHost,
-        imapPort: body.imapPort,
-        authUsername: body.authUsername,
-        authPasswordEncrypted,
-        senderName: senderName.value,
-      },
-    });
+    const data = {
+      domainId: body.domainId,
+      provider: body.provider ?? 'SMTP_CUSTOM',
+      dailyCap: body.dailyCap ?? 25,
+      smtpHost: body.smtpHost,
+      smtpPort: body.smtpPort,
+      imapHost: body.imapHost,
+      imapPort: body.imapPort,
+      authUsername: body.authUsername,
+      authPasswordEncrypted,
+      senderName: senderName.value,
+    } as const;
+    const created = existing
+      ? await prisma.mailbox.update({
+          where: { id: existing.id },
+          data: { ...data, connectionError: null, connectionErrorAt: null },
+        })
+      : await prisma.mailbox.create({ data: { email, ...data } });
     // Never echo the encrypted credential back, even to the authenticated caller who just set it.
     const { authPasswordEncrypted: _omit, oauthRefreshTokenEncrypted: _omit2, ...safe } = created;
     return reply.code(201).send(safe);

@@ -19,6 +19,7 @@
  */
 import { prisma, type Mailbox, type WarmupPlacement } from '@warmhawk/db';
 import { sendMail, type SendMailInput } from '../mailSender';
+import { connectionErrorOf } from '../mailboxConnectionHealth';
 import { composeWarmupEmail, type Rng } from './composer';
 import {
   loadPartnerPool,
@@ -568,6 +569,8 @@ export interface WarmupMailboxView {
   lastMessageAt: string | null;
   /** The newest bounce in the 7-day window, so the page can say why without opening the log. */
   lastBounce: { at: string; reason: string } | null;
+  /** Why it can't send until it's reconnected or added again, else null. Also the `nextStep`. */
+  connectionError: string | null;
   nextStep: string;
 }
 
@@ -614,6 +617,7 @@ export async function getWarmupOverview(now: Date = new Date()): Promise<WarmupO
     const partnerCount = partnersFor(m.email, pool).length;
     const day = warmupDay(m.warmupStartedAt, now);
     const cap = campaignCapToday(m.dailyCap, m.warmupGraduatedAt, now);
+    const connectionError = connectionErrorOf(m);
     const stage: WarmupStage =
       m.status === 'PAUSED' || !m.warmupEnabled
         ? 'paused'
@@ -644,15 +648,18 @@ export async function getWarmupOverview(now: Date = new Date()): Promise<WarmupO
       dailyCap: m.dailyCap,
       lastMessageAt: last.get(m.id)?.toISOString() ?? null,
       lastBounce: lastBounce.get(m.id) ?? null,
-      nextStep: nextStepText({
-        status: m.status,
-        warmupEnabled: m.warmupEnabled,
-        partnerCount,
-        day,
-        counts: c,
-        campaignCap: cap,
-        dailyCap: m.dailyCap,
-      }),
+      connectionError,
+      nextStep:
+        connectionError ??
+        nextStepText({
+          status: m.status,
+          warmupEnabled: m.warmupEnabled,
+          partnerCount,
+          day,
+          counts: c,
+          campaignCap: cap,
+          dailyCap: m.dailyCap,
+        }),
     };
   });
 
