@@ -605,6 +605,7 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
       stepsSentCounts,
       upcomingFollowUps,
       nextSlots,
+      recentSends,
     ] = await Promise.all([
       campaignIds.length
         ? prisma.executionLog.groupBy({
@@ -712,6 +713,20 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
             _min: { queuedSlotAt: true },
           })
         : Promise.resolve([]),
+      // The same sends as `sentToday`, in 15-minute buckets, so the dashboard can count the ones
+      // since the reader's own midnight. `sentToday` is the rolling 24 hours the limit counts over.
+      campaignIds.length
+        ? prisma.$queryRaw<Array<{ campaignId: string; at: Date; count: number }>>`
+            SELECT "campaignId",
+                   to_timestamp(floor(extract(epoch FROM "createdAt") / 900) * 900) AS at,
+                   count(*)::int AS count
+            FROM "execution_logs"
+            WHERE "campaignId" IN (${Prisma.join(campaignIds)})
+              AND "status" = 'SENT'
+              AND "createdAt" > ${new Date(Date.now() - DAY_MS)}
+            GROUP BY 1, 2
+            ORDER BY 2`
+        : Promise.resolve([]),
     ]);
     const now = new Date();
     const statusCount = (campaignId: string, status: string) =>
@@ -777,6 +792,9 @@ export async function campaignsRoutes(app: FastifyInstance): Promise<void> {
             .map(({ position, at, count }) => ({ position, at, count })),
           nextSendAt:
             nextSlots.find((row) => row.campaignId === campaign.id)?._min.queuedSlotAt ?? null,
+          recentSends: recentSends
+            .filter((row) => row.campaignId === campaign.id)
+            .map(({ at, count }) => ({ at, count })),
         },
         leadsCount: campaign._count.leads,
         repliesCount: campaign._count.replies,

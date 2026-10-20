@@ -77,6 +77,28 @@ export async function recordConnectionFailure(mailboxId: string, err: unknown): 
     .catch(() => undefined);
 }
 
+/** POST /mailboxes saves the row before Google or Microsoft sign-in. When that sign-in never comes
+ *  back (Microsoft refusing a personal account stops on its own page), no callback removes the row
+ *  and it sat at "Warm-up · day 1" with nothing to say it can never send. */
+export const MAILBOX_NOT_CONNECTED =
+  "Not connected: no sign-in was saved for this mailbox, so it can't send. Remove it and add it again.";
+
+export function hasSavedSignIn(mailbox: {
+  authPasswordEncrypted: string | null;
+  oauthRefreshTokenEncrypted: string | null;
+}): boolean {
+  return Boolean(mailbox.authPasswordEncrypted || mailbox.oauthRefreshTokenEncrypted);
+}
+
+/** The stored "needs reconnect" reason, or the not-connected one for a row without a sign-in. */
+export function connectionErrorOf(mailbox: {
+  connectionError: string | null;
+  authPasswordEncrypted: string | null;
+  oauthRefreshTokenEncrypted: string | null;
+}): string | null {
+  return mailbox.connectionError ?? (hasSavedSignIn(mailbox) ? null : MAILBOX_NOT_CONNECTED);
+}
+
 /** Clears "needs reconnect" after the provider accepted the mailbox again. */
 export async function clearConnectionFailure(mailboxId: string): Promise<void> {
   await prisma.mailbox

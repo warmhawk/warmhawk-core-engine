@@ -152,20 +152,20 @@ describeIntegration('friendly error messages (integration, real Postgres)', () =
     else process.env.WARMHAWK_DOMAIN = savedWarmhawkDomain;
   });
 
-  it('a mailbox that is already connected says so (database unique constraint)', async () => {
+  it('a mailbox that is already connected says so', async () => {
     const email = `friendly-dupe-${Date.now()}@example.com`;
-    const create = () =>
+    const create = (payload: Record<string, unknown>) =>
       app.inject({
         method: 'POST',
         url: '/v1/mailboxes',
         headers: auth(),
-        payload: { email, domainId },
+        payload: { email, domainId, ...payload },
       });
-    const first = await create();
+    const first = await create({ authPassword: 'first-pw' });
     expect(first.statusCode).toBe(201);
     mailboxIds.push(first.json().id);
 
-    const second = await create();
+    const second = await create({});
     expect(second.statusCode).toBe(409);
     expect(second.json().error).toBe('This mailbox is already connected.');
   });

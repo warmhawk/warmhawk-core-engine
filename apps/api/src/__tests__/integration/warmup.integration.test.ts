@@ -275,6 +275,14 @@ describeIntegration('warmup engine + routes (integration, real Postgres)', () =>
     });
     expect(res.statusCode).toBe(422);
     expect(res.json().error).toMatch(/not fully connected/);
+
+    // The table says why it never sends, instead of "Warm-up · day 1" with nothing wrong.
+    const overview = (
+      await app.inject({ method: 'GET', url: '/v1/warmup', headers: auth() })
+    ).json();
+    const row = overview.mailboxes.find((m: { mailboxId: string }) => m.mailboxId === bare.id);
+    expect(row.connectionError).toMatch(/^Not connected: no sign-in was saved/);
+    expect(row.nextStep).toBe(row.connectionError);
   });
 
   // ---------------------------------------------------------------------------------------------

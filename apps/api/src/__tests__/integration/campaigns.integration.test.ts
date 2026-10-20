@@ -188,6 +188,35 @@ describeIntegration('campaigns routes (integration, real Postgres)', () => {
     await prisma.lead.deleteMany({ where: { campaignId: campaign.id } });
   });
 
+  it('lists the last 24 hours of sends in 15-minute buckets beside the rolling sentToday', async () => {
+    const campaign = await prisma.campaign.create({
+      data: { name: 'Recent Sends', status: 'ACTIVE', aiPromptTemplate: '' },
+    });
+    createdCampaignIds.push(campaign.id);
+    const hour = 60 * 60 * 1000;
+    const now = Date.now(); // one clock, so the two sends 20 hours ago share a bucket
+    const log = (msAgo: number, status: 'SENT' | 'FAILED' = 'SENT') =>
+      prisma.executionLog.create({
+        data: { campaignId: campaign.id, mailboxId, status, createdAt: new Date(now - msAgo) },
+      });
+    await log(20 * hour);
+    await log(20 * hour);
+    await log(1 * hour);
+    await log(1 * hour, 'FAILED');
+    await log(25 * hour); // past the window
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1/campaigns',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    const found = response.json().find((c: { id: string }) => c.id === campaign.id);
+    expect(found.progress.sentToday).toBe(3);
+    const recent = found.progress.recentSends as Array<{ at: string; count: number }>;
+    expect(recent.map((r) => r.count)).toEqual([2, 1]);
+    for (const r of recent) expect(new Date(r.at).getTime() % (15 * 60 * 1000)).toBe(0);
+  });
+
   it('fetches a campaign by id and 404s an unknown id', async () => {
     const response = await app.inject({
       method: 'GET',
