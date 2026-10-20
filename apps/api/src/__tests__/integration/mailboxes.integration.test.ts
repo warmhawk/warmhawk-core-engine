@@ -66,19 +66,82 @@ describeIntegration('mailboxes routes (integration, real Postgres)', () => {
 
   it('says plainly that a mailbox is already connected, not what Prisma said', async () => {
     const email = `dupe-${Date.now()}@example.com`;
-    const create = () =>
+    const create = (payload: Record<string, unknown>) =>
       app.inject({
         method: 'POST',
         url: '/v1/mailboxes',
         headers: { authorization: `Bearer ${authToken}` },
-        payload: { email, domainId },
+        payload: { email, domainId, ...payload },
       });
-    const first = await create();
+    const first = await create({ authPassword: 'first-pw' });
     createdMailboxIds.push(first.json().id);
 
-    const second = await create();
+    const second = await create({});
     expect(second.statusCode).toBe(409);
     expect(second.json()).toEqual({ error: 'This mailbox is already connected.' });
+  });
+
+  it('fills in a row left by a sign-in that never came back instead of calling it connected', async () => {
+    const email = `abandoned-${Date.now()}@example.com`;
+    const create = (payload: Record<string, unknown>) =>
+      app.inject({
+        method: 'POST',
+        url: '/v1/mailboxes',
+        headers: { authorization: `Bearer ${authToken}` },
+        payload: { email, domainId, ...payload },
+      });
+    // What "Connect with Microsoft" leaves behind when Microsoft never sends the user back.
+    const shell = await create({});
+    expect(shell.statusCode).toBe(201);
+    createdMailboxIds.push(shell.json().id);
+    await prisma.mailbox.update({
+      where: { id: shell.json().id },
+      data: { connectionError: 'stale reason', connectionErrorAt: new Date() },
+    });
+
+    const again = await create({
+      authUsername: 'smtp-user',
+      authPassword: 'now-a-real-pw',
+      senderName: 'Sam',
+    });
+    expect(again.statusCode).toBe(201);
+    expect(again.json().id).toBe(shell.json().id);
+
+    const stored = await prisma.mailbox.findUniqueOrThrow({ where: { id: shell.json().id } });
+    expect(stored.authPasswordEncrypted).toBeTruthy();
+    expect(stored.authUsername).toBe('smtp-user');
+    expect(stored.senderName).toBe('Sam');
+    expect(stored.connectionError).toBeNull();
+  });
+
+  it('lists a mailbox with no saved sign-in as not connected', async () => {
+    const stamp = Date.now();
+    const shell = await app.inject({
+      method: 'POST',
+      url: '/v1/mailboxes',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { email: `no-sign-in-${stamp}@example.com`, domainId },
+    });
+    const connected = await app.inject({
+      method: 'POST',
+      url: '/v1/mailboxes',
+      headers: { authorization: `Bearer ${authToken}` },
+      payload: { email: `signed-in-${stamp}@example.com`, domainId, authPassword: 'pw' },
+    });
+    createdMailboxIds.push(shell.json().id, connected.json().id);
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/mailboxes',
+      headers: { authorization: `Bearer ${authToken}` },
+    });
+    const byId = new Map(list.json().map((m: { id: string }) => [m.id, m]));
+    expect((byId.get(shell.json().id) as { connectionError: string }).connectionError).toMatch(
+      /^Not connected: no sign-in was saved/,
+    );
+    expect(
+      (byId.get(connected.json().id) as { connectionError: string | null }).connectionError,
+    ).toBeNull();
   });
 
   it('rejects a create missing email or domainId', async () => {
