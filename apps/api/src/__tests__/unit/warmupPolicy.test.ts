@@ -184,6 +184,24 @@ describe('decideStatus', () => {
       decideStatus({ status: 'WARMUP', day: 20, counts: counts({ inbox: 17, spam: 3 }) }),
     ).toBe('none');
   });
+  it('graduates from day 30 at >=70% health when it never reached 90%', () => {
+    const c = counts({ inbox: 14, spam: 6 });
+    expect(decideStatus({ status: 'WARMUP', day: 29, counts: c })).toBe('none');
+    expect(decideStatus({ status: 'WARMUP', day: 30, counts: c })).toBe('graduate');
+  });
+  it('does not graduate at day 30 below 70% or on too few checked emails', () => {
+    expect(
+      decideStatus({ status: 'WARMUP', day: 45, counts: counts({ inbox: 13, spam: 7 }) }),
+    ).toBe('none');
+    expect(
+      decideStatus({ status: 'WARMUP', day: 45, counts: counts({ inbox: 14, spam: 5 }) }),
+    ).toBe('none');
+  });
+  it('does not demote a mailbox that graduated on the day-30 fallback', () => {
+    expect(
+      decideStatus({ status: 'ACTIVE', day: 30, counts: counts({ inbox: 14, spam: 6 }) }),
+    ).toBe('none');
+  });
   it('demotes an ACTIVE mailbox under 70% with >=10 checked', () => {
     expect(decideStatus({ status: 'ACTIVE', day: 30, counts: counts({ inbox: 6, spam: 4 }) })).toBe(
       'demote',
@@ -239,7 +257,13 @@ describe('nextStepText', () => {
   });
   it('tells a warming mailbox what it still needs', () => {
     expect(nextStepText({ ...base, counts: counts({ inbox: 8, spam: 2 }) })).toBe(
-      'Needs 90%. Now at 80%.',
+      'At 80%. Needs 90%, or graduates at day 30 (21 days) if it stays above 70%.',
+    );
+    expect(nextStepText({ ...base, counts: counts({ inbox: 6, spam: 4 }) })).toBe(
+      'Needs 90%, or 70% from day 30. Now at 60%.',
+    );
+    expect(nextStepText({ ...base, day: 30, counts: counts({ inbox: 14, spam: 6 }) })).toBe(
+      'Graduates on the next check',
     );
     expect(nextStepText({ ...base, counts: counts({ inbox: 12 }) })).toBe(
       '8 more checked emails to graduate',
