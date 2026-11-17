@@ -22,7 +22,7 @@ a separate, licensed product. The code is source-available under BSL 1.1 (see [L
 
 | Guardrail | What happens |
 |---|---|
-| **Warmup before campaigns** | New mailboxes warm up for at least 14 days and graduate only when their measured inbox rate reaches 90%. |
+| **Warmup before campaigns** | New mailboxes warm up for at least 14 days and graduate when their measured inbox rate reaches 90%. A mailbox that stays below 90% graduates from day 30 at 70% or better. |
 | **Campaign ramp** | After warmup, campaign sends start at 5 a day and grow 20% a day, up to each mailbox's own daily cap. |
 | **Bounce circuit breaker** | A mailbox whose bounce rate passes 5% (after at least 20 sends) is paused and flagged before it damages the domain. |
 | **Hard vs. soft bounces** | Hard bounces mark the lead as bounced. Temporary failures retry with backoff and are suppressed after 4 attempts. |

@@ -4,7 +4,8 @@
  *
  * The model (see z-notes 09-26-26-warmhawk-warmup-engine): a mailbox sends a few real emails a
  * day to partners it can read over IMAP, WarmHawk records where each one landed, and the mailbox
- * graduates WARMUP -> ACTIVE on a measured 7-day inbox rate — never on a calendar alone.
+ * graduates WARMUP -> ACTIVE on a measured 7-day inbox rate: 90% from day 14, or 70% from day 30.
+ * Never on a calendar alone.
  */
 import type { MailboxStatus, WarmupPlacement } from '@warmhawk/db';
 
@@ -40,6 +41,11 @@ export const HEALTH_WINDOW_DAYS = 7;
 export const GRADUATE_MIN_HEALTH = 90;
 export const GRADUATE_MIN_DAY = 14;
 export const GRADUATE_MIN_CHECKED = 20;
+/** Fallback for a mailbox that never reaches GRADUATE_MIN_HEALTH (a receiving provider keeps
+ *  filtering the domain): from day 30 it graduates at this lower rate instead of warming forever.
+ *  Kept at DEMOTE_MAX_HEALTH so the mailbox isn't demoted again on its next check. */
+export const GRADUATE_FALLBACK_DAY = 30;
+export const GRADUATE_FALLBACK_MIN_HEALTH = 70;
 export const DEMOTE_MAX_HEALTH = 70;
 export const DEMOTE_MIN_CHECKED = 10;
 
@@ -193,6 +199,14 @@ export function decideStatus(params: {
   ) {
     return 'graduate';
   }
+  if (
+    status === 'WARMUP' &&
+    day >= GRADUATE_FALLBACK_DAY &&
+    checked >= GRADUATE_MIN_CHECKED &&
+    health >= GRADUATE_FALLBACK_MIN_HEALTH
+  ) {
+    return 'graduate';
+  }
   if (status === 'ACTIVE' && checked >= DEMOTE_MIN_CHECKED && health < DEMOTE_MAX_HEALTH) {
     return 'demote';
   }
@@ -237,12 +251,21 @@ export function nextStepText(params: {
       : 'Sending campaigns';
   }
   if (health === null) return 'Measuring starts after the first check';
-  if (health < GRADUATE_MIN_HEALTH) return `Needs ${GRADUATE_MIN_HEALTH}%. Now at ${health}%.`;
+  if (health < GRADUATE_FALLBACK_MIN_HEALTH) {
+    return `Needs ${GRADUATE_MIN_HEALTH}%, or ${GRADUATE_FALLBACK_MIN_HEALTH}% from day ${GRADUATE_FALLBACK_DAY}. Now at ${health}%.`;
+  }
+  if (health < GRADUATE_MIN_HEALTH && day < GRADUATE_FALLBACK_DAY) {
+    const left = GRADUATE_FALLBACK_DAY - day;
+    return `At ${health}%. Needs ${GRADUATE_MIN_HEALTH}%, or graduates at day ${GRADUATE_FALLBACK_DAY} (${left} day${left === 1 ? '' : 's'}) if it stays above ${GRADUATE_FALLBACK_MIN_HEALTH}%.`;
+  }
   const checked = checkedCount(counts);
   if (checked < GRADUATE_MIN_CHECKED) {
     return `${GRADUATE_MIN_CHECKED - checked} more checked emails to graduate`;
   }
-  const daysLeft = Math.max(0, GRADUATE_MIN_DAY - day);
+  const daysLeft = Math.max(
+    0,
+    (health < GRADUATE_MIN_HEALTH ? GRADUATE_FALLBACK_DAY : GRADUATE_MIN_DAY) - day,
+  );
   if (daysLeft > 0) return `Graduates in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
   return 'Graduates on the next check';
 }
